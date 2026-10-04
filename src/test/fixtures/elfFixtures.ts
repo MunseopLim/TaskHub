@@ -105,6 +105,29 @@ export function buildElf32WithSymbols(): Buffer {
     return assembleElf32(sections, symbols);
 }
 
+/** .data executes in RAM but its initial bytes are loaded from Flash. */
+export function buildElf32WithDataLoadAddress(): Buffer {
+    const elf = buildElf32WithSymbols();
+    const phoff = elf.length;
+    const buffer = Buffer.concat([elf, Buffer.alloc(64)]);
+    buffer.writeUInt32LE(phoff, 28);
+    buffer.writeUInt16LE(32, 42);
+    buffer.writeUInt16LE(2, 44);
+    for (const [index, sectionIndex] of [1, 3].entries()) {
+        const section = elf.readUInt32LE(32) + sectionIndex * SH_ENT_SIZE;
+        const base = phoff + index * 32;
+        buffer.writeUInt32LE(1, base);
+        buffer.writeUInt32LE(elf.readUInt32LE(section + 16), base + 4);
+        const address = elf.readUInt32LE(section + 12);
+        buffer.writeUInt32LE(address, base + 8);
+        buffer.writeUInt32LE(index === 0 ? address : 0x08000500, base + 12);
+        buffer.writeUInt32LE(index === 0 ? 0x500 : elf.readUInt32LE(section + 20), base + 16);
+        buffer.writeUInt32LE(index === 0 ? 0x500 : 0x280, base + 20);
+        buffer.writeUInt32LE(index === 0 ? 5 : 6, base + 24);
+    }
+    return buffer;
+}
+
 /** 같은 주소·크기의 별칭 심볼(약한 IRQ 핸들러 별칭 같은)이 있는 입력. Memory Map은 한 행으로 합친다. */
 export function buildElf32WithAliasSymbols(): Buffer {
     return assembleElf32([

@@ -2867,7 +2867,7 @@ export function toWorkspaceRelativePath(absolutePath: string, workspaceFolderPat
     if (rel === '' ) {
         return '${workspaceFolder}';
     }
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
         return absolutePath;
     }
     return '${workspaceFolder}/' + rel.split(path.sep).join('/');

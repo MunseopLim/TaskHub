@@ -18,6 +18,7 @@ TaskHub/
 │   │   ├── linkViewProvider.ts        # 워크스페이스 링크 패널 (.vscode/links.json)
 │   │   ├── favoriteViewProvider.ts    # 즐겨찾기 패널
 │   │   ├── historyProvider.ts         # 액션 실행 히스토리 패널
+│   │   ├── claudeSchedulesProvider.ts # 실험적 Claude 예약 목록·다음 시각·결과 표시
 │   │   ├── jenkinsViewProvider.ts     # 실험적 Jenkins 요청·빌드·단계·테스트 트리
 │   │   ├── actionStatus.ts            # 액션 실행 상태(actionStates) + 멀티 task 진행률(progress) 관리
 │   │   └── normalization.ts           # tags / line 번호 정규화 헬퍼
@@ -57,6 +58,12 @@ TaskHub/
 │   ├── developerCalculator.ts         # 주소·크기 정수 수식·정렬 순수 계산기
 │   ├── hexBitwiseUtils.ts             # 고정 폭 정수 비트 수식 파서·계산 순수 로직
 │   ├── featureLauncher.ts             # Status Bar 기능 런처·그룹형 Quick Pick·최근 사용
+│   ├── claudeScheduler/               # 실험적 Claude Code CLI 예약 실행
+│   │   ├── model.ts                   # 예약 검증·로컬 저장·시계·중복 방지·수명주기
+│   │   ├── runner.ts                  # stdin 요청·네이티브 실행·폴더 잠금·결과 보고서
+│   │   ├── budget.ts                  # 폴더 잠금 아래 비용 예약·실제 비용·24시간 사용량 저장
+│   │   ├── reportDocument.ts          # 읽기 전용 보고서 가상 문서
+│   │   └── controller.ts              # 설정 게이트·예약 편집 UI·명령·종료 연결
 │   ├── jenkins/                       # 실험적 다중 Jenkins 연동
 │   │   ├── types.ts                   # 서버·job·요청·보고서 공통 타입
 │   │   ├── lifecycle.ts               # 구버전 Extension Host 호환 취소·기한·리스너 정리
@@ -412,3 +419,9 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   `updateLock.ts`는 갱신되는 파일 잠금으로 다운로드·설치의 중복 실행을 막고, 잠금을 잃으면 취소 신호로 설치 전 작업을 중단한다. 업데이트 동작과 진입점은 [features.md §7](./features.md#github-릴리스-업데이트)에서 설명한다.
 
 보안 관련 변경 시 관련 유닛 테스트(`src/test/extension.test.ts`의 `sanitizeInterpolatedValue`, `resolveWithinWorkspace`, 파서별 `defensive` suite)를 함께 갱신한다.
+
+## Claude 예약 실행
+
+[claudeScheduler/controller.ts](../src/claudeScheduler/controller.ts)는 신뢰된 워크스페이스에서 실험적 설정을 켰을 때만 뷰·명령·타이머를 등록합니다. [model.ts](../src/claudeScheduler/model.ts)는 workspaceState에 예약 정의와 다음 시각·최종 결과를 저장하고, 슬롯을 저장한 뒤 대기열에서 순차 실행합니다. 저장 실패는 자동 실행을 중단합니다. [runner.ts](../src/claudeScheduler/runner.ts)는 쉘 없이 CLI를 시작하고 stdin으로 요청문을 전달합니다. 폴더 realpath 기반 임대 잠금과 슬롯 기록은 창 간 동시 수정·동일 시각 재실행을 막습니다. [budget.ts](../src/claudeScheduler/budget.ts)는 같은 잠금 안에서 유료 호출 전 사용량을 예약하고 비용 결과를 저장합니다. 임대가 손상되면 실행을 취소하며 CLI가 닫힐 때까지 잠금을 유지합니다. [reportDocument.ts](../src/claudeScheduler/reportDocument.ts)는 명시적으로 연 보고서만 가상 문서로 제공합니다.
+
+결과·잠금은 globalStorageUri 아래에 저장합니다. 정상 비활성화는 프로세스 트리 취소와 저장 완료를 기다리고, 강제 종료로 남은 실행 중 상태는 재시작 시 추적 중단·일시 정지로 복구합니다. CLI 실행 정책·사용법·한계는 [features.md §16.3](./features.md#163-claude-code-예약-실행)에서 관리합니다.

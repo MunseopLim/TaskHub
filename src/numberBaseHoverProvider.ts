@@ -1642,7 +1642,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     }
 
     /**
-     * Try to show struct size information when hovering over struct/class name.
+     * Try to show size information when hovering over a struct/class/union name.
      *
      * Async because `loadTypeConfig` now uses `fs.promises` to avoid blocking
      * the extension host on slow/remote storage.
@@ -1655,7 +1655,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         const line = document.lineAt(position.line);
         const lineText = line.text;
 
-        // Check if we're on a struct/class keyword or name
+        // Check if we're on an aggregate keyword or name
         const wordRange = document.getWordRangeAtPosition(position);
         if (!wordRange) {
             return null;
@@ -1663,17 +1663,21 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         const word = document.getText(wordRange);
 
-        // Check if line contains struct/class declaration
-        const structPattern = /\b(struct|class)\s+(?:alignas\s*\([^()]*\)\s*)?(\w+)/;
-        const match = lineText.match(structPattern);
+        // Select the declaration at this word, including later ones on the same line.
+        const documentLines = this.getDocumentLines(document);
+        const definition = StructSizeCalculator.findAggregateDefinitions(documentLines).find(item => item.line === position.line
+            && (word === item.name || ((word === 'struct' || word === 'class' || word === 'union') && wordRange.start.character === item.character)));
+        const structPattern = /\b(struct|class|union)\s+(?:alignas\s*\([^()]*\)\s*)?(\w+)/g;
+        const matches = [...lineText.matchAll(structPattern)];
+        const match = matches.find(candidate => word === candidate[2]
+            || ((word === 'struct' || word === 'class' || word === 'union') && wordRange.start.character === candidate.index));
 
         let structName: string | null = null;
 
-        if (match) {
-            // Check if we're hovering over the keyword or the name
-            if (word === 'struct' || word === 'class' || word === match[2]) {
-                structName = match[2];
-            }
+        if (definition) {
+            structName = definition.name;
+        } else if (match) {
+            structName = match[2];
         } else {
             // Check if we're hovering over a type name (could be struct name)
             // This is a guess - only show if it looks like a custom type (starts with uppercase)
@@ -1687,9 +1691,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         if (!structName) {
             return null;
         }
-
-        // Parse the document (read-only shared cache)
-        const documentLines = this.getDocumentLines(document);
 
         // Find struct definition
         const structLine = StructSizeCalculator.findStructDefinition(documentLines, structName);
@@ -1705,7 +1706,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         if (document.version !== sourceVersion || !this.requestActive(request)) { return null; }
         const calculator = new StructSizeCalculator(typeConfig);
 
-        // Register all struct/class definitions in the document
+        // Register all aggregate definitions in the document
         this.registerAllCustomTypes(calculator, documentLines);
 
         const result = calculator.calculateStructSize(structName, documentLines, structLine);
@@ -1760,35 +1761,16 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     }
 
     /**
-     * Register all struct/class definitions in the document as custom types
+     * Register all struct/class/union definitions in the document as custom types
      * This enables correct size calculation for nested custom types
      */
     private registerAllCustomTypes(calculator: StructSizeCalculator, lines: string[]): void {
-        // Find all struct/class definitions
-        const structPattern = /\b(struct|class)\s+(?:alignas\s*\([^()]*\)\s*)?(\w+)/g;
-        const definitions: Array<{ name: string; line: number }> = [];
         const seenNames = new Set<string>();
-
-        for (let i = 0; i < lines.length; i++) {
-            const matches = lines[i].matchAll(structPattern);
-            for (const match of matches) {
-                const name = match[2];
-                // Skip if already seen (avoid duplicates)
-                if (seenNames.has(name)) {
-                    continue;
-                }
-                // Skip forward declarations (no opening brace on same or next line)
-                const hasBody = lines[i].includes('{') ||
-                    (i + 1 < lines.length && lines[i + 1].includes('{'));
-                if (hasBody) {
-                    definitions.push({ name, line: i });
-                    seenNames.add(name);
-                }
-            }
-        }
-
-        // Sort by line number to handle dependencies (earlier definitions first)
-        definitions.sort((a, b) => a.line - b.line);
+        const definitions = StructSizeCalculator.findAggregateDefinitions(lines).filter(definition => {
+            if (seenNames.has(definition.name)) { return false; }
+            seenNames.add(definition.name);
+            return true;
+        });
 
         // Register each custom type with multiple passes to resolve dependencies
         // This handles cases where type B uses type A, but A is defined after B

@@ -76,6 +76,13 @@ export interface StructSizeResult {
 }
 
 type AggregateKind = 'struct' | 'class' | 'union';
+export interface AggregateDefinition {
+    readonly name: string;
+    readonly kind: AggregateKind;
+    readonly line: number;
+    readonly character: number;
+    readonly hasUnsupportedPrefix: boolean;
+}
 
 /**
  * 멤버 파싱 결과. `unparsed`는 선언자 매칭에 실패해 레이아웃에서 빠진 선언문
@@ -166,6 +173,7 @@ export class StructSizeCalculator {
     // Frozen line arrays are immutable document-version snapshots from the hover
     // provider. Weak keys let old documents go without retaining a global history.
     private static readonly packingBySource = new WeakMap<string[], readonly boolean[]>();
+    private static readonly definitionsBySource = new WeakMap<string[], readonly AggregateDefinition[]>();
     private typeConfig: TypeConfigFile;
     private customTypes: Map<string, StructSizeResult> = new Map();
 
@@ -197,14 +205,20 @@ export class StructSizeCalculator {
                     error: 'Struct definition not found'
                 };
             }
-            const aggregateKind = this.getAggregateKind(lines[startLine]);
-            const aggregate = this.extractAggregateSource(lines, startLine);
+            const definition = StructSizeCalculator.findAggregateDefinitions(lines)
+                .find(item => item.name === structName && item.line === startLine);
+            const startCharacter = definition?.character ?? 0;
+            const aggregateKind = definition?.kind ?? this.getAggregateKind(lines[startLine]);
+            const aggregate = this.extractAggregateSource(lines, startLine, startCharacter);
             const { members, unparsed } = aggregate
                 ? this.parseMemberStatements(aggregate.body)
                 : { members: [], unparsed: [] };
             if (aggregate && /\b(?:alignas|__attribute__|__declspec)\b|\[\[|;|:(?!:)/u.test(aggregate.header + aggregate.suffix)) {
                 unparsed.push(aggregate.header.trim());
             }
+            // An attribute before the keyword belongs to this declaration, while
+            // a previous declaration on the same line must not become its header.
+            if (definition?.hasUnsupportedPrefix) { unparsed.push('Unsupported declaration attributes'); }
             // Source-level packing is compiler/preprocessor dependent. The explicit
             // taskhub_types.json packing setting is the only packing input we apply.
             if (this.hasActiveSourcePacking(lines, startLine)) {
@@ -304,7 +318,7 @@ export class StructSizeCalculator {
     }
 
     /** Scan only this declaration, ending at the semicolon after its closing brace. */
-    private extractAggregateSource(lines: string[], startLine: number): AggregateSource | null {
+    private extractAggregateSource(lines: string[], startLine: number, startCharacter: number): AggregateSource | null {
         const result: AggregateSource = { header: '', body: '', suffix: '' };
         let part: keyof AggregateSource = 'header';
         let braceDepth = 0;
@@ -313,7 +327,7 @@ export class StructSizeCalculator {
 
         for (let i = startLine; i < lines.length; i++) {
             const line = lines[i];
-            for (let ci = 0; ci < line.length; ci++) {
+            for (let ci = i === startLine ? startCharacter : 0; ci < line.length; ci++) {
                 const ch = line[ci];
                 const next = line[ci + 1] ?? '';
                 if (inBlockComment) {
@@ -969,7 +983,7 @@ export class StructSizeCalculator {
     }
 
     /**
-     * Register a custom type (struct/class) for use in other structs
+     * Register a custom type (struct/class/union) for use in other aggregates
      */
     registerCustomType(result: StructSizeResult): void {
         this.customTypes.set(result.structName, result);
@@ -989,20 +1003,44 @@ export class StructSizeCalculator {
      * Find struct definition in source code
      */
     static findStructDefinition(lines: string[], structName: string): number {
-        const escapedName = structName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return this.findAggregateDefinitions(lines).find(definition => definition.name === structName)?.line ?? -1;
+    }
+
+    /** Shared by direct lookup, extraction and nested-type registration. */
+    static findAggregateDefinitions(lines: string[]): readonly AggregateDefinition[] {
+        const cached = this.definitionsBySource.get(lines);
+        if (cached) { return cached; }
         const source = lines.join('\n').replace(
             /"(?:\\.|[^"\\])*"|(?<!\w)(?:u8|[uUL])?'(?:\\.|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
             token => token.replace(/[^\n]/g, ' ')
         );
-        const pattern = new RegExp(`\\b(struct|class|union)\\s+(?:alignas\\s*\\([^()]*\\)\\s*)?${escapedName}\\b`, 'g');
+        const pattern = /\b(struct|class|union)\s+(?:(?:alignas\s*\([^()]*\)|__attribute__\s*\(\([^;{}]*?\)\))\s*)?([A-Za-z_]\w*)\b/g;
+        const definitions: AggregateDefinition[] = [];
+        let line = 0;
+        let lineStart = 0;
         for (const match of source.matchAll(pattern)) {
             const rest = source.slice(match.index! + match[0].length);
             if (/^\s*(?:final\s*)?(?::[^;{]*)?\{/u.test(rest)) {
-                return source.slice(0, match.index).split('\n').length - 1;
+                let newline = source.indexOf('\n', lineStart);
+                while (newline >= 0 && newline < match.index!) {
+                    line++;
+                    lineStart = newline + 1;
+                    newline = source.indexOf('\n', lineStart);
+                }
+                const prefix = source.slice(lineStart, match.index).split(/[;{}]/u).pop() ?? '';
+                definitions.push(Object.freeze({
+                    name: match[2],
+                    kind: match[1] as AggregateKind,
+                    line,
+                    character: match.index! - lineStart,
+                    hasUnsupportedPrefix: /\b(?:alignas|__attribute__|__declspec)\b|\[\[/u.test(prefix)
+                }));
             }
         }
-
-        return -1;
+        Object.freeze(definitions);
+        // Mutable API inputs are rescanned after edits, just like packing metadata.
+        if (Object.isFrozen(lines)) { this.definitionsBySource.set(lines, definitions); }
+        return definitions;
     }
 
     private getAggregateKind(line: string): AggregateKind {

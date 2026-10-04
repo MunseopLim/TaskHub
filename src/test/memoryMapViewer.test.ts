@@ -22,6 +22,7 @@ import {
     buildDwarf4LineSection,
     buildElf32WithDwarf5Lines,
     buildElf32WithDwarfLines,
+    buildElf32WithDataLoadAddress,
     buildElf32WithSymbols,
     buildElf32WithThumbSymbols,
     buildMinimalElf32,
@@ -53,11 +54,11 @@ suite('Memory Map Viewer Test Suite', () => {
         tmpFiles = [];
     });
 
-    function createTempElf(subDir: string, fileName: string): string {
+    function createTempElf(subDir: string, fileName: string, buffer = elfBuf): string {
         const dir = path.join(tmpDir, 'taskhub-test', subDir);
         fs.mkdirSync(dir, { recursive: true });
         const filePath = path.join(dir, fileName);
-        fs.writeFileSync(filePath, elfBuf);
+        fs.writeFileSync(filePath, buffer);
         tmpFiles.push(filePath);
         return filePath;
     }
@@ -92,9 +93,9 @@ suite('Memory Map Viewer Test Suite', () => {
         assert.strictEqual(panelRegistry.size(), 1, 'should still have 1 panel');
     });
 
-    test('실제 브라우저의 타입 배지는 밝은·어두운·고대비 테마에서 전경과 배경을 함께 적용한다', async function () {
+    test('실제 브라우저의 타입 배지와 LOAD 막대는 밝은·어두운·고대비 테마에서 색을 적용한다', async function () {
         this.timeout(25000);
-        const filePath = createTempElf('badge-contrast', 'badge-contrast.elf');
+        const filePath = createTempElf('badge-contrast', 'badge-contrast.elf', buildElf32WithDataLoadAddress());
         const originalCreate = vscode.window.createWebviewPanel;
         let panel: vscode.WebviewPanel | undefined;
         let subscription: vscode.Disposable | undefined;
@@ -104,7 +105,12 @@ suite('Memory Map Viewer Test Suite', () => {
                 panel = originalCreate(...args);
                 return panel;
             }) as typeof originalCreate;
-            assert.ok(openMemoryMapPanel({ subscriptions: [] } as unknown as vscode.ExtensionContext, filePath));
+            assert.ok(openMemoryMapPanel({ subscriptions: [] } as unknown as vscode.ExtensionContext, filePath, {
+                regions: [
+                    { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
+                    { name: 'RAM', origin: 0x20000000, size: 0x1000 },
+                ],
+            }));
             assert.ok(panel);
             const html = panel.webview.html;
             const scriptTag = html.match(/<script nonce="[^"]+">/)?.[0];
@@ -116,9 +122,10 @@ suite('Memory Map Viewer Test Suite', () => {
                 window.addEventListener('error', event => api.postMessage({ command: 'testError', error: event.message }));
                 window.addEventListener('unhandledrejection', event => api.postMessage({ command: 'testError', error: String(event.reason) }));
                 document.addEventListener('DOMContentLoaded', () => {
+                    window.foldAll(false);
                     const renderedBadge = document.querySelector('.type-badge');
                     if (!renderedBadge) { api.postMessage({ command: 'testError', error: 'Missing rendered type badge' }); return; }
-                    const badges = ['code', 'data', 'rodata', 'nobits', 'free'].map(type => {
+                    const badges = ['code', 'data', 'rodata', 'nobits', 'load', 'free'].map(type => {
                         const badge = renderedBadge.cloneNode(false);
                         badge.className = 'type-badge type-' + type;
                         badge.textContent = type.toUpperCase();
@@ -138,11 +145,20 @@ suite('Memory Map Viewer Test Suite', () => {
                         style.setProperty('--vscode-badge-foreground', theme.fg);
                         style.setProperty('--vscode-badge-background', theme.bg);
                         style.setProperty('--vscode-contrastBorder', theme.border);
-                        return { name: theme.name, badges: badges.map(badge => {
-                            const style = getComputedStyle(badge);
-                            return { text: badge.textContent, fg: style.color, bg: style.backgroundColor,
-                                border: style.borderTopColor, borderWidth: style.borderTopWidth };
-                        }) };
+                        style.setProperty('--vscode-charts-yellow', '#d7ba7d');
+                        const load = document.querySelector('.map-bar .seg-load');
+                        const free = document.querySelector('.map-bar .seg-free');
+                        if (!load || !free) { throw new Error('Missing actual LOAD or FREE segment'); }
+                        return {
+                            name: theme.name,
+                            load: getComputedStyle(load).backgroundColor,
+                            free: getComputedStyle(free).backgroundColor,
+                            badges: badges.map(badge => {
+                                const style = getComputedStyle(badge);
+                                return { text: badge.textContent, fg: style.color, bg: style.backgroundColor,
+                                    border: style.borderTopColor, borderWidth: style.borderTopWidth };
+                            })
+                        };
                     });
                     api.postMessage({ command: 'testBadgeThemes', results });
                 }, { once: true });
@@ -169,7 +185,9 @@ suite('Memory Map Viewer Test Suite', () => {
                         };
                         assert.strictEqual(message.results.length, expected.length);
                         message.results.forEach((theme: any, index: number) => {
-                            assert.strictEqual(theme.badges.length, 5);
+                            assert.strictEqual(theme.badges.length, 6);
+                            assert.strictEqual(theme.load, 'rgb(215, 186, 125)', `${theme.name}: LOAD must use its theme color`);
+                            assert.notStrictEqual(theme.load, theme.free, `${theme.name}: LOAD must differ from free space`);
                             for (const badge of theme.badges) {
                                 assert.strictEqual(badge.fg, expected[index][0], `${theme.name} ${badge.text} foreground`);
                                 assert.strictEqual(badge.bg, expected[index][1], `${theme.name} ${badge.text} background`);
@@ -757,6 +775,18 @@ suite('Memory Map Viewer Test Suite', () => {
     });
 
     suite('DWARF source path resolution', () => {
+        test('..cache 폴더도 워크스페이스 suffix로 찾고 부모 탈출 후보는 제외한다', () => {
+            const root = path.resolve('/workspace/project');
+            const source = path.join(root, '..cache', 'generated.c');
+            const probed: string[] = [];
+            const result = resolveDwarfSourcePathCandidates('/old/agent/project/..cache/generated.c', '/repo/app.elf', [root], candidate => {
+                probed.push(candidate); return candidate === source;
+            });
+            assert.deepStrictEqual(result, [source]);
+            assert.ok(probed.includes(source));
+            const outside = path.resolve(root, '..', 'generated.c');
+            assert.ok(!resolveDwarfSourcePathCandidates('/old/../generated.c', '/repo/app.elf', [root], candidate => candidate === outside).includes(outside));
+        });
         test('ELF 인접 상대 경로와 워크스페이스의 가장 긴 suffix를 찾는다', () => {
             const existing = new Set([
                 path.resolve('/repo/build/src/local.c'),

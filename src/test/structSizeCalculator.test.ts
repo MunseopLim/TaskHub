@@ -2,6 +2,50 @@ import * as assert from 'assert';
 import { StructSizeCalculator, TypeConfigFile, StructSizeResult } from '../structSizeCalculator';
 
 suite('StructSizeCalculator Test Suite', () => {
+    test('같은 줄의 여러 정의는 요청한 이름의 시작 열부터 읽는다', () => {
+        const lines = ['struct A { char a; }; struct B { uint32_t b[3]; };'];
+        const calculator = new StructSizeCalculator();
+        for (const [name, expected] of [['A', 1], ['B', 12]] as const) {
+            const result = calculator.calculateStructSize(name, lines, StructSizeCalculator.findStructDefinition(lines, name));
+            assert.strictEqual(result.success, true, result.error);
+            assert.strictEqual(result.totalSize, expected, name);
+        }
+    });
+    test('같은 줄의 struct 뒤 union은 자신의 종류로 레이아웃을 계산한다', () => {
+        const lines = ['struct A { char a; }; union Value { uint32_t word; char byte; };'];
+        const result = new StructSizeCalculator().calculateStructSize('Value', lines, StructSizeCalculator.findStructDefinition(lines, 'Value'));
+        assert.strictEqual(result.success, true, result.error);
+        assert.strictEqual(result.totalSize, 4);
+        assert.deepStrictEqual(result.members.map(member => member.offset), [0, 0]);
+    });
+    test('정의 탐색은 실제 본문만 모으고 mutable 입력의 편집을 다시 반영한다', () => {
+        const lines = ['/* struct Fake { char x; }; */ struct Header;',
+            'struct Packet { struct Header *hdr; uint8_t len; };',
+            'struct Header /* body */\n{ uint32_t words[3]; };'];
+        assert.deepStrictEqual(StructSizeCalculator.findAggregateDefinitions(lines).map(definition => definition.name), ['Packet', 'Header']);
+        const calculator = new StructSizeCalculator();
+        let result = calculator.calculateStructSize('Header', lines, 2);
+        assert.strictEqual(result.totalSize, 12);
+        lines[2] = 'struct Header { char one; };';
+        result = calculator.calculateStructSize('Header', lines, 2);
+        assert.strictEqual(result.totalSize, 1);
+    });
+    test('선언 앞의 실제 속성은 거절하지만 속성처럼 보이는 주석은 무시한다', () => {
+        const calculator = new StructSizeCalculator();
+        for (const source of ['alignas(16)', '[[gnu::packed]]', '__attribute__((packed))']) {
+            assert.strictEqual(calculator.calculateStructSize('S', [`${source} struct S { char a; int b; };`], 0).success, false);
+        }
+        const result = calculator.calculateStructSize('S', ['/* alignas(16) [[gnu::packed]] */ struct S { char a; int b; };'], 0);
+        assert.strictEqual(result.success, true, result.error);
+        assert.strictEqual(result.totalSize, 8);
+    });
+    test('GCC 속성이 붙은 정의도 찾지만 packed 레이아웃은 성공으로 확정하지 않는다', () => {
+        const lines = ['struct __attribute__((packed, aligned(1))) packet { char a; uint32_t b; };'];
+        assert.strictEqual(StructSizeCalculator.findStructDefinition(lines, 'packet'), 0);
+        const result = new StructSizeCalculator().calculateStructSize('packet', lines, 0);
+        assert.strictEqual(result.success, false);
+        assert.match(result.error ?? '', /Unparsed/);
+    });
     test('전방 선언·포인터·주석 뒤의 실제 정의를 찾아 크기를 계산한다', () => {
         const lines = [
             '// struct Header { int wrong; };',

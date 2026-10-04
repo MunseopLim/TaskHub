@@ -1339,7 +1339,7 @@ export function resolveDwarfSourcePathCandidates(
             if (suffix.includes('..')) { continue; }
             const candidate = path.resolve(root, ...suffix);
             const relative = path.relative(path.resolve(root), candidate);
-            if (relative.startsWith('..') || path.isAbsolute(relative)) { continue; }
+            if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) { continue; }
             if (exists(candidate)) {
                 add(candidate);
                 // The first hit uses the longest matching suffix in this workspace root.
@@ -3066,6 +3066,7 @@ function getWebviewContent(
     .seg-code { background: var(--vscode-charts-blue, #2196f3); }
     .seg-rodata { background: var(--vscode-charts-purple, #9c27b0); }
     .seg-data { background: var(--vscode-charts-orange, #ff9800); }
+    .seg-load { background: var(--vscode-charts-yellow, #d7ba7d); }
     .seg-nobits { background: var(--vscode-charts-lines, #607d8b); }
     .seg-free { background: rgba(128,128,128,0.15); }
     .free-row { opacity: 0.55; font-style: italic; }

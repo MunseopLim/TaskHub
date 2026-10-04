@@ -15,6 +15,7 @@ import { promptLinkTitle, readClipboardLinkUrl } from './linkInput';
 import type { MemoryMapConfig, MemoryMapOpenHistory } from './memoryMapViewer';
 import type { HexViewerOpenHistory } from './hexViewer';
 import { registerJenkins } from './jenkins/controller';
+import { ClaudeSchedulerRegistration, registerClaudeScheduler } from './claudeScheduler/controller';
 import { registerFeatureLauncher } from './featureLauncher';
 import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
 import { registerUpdateService } from './updateService';
@@ -11920,6 +11921,8 @@ export async function saveActionFolderState(context: vscode.ExtensionContext, fo
     }
 }
 
+let claudeSchedulerRegistration: ClaudeSchedulerRegistration | undefined;
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     startRegexWorkerPool();
     // 파일/폴더 다이얼로그의 마지막 위치 저장소. 등록 전에 열린 다이얼로그는
@@ -11936,8 +11939,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const whatsNew = registerWhatsNew(context);
     registerFeatureLauncher(context, whatsNew);
     context.subscriptions.push(registerJenkins(context));
+    claudeSchedulerRegistration = registerClaudeScheduler(context, killProcessTree);
+    context.subscriptions.push(claudeSchedulerRegistration);
     registerUpdateService(context, {
-        hasRunningActions: () => collectRunningActionIds().length > 0 || activeTasks.size > 0 || actionChildProcesses.size > 0,
+        hasRunningActions: () => collectRunningActionIds().length > 0 || activeTasks.size > 0 || actionChildProcesses.size > 0 || claudeSchedulerRegistration?.hasRunning() === true,
         log: message => outputChannel.appendLine(message),
     });
     // Publish the initial (idle) value so the *Stop All Actions* button is
@@ -14161,6 +14166,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export async function deactivate(): Promise<void> {
+    await claudeSchedulerRegistration?.shutdown();
+    claudeSchedulerRegistration = undefined;
     shutdownRegexWorkerPool();
     backgroundCompletionBatcher?.dispose();
     backgroundCompletionBatcher = undefined;

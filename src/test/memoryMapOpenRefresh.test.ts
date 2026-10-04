@@ -17,7 +17,7 @@ import {
 } from '../extension';
 import { filePathIdentityKey } from '../pathIdentity';
 import { parseElf32 } from '../elfParser';
-import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
+import { buildElf32WithDataLoadAddress, buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
 
 type MessageHandler = (message: any) => Promise<void> | void;
 
@@ -190,25 +190,9 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
     });
 
     test('ELF 로드 주소가 Flash 합계·영역 행·Hex 파일 범위에 함께 반영된다', () => {
-        const elf = buildElf32WithSymbols();
-        const sections = parseElf32(elf).sections;
-        const text = sections.find(section => section.name === '.text')!;
+        const buffer = buildElf32WithDataLoadAddress();
+        const sections = parseElf32(buffer).sections;
         const data = sections.find(section => section.name === '.data')!;
-        const phoff = elf.length;
-        const buffer = Buffer.concat([elf, Buffer.alloc(64)]);
-        buffer.writeUInt32LE(phoff, 28);
-        buffer.writeUInt16LE(32, 42);
-        buffer.writeUInt16LE(2, 44);
-        for (const [index, section] of [text, data].entries()) {
-            const base = phoff + index * 32;
-            buffer.writeUInt32LE(1, base);
-            buffer.writeUInt32LE(section.offset!, base + 4);
-            buffer.writeUInt32LE(section.addr, base + 8);
-            buffer.writeUInt32LE(index === 0 ? section.addr : 0x08000500, base + 12);
-            buffer.writeUInt32LE(index === 0 ? 0x500 : section.size, base + 16);
-            buffer.writeUInt32LE(index === 0 ? 0x500 : 0x280, base + 20);
-            buffer.writeUInt32LE(index === 0 ? 5 : 6, base + 24);
-        }
         const filePath = path.join(tempDir, 'load-data.elf');
         fs.writeFileSync(filePath, buffer);
         assert.strictEqual(openMemoryMapFromUri(

@@ -63,8 +63,8 @@ suite('TaskHub 기능 런처', () => {
             .filter(item => item.kind !== vscode.QuickPickItemKind.Separator)
             .map(item => item.featureId);
         const uniqueFeatureIds = new Set(allFeatureIds);
-        assert.strictEqual(uniqueFeatureIds.size, 14);
-        assert.strictEqual(allFeatureIds.length, 14, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
+        assert.strictEqual(uniqueFeatureIds.size, 15);
+        assert.strictEqual(allFeatureIds.length, 15, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
         assert.ok(allFeatureIds.every(id => typeof id === 'string'));
         assert.ok(items.filter(item => item.featureId).every(item => item.label.includes('$(')));
     });
@@ -90,7 +90,7 @@ suite('TaskHub 기능 런처', () => {
         assert.strictEqual(enableJenkins[0].command, 'workbench.action.openSettings');
         assert.notStrictEqual(enableJenkins[0].label, jenkins[0].label);
         assert.strictEqual(disabled[1].featureId, 'jenkins');
-        assert.strictEqual(disabled.filter(item => item.featureId).length, 14);
+        assert.strictEqual(disabled.filter(item => item.featureId).length, 15);
         assert.ok(buildFeatureLauncherItems([], 0, false).some(item => item.featureId === 'jenkins'),
             '최근 사용 기록이 없는 신규 사용자에게도 활성화 경로를 표시해야 한다');
     });

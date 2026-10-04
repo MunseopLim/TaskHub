@@ -191,6 +191,57 @@ suite('NumberBaseHoverProvider Test Suite', () => {
     });
 
     suite('Struct size hover accuracy and guidance', () => {
+        test('GCC packed 정의의 이름과 키워드는 추정값 대신 계산 불가 안내를 표시한다', async () => {
+            const content = 'struct __attribute__((packed)) packet { char a; uint32_t b; };';
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content });
+            const cancellation = new vscode.CancellationTokenSource();
+            try {
+                for (const character of [content.indexOf('packet') + 1, 1]) {
+                    const hover = await new NumberBaseHoverProvider(() => undefined).provideHover(document, new vscode.Position(0, character), cancellation.token);
+                    assert.ok(hover);
+                    const markdown = visibleMarkdownText(hover.contents[0] as vscode.MarkdownString);
+                    assert.match(markdown, /Cannot calculate|계산할 수 없습니다/);
+                    assert.ok(!/Estimated Size|추정 크기/.test(markdown));
+                }
+            } finally { cancellation.dispose(); }
+        });
+        for (const content of [
+            'struct Packet { struct Header *hdr; uint8_t len; };\nstruct Header { uint32_t words[3]; };\nstruct Outer { struct Header h; };',
+            '/* struct Header { char wrong; }; */\nstruct Header *hdr;\nstruct Packet { char a; };\nstruct Header\n{ uint32_t words[3]; };\nstruct Outer { Header h; };',
+            'struct A { char a; }; struct Header { uint32_t words[3]; };\nstruct Outer { Header h; };',
+            'struct Packet { union Header *hdr; uint8_t len; };\nunion Header { uint32_t words[3]; uint8_t byte; };\nstruct Outer { union Header h; };',
+        ]) {
+            test(`문서의 실제 정의를 등록해 Outer를 12바이트로 표시한다: ${content}`, async () => {
+                const document = await vscode.workspace.openTextDocument({ language: 'cpp', content });
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const lines = content.split('\n');
+                    const lastLine = lines.length - 1;
+                    const hover = await new NumberBaseHoverProvider(() => undefined).provideHover(document,
+                        new vscode.Position(lastLine, lines[lastLine].indexOf('Outer') + 1), cancellation.token);
+                    assert.ok(hover);
+                    const markdown = visibleMarkdownText(hover.contents[0] as vscode.MarkdownString);
+                    assert.match(markdown, /Struct: Outer/);
+                    assert.match(markdown, /(?:Estimated Size|추정 크기).*12 bytes/);
+                } finally { cancellation.dispose(); }
+            });
+        }
+        for (const kind of ['struct', 'union']) {
+            test(`한 줄에 있는 두 번째 ${kind} 타입 이름과 키워드도 해당 정의의 hover를 표시한다`, async () => {
+                const content = `struct A { char a; }; ${kind} B { uint32_t b[3]; };`;
+                const document = await vscode.workspace.openTextDocument({ language: 'cpp', content });
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    for (const character of [content.indexOf('B {'), content.lastIndexOf(kind) + 1]) {
+                        const hover = await new NumberBaseHoverProvider(() => undefined).provideHover(document, new vscode.Position(0, character), cancellation.token);
+                        assert.ok(hover);
+                        const markdown = visibleMarkdownText(hover.contents[0] as vscode.MarkdownString);
+                        assert.match(markdown, /Struct: B/);
+                        assert.match(markdown, /(?:Estimated Size|추정 크기).*12 bytes/);
+                    }
+                } finally { cancellation.dispose(); }
+            });
+        }
         test('supported declarations show a configured estimate rather than a compiler result', async () => {
             const document = await vscode.workspace.openTextDocument({
                 language: 'cpp', content: 'struct Sample { int x{}; char y; };'

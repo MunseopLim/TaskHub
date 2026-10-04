@@ -6955,6 +6955,12 @@ suite('Extension Test Suite', () => {
 	});
 
 	suite('toWorkspaceRelativePath', () => {
+        test('..cache 같은 폴더 이름은 상대 경로로 저장하고 실제 부모 경로는 거부한다', () => {
+            const root = path.resolve('/tmp/taskhub-ws');
+            assert.strictEqual(toWorkspaceRelativePath(path.join(root, '..cache', 'src', 'a.c'), root), '${workspaceFolder}/..cache/src/a.c');
+            assert.strictEqual(toWorkspaceRelativePath(path.join(root, '..', 'outside.c'), root), path.join(root, '..', 'outside.c'));
+            assert.strictEqual(toWorkspaceRelativePath(root, root), '${workspaceFolder}');
+        });
 		test('converts a file inside the workspace to ${workspaceFolder} form', () => {
 			const root = path.resolve('/tmp/taskhub-ws');
 			const file = path.join(root, 'src', 'index.ts');
