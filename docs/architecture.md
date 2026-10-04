@@ -19,7 +19,6 @@ TaskHub/
 │   │   ├── favoriteViewProvider.ts    # 즐겨찾기 패널
 │   │   ├── historyProvider.ts         # 액션 실행 히스토리 패널
 │   │   ├── claudeSchedulesProvider.ts # 실험적 Claude 예약 목록·다음 시각·결과 표시
-│   │   ├── jenkinsViewProvider.ts     # 실험적 Jenkins 요청·빌드·단계·테스트 트리
 │   │   ├── actionStatus.ts            # 액션 실행 상태(actionStates) + 멀티 task 진행률(progress) 관리
 │   │   └── normalization.ts           # tags / line 번호 정규화 헬퍼
 │   ├── pipelineUtils.ts               # 순수 유틸리티 (vscode 의존 없음)
@@ -58,24 +57,13 @@ TaskHub/
 │   ├── developerCalculator.ts         # 주소·크기 정수 수식·정렬 순수 계산기
 │   ├── hexBitwiseUtils.ts             # 고정 폭 정수 비트 수식 파서·계산 순수 로직
 │   ├── featureLauncher.ts             # Status Bar 기능 런처·그룹형 Quick Pick·최근 사용
+│   ├── retiredJenkinsCleanup.ts       # 제거된 Jenkins 기능의 API token·이력 정리 (활성화 시)
 │   ├── claudeScheduler/               # 실험적 Claude Code CLI 예약 실행
 │   │   ├── model.ts                   # 예약 검증·로컬 저장·시계·중복 방지·수명주기
 │   │   ├── runner.ts                  # stdin 요청·네이티브 실행·폴더 잠금·결과 보고서
 │   │   ├── budget.ts                  # 폴더 잠금 아래 비용 예약·실제 비용·24시간 사용량 저장
 │   │   ├── reportDocument.ts          # 읽기 전용 보고서 가상 문서
 │   │   └── controller.ts              # 설정 게이트·예약 편집 UI·명령·종료 연결
-│   ├── jenkins/                       # 실험적 다중 Jenkins 연동
-│   │   ├── types.ts                   # 서버·job·요청·보고서 공통 타입
-│   │   ├── lifecycle.ts               # 구버전 Extension Host 호환 취소·기한·리스너 정리
-│   │   ├── inventory.ts               # 서버별 탐색 커서와 회차별 공통 후보 목록
-│   │   ├── messages.ts                # 오류·상태 한국어/영어 안내
-│   │   ├── logDocument.ts             # 세션 메모리의 읽기 전용 로그 문서
-│   │   ├── client.ts                  # 인증된 Jenkins API·URL 경계·시간/크기 제한
-│   │   ├── model.ts                   # 빌드 연결·manifest 검증·완전성을 반영한 결과 집계
-│   │   ├── tracking.ts                # 대기열·빌드 polling과 하위 실행 탐색
-│   │   ├── storage.ts                 # 서버·요청 이력 저장과 SecretStorage token 분리
-│   │   ├── git.ts                     # Git 저장소의 현재 브랜치·SHA·변경 상태 조회
-│   │   └── controller.ts              # 기능 게이트·서버/요청 UI·상태 표시·알림 수명주기
 │   ├── githubUpdate.ts                # 공개 GitHub 릴리스 조회·VSIX 다운로드·무결성/호환성 검증
 │   ├── updateService.ts               # 업데이트 확인 주기·알림/설치·설정과 명령 수명주기
 │   ├── updateLock.ts                  # 여러 창의 업데이트 잠금·설치 완료 버전 원자 저장
@@ -152,7 +140,6 @@ TaskHub/
 *   **LinkViewProvider** ([providers/linkViewProvider.ts](../src/providers/linkViewProvider.ts)): Workspace 링크 관리
 *   **FavoriteViewProvider** ([providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts)): 즐겨찾기 파일 관리
 *   **HistoryProvider** ([providers/historyProvider.ts](../src/providers/historyProvider.ts)): 액션 실행 및 TaskHub 도구 열람 히스토리 관리 (`workspaceState` 백엔드)
-*   **JenkinsViewProvider** ([providers/jenkinsViewProvider.ts](../src/providers/jenkinsViewProvider.ts)): 실험적 Jenkins 기능을 켠 경우에만 등록하는 요청·빌드·단계·테스트 결과 트리
 
 Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 [inputProfiles.ts](../src/inputProfiles.ts)가 담당합니다. `extension.ts`는 History와 액션 메뉴 UI를 연결하고,
@@ -195,20 +182,6 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 
 **LSP 통합:** `vscode.commands.executeCommand('vscode.executeDefinitionProvider', ...)` 사용
 **캐시:** mtime 기반 캐시로 `taskhub_types.json` 설정 로드 최적화
-
-### 4. Jenkins 테스트 추적
-
-[jenkins/controller.ts](../src/jenkins/controller.ts)는 실험적 기능 설정에 따라 명령·뷰·상태 표시줄과 polling 수명주기를
-연결합니다. [jenkins/tracking.ts](../src/jenkins/tracking.ts)는 저장된 대기열을 실제 빌드에 연결하고, 등록 서버별 최근 빌드와
-대표 빌드의 manifest를 읽습니다. [jenkins/model.ts](../src/jenkins/model.ts)는 요청별 ID와 서버·빌드 URL로 실행을 구분하고,
-upstream cause·선택적 요청 ID·manifest에 근거한 레거시 연결과 결과 집계를 담당합니다. SHA 관측은 [shaTracking.ts](../src/jenkins/shaTracking.ts)가 선택된 job 범위 안에서 수행하며 요청 회차 간 이력을 합치지 않습니다.
-
-서버 설정은 [jenkins/storage.ts](../src/jenkins/storage.ts)를 통해 `globalState`, 요청 이력과 job 파라미터 연결은
-`workspaceState`에 보관하고 API token은 `SecretStorage`에 분리합니다. 저장 시 허용한 표시 필드만 선택하고
-원본 actions·파라미터·로그·JUnit 오류 본문은 남기지 않습니다.
-[jenkins/git.ts](../src/jenkins/git.ts)는 저장소 상태와 원격 브랜치를 읽기만 하며 commit·push를 실행하지 않습니다.
-집계 숫자는 대표 빌드와 하위 빌드를 각각 한 번씩 포함합니다. 대표 결과와 발견한 실행 목록의 완전성은 별개로 관리하며, 하위 테스트가 모두 발견됐다는 근거 없이 전체 PASS를 계산하지 않습니다.
-사용자 설정·사내 시험 절차·manifest 형식과 한계는 [features.md §16.2](./features.md#162-jenkins-테스트-추적)에서 관리합니다.
 
 ## 데이터 구조
 
@@ -287,6 +260,9 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 *   **새로운 기능 읽음 기록**: `globalStorageUri/whats-new/`에 빈 파일 `baseline-<x.y.z>`와
     `read-<x.y.z>`를 추가하는 방식으로 저장한다. 유효한 정식 버전의 일반 파일만 읽으며, 최초 실행이
     여러 창에서 겹치면 가장 낮은 기준 버전을 선택한다. 기존 기록을 덮어쓰지 않아 동시 읽음 저장을 보존한다.
+*   **제거된 Jenkins 데이터**: 0.8.59 이전에 저장된 서버 목록(`globalState`)·요청 이력(`workspaceState`)·API token(`SecretStorage`)은
+    활성화 때 [retiredJenkinsCleanup.ts](../src/retiredJenkinsCleanup.ts)가 지운다. 요청 이력은 해당 워크스페이스를 열 때 지우고, 서버 목록은 token 뒤에 지워 실패 시 다음 활성화에서 다시 시도한다.
+    token은 서버 목록으로 키를 계산해 지우므로, 구버전에서 서버 삭제·주소 변경 도중 실패해 목록에 없는 token은 찾을 수 없다(`SecretStorage.keys()`는 최소 지원 엔진에 없음).
 
 설정 정의의 정본은 [package.json](../package.json)의 `contributes.configuration`입니다. [features.md §21 설정 레퍼런스](./features.md#21-설정-레퍼런스)는 이를 사용자 관점에서 설명하며, 이 문서는 중복 목록 대신 해당 레퍼런스만 가리킵니다. 키·기본값·범위의 정합성은 `src/test/docConsistency.test.ts`가 검사합니다.
 
@@ -299,7 +275,7 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 3. `activate()` 내에서 설정 확인 후 조건부 등록
 4. `docs/features.md` 섹션 16에 문서화
 
-현재 실험적 기능은 Bit Operation Hover와 Jenkins 테스트 추적입니다. 설정과 사용법은 [기능 레퍼런스](./features.md)의 실험적 기능 항목을 참조하세요.
+현재 실험적 기능은 Bit Operation Hover와 Claude 예약 실행입니다. 설정과 사용법은 [기능 레퍼런스](./features.md)의 실험적 기능 항목을 참조하세요.
 
 > 실험적 기능의 상세 추가 가이드는 [CONTRIBUTING.md](../CONTRIBUTING.md)를 참조하세요.
 
@@ -319,28 +295,6 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 *   Output 패널: "TaskHub" 채널에서 로그 확인
 
 ## 보안 가드
-
-**Jenkins API:** [jenkins/client.ts](../src/jenkins/client.ts)는 사용자가 등록한 서버의 origin과 Jenkins context path 안에서만
-해당 서버의 인증 정보를 전송합니다. 리다이렉트는 따라가지 않으며 응답 크기·시간과 요청 개수를 제한합니다. TLS 인증서 검증은
-유지하고 사내 CA 파일을 선택적으로 추가합니다. HTTP는 기본 차단하며 등록 UI에서 평문 전송을 명시적으로 허용한 서버만 연결합니다. 빌드 생성 POST는 응답 유실 후 중복 실행을 만들지 않도록 자동 재시도하지 않습니다. 하위 빌드 manifest의 URL도
-등록된 서버 경계 안인지 검증하고, 조회 권한 부족·통신 실패를 테스트 성공으로 바꾸지 않습니다.
-
-- API·브라우저 링크·manifest는 같은 origin/context 검사와 최대 5회의 중첩 URL decoding 검사를 사용합니다. 컨텍스트 밖 경로·제어문자·해석이 달라질 수 있는 구분자를 거부하며 artifact 조회는 해당 빌드의 artifact 하위로 더 좁힙니다. 서버가 제공한 job/build/queue URL의 query도 저장 전에 거부합니다.
-- 결과/로그 명령은 현재 요청에 실제로 포함된 빌드만 받으며, manifest에 대표 빌드 URL과 요청 ID가 함께 있으면 둘 다 일치해야 합니다. 서버가 선언한 파라미터 이름은 프로토타입 없는 객체에 담습니다.
-- 연결 진단은 HTTP 상태·응답 형식·Jenkins 헤더 유무·인증 사용자 분류·알려진 권한·허용 목록의 네트워크 오류 코드만 오류 객체에 보관합니다. 응답 헤더 원문·본문·리다이렉트 대상은 보관하거나 표시하지 않습니다. 사용자가 연결 확인을 실행하면 메모리의 진단을 모달로 표시하며 명시적으로 복사를 선택했을 때만 클립보드에 씁니다. 자동 로그나 영속 상태에는 기록하지 않습니다.
-- 로그는 임의 UUID URI의 읽기 전용 가상 문서로 열고 한 문서만 재사용합니다. 본문은 세션 메모리에 보관하고 문서 닫기/기능 종료 시 provider에서 해제하며, 복구 대상인 untitled 문서를 만들지 않습니다. 원시 로그를 전역/워크스페이스 상태나 OutputChannel에 저장하지 않습니다. 로그 응답만 2MiB까지 스트리밍 수신 후 연결을 닫아 앞부분을 표시하고, JSON·artifact의 초과 응답은 계속 거부합니다. 잘린 UTF-8 문자는 제외하고 부분 표시를 알립니다. 잘린 로그는 재개 가능한 청크가 아니므로 `nextStart`를 서버 끝 위치로 전진시키지 않고 전체 확인은 Jenkins로 안내합니다.
-
-- HTTP는 전체 4개·서버별 2개, 대기 작업 32개로 제한하며 연결을 재사용하지 않아 유휴 소켓이 누적되지 않습니다. 요청 대기·DNS·TLS·응답 수신을 포함해 15초, 본문 2MiB 한도를 적용합니다. 서버 오류·429는 서버별 5초~5분 backoff와 제한된 Retry-After를 적용합니다. 401은 서버 전체 인증 실패로 처리해 최소 60초~최대 5분 재시도를 늦추고 대기 중에도 인증 오류를 유지합니다. 대기 후 새 조회가 네트워크 오류나 시간 초과로 실패하면 해당 분류로 갱신해 과거 인증 오류를 계속 표시하지 않습니다. 403은 HTTP 메서드·리소스 경로별로 60초 대기하므로 개별 보고서 권한이 다른 API를 막지 않습니다. 권한 캐시는 SHA-256 리소스 키로 최대 8,192개를 보관하고 유효한 항목은 퇴출하지 않습니다. 용량 초과 시 해당 서버의 추가 호출을 60초 중지하고 권한 오류 추적 한도를 안내합니다. 만료 항목만 회수하며 자격 증명 변경 시 초기화하고 이전 요청의 늦은 응답은 초기화 이후 대기를 되살리지 않습니다.
-- [inventory.ts](../src/jenkins/inventory.ts)의 서버별 커서로 공통 탐색을 한 번 수행하고 해당 회차의 후보를 모든 요청이 공유합니다. 기존 이력의 탐색도 모든 조회가 공유하는 10분당 HTTP 60회 예산 안에서 수행하며 한 회차는 30초로 제한합니다. 폴더별 목록과 job별 최근 빌드를 각각 한 요청으로 조회하며 깊이 16·폴더 1,000개 제한을 유지합니다. 방문·대기 폴더 URL은 각각 Set으로 중복 검사하고, 미처리 폴더와 job 커서를 다음 회차에 이어가며 URL·폴더 대기열 캐시는 항목 추가·제거 시 크기와 여유 오버헤드를 증분 계산해 전체 8MiB로 제한하며 전체 커서를 매번 직렬화하지 않습니다. 커서 완료·삭제·초기화 시 누적량을 회수합니다. Job/폴더/커서 크기 한도에 도달한 서버는 설정 식별자를 보관해 같은 설정으로 자동 탐색을 반복하지 않습니다. 사용자의 결과 새로 고침은 진행 중인 회차가 끝난 뒤 한도 표지만 해제해 재탐색하며, 다른 서버의 커서와 통신 backoff는 유지합니다. 서버 연결 정보·job 한도 변경 또는 자격 증명/기능 초기화 후에도 다시 시작하며 다른 서버의 공용 예산은 계속 사용할 수 있습니다. 범위/그래프 한도와 서버 오류를 구분합니다.
-- 추적 요청은 공통 탐색 후 2개씩 독립 조회하고, 각 요청의 빌드 조회 회차는 30초로 제한하며 전체 요청/서버가 HTTP 예산을 공유합니다. 실패·취소된 요청이 다음 요청을 막지 않으며, SHA 관측은 `coreCompletedAt`에 완료 결과를 고정하고 `finalizedAt`에 보고서 처리 완료를 기록합니다. core는 다시 읽지 않고, 보고서의 예산·취소·BACKOFF/BUSY/PERMISSION_LIMIT과 guard에 캐시된 인증·권한 거부는 로컬 보류로 구분해 다음 회차로 넘깁니다. 실제 HTTP 오류와 구분할 수 있도록 오류에 보류 여부를 담고, 예산은 guard·CA 확인 이후 전송 직전에 차감합니다. 실제 보고서 오류는 한 번 기록한 뒤 재시도하지 않습니다. 요청별 예산을 나누며 HTTP를 쓰지 못한 요청은 다음 예산 창으로 예약합니다. 공용 예산은 컨트롤러(VS Code 창)별이며 동일 워크스페이스의 다른 창과 공유하지 않습니다. 명시적 목록 선택/제출 준비에는 별도의 사용자 작업 예산을 적용합니다. 토큰 조회도 취소·시간 제한을 적용합니다.
-- [shaTracking.ts](../src/jenkins/shaTracking.ts)는 최대 100개 선택 job의 고정 범위를 조회합니다. `shaTracking.jobs`에 대표 job을 포함한 제출 전 빌드 번호, 매칭 SHA 파라미터, 확정 빌드 URL과 오류를 보존합니다. 큐 확인은 대표 job 안에서만 수행하며 다른 job 관측의 선행 조건이 아닙니다. 삭제된 서버와 취소된 대표 큐는 job별 종료 오류로 기록합니다. 새 실행으로 URL을 교체하지 않으며 SCM 정보가 있으면 파라미터보다 우선합니다. 폴링은 서버 전체 인벤토리를 호출하지 않습니다.
-- `deadlineAt`과 `nextPollAt`을 저장하고 I/O 전에 만료/조회 간격을 검사합니다. 최초 즉시, 첫 1시간은 10분, 이후 20분 간격이며 기본 제한은 2시간입니다. 제한 변경은 새 조회에만 반영합니다. `deadlineAt` 없는 구버전 이력은 명시 설정값 또는 종전 24시간 기본값으로 백필합니다. 완료/오류 종료의 `settledAt`과 `outcome`을 저장해 복원/새로 고침 후 재개하지 않습니다. 관측 결과는 로컬 조회 중지와 별도로 집계합니다. 삭제는 취소 후 진행 중 저장이 끝나기를 기다리고 이력을 제거해 늦은 응답이 행을 되살리지 못하게 합니다.
-- 서버 32개·동시 추적 20개·요청당 빌드 1,001개·워크스페이스 보관 빌드 2,000개·직렬화 상태 8MiB 상한을 둡니다. 저장 바이트가 넘으면 오래된 완료 이력, 단계/표시 상세 순으로 회수하며 각 단계에서도 오래된 요청부터 처리합니다. 진행 중인 빌드의 결과·SHA·JUnit 개수는 유지하며 최소 결과조차 저장할 수 없으면 전체 범위 미확인·추적 중지로 전환합니다. 마지막 저장 실패를 반복하는 상태로 두거나 축약된 목록을 전체 성공으로 표시하지 않습니다. 탐색 후보는 2,000개·4MiB, 연결 관계는 10,000개로 제한하고 인덱스 기반으로 한 번씩 방문합니다.
-- 탐색 job 이름은 1,024자·전체 경로 이름은 4,096자로 제한해 폴더 응답의 큰 이름이 누적되지 않게 합니다. 단계와 실패/건너뜀 사례는 빌드당 각 50개·항목 문자열 128자로 제한하고 전체 개수와 잘림 표시를 유지합니다. 중첩 응답을 검증한 뒤 트리·집계에 전달합니다. `reportErrors`는 빌드 본체 오류와 분리해 알려진 결과와 보고서별 실패 이유를 함께 표시·저장합니다. 보고서 오류가 남으면 전체 통과로 확정하지 않고 조회 실패로 종료합니다. 저장 데이터가 손상되면 해당 요청을 정상 완료 이력으로 복원하지 않습니다.
-- 사용자 CA는 64KiB까지 비동기로 읽고 실제 PEM 인증서를 확인합니다. 동시에 한 파일만 읽고 진행 중인 경로를 공유해 느린 파일시스템이 반복 조회로 I/O 작업을 무한히 쌓지 못하게 합니다. 기능 종료 시 기다리는 호출은 즉시 취소됩니다.
-- Git은 별도 소유 프로세스 그룹에서 읽기 전용 명령만 실행하고 optional index lock을 끕니다. 명령 20초·전체 확인 30초·출력 1MiB 한도이며, 중지 시 해당 Git 및 자식 프로세스만 POSIX 프로세스 그룹 또는 Windows taskkill로 종료합니다.
-- `submission: sending`은 오류가 아닌 전송 중 상태이며 자동 조회 대상과 예약에서 제외합니다. 전송용 취소 신호를 저장 전에 등록하고 실제 POST 직전에도 요청의 생존·중지 여부를 확인합니다. 재시작 시 queue/build URL 없이 남은 전송 중 기록(이전 `JENKINS_SUBMITTING` 포함)은 수락 여부 미확인으로 복원하며 POST는 재전송하지 않습니다. 제출 전 모든 job의 빌드 번호를 저장한 SHA 요청은 읽기 전용 관측을 계속하고, 이 근거가 없는 레거시 요청은 추적을 중지합니다.
-- 초기화·저장·알림 오류는 Jenkins 내부에서 처리합니다. 요청을 저장하지 못하면 빌드 POST를 보내지 않으며, 전송 후 응답이나 저장이 실패해도 POST를 자동 재시도하지 않습니다.
 
 TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, 위험한 입력에 대해 다음 방어 계층을 유지한다:
 
@@ -424,4 +378,4 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 
 [claudeScheduler/controller.ts](../src/claudeScheduler/controller.ts)는 신뢰된 워크스페이스에서 실험적 설정을 켰을 때만 뷰·명령·타이머를 등록합니다. [model.ts](../src/claudeScheduler/model.ts)는 workspaceState에 예약 정의와 다음 시각·최종 결과를 저장하고, 슬롯을 저장한 뒤 대기열에서 순차 실행합니다. 저장 실패는 자동 실행을 중단합니다. [runner.ts](../src/claudeScheduler/runner.ts)는 쉘 없이 CLI를 시작하고 stdin으로 요청문을 전달합니다. 폴더 realpath 기반 임대 잠금과 슬롯 기록은 창 간 동시 수정·동일 시각 재실행을 막습니다. [budget.ts](../src/claudeScheduler/budget.ts)는 같은 잠금 안에서 유료 호출 전 사용량을 예약하고 비용 결과를 저장합니다. 임대가 손상되면 실행을 취소하며 CLI가 닫힐 때까지 잠금을 유지합니다. [reportDocument.ts](../src/claudeScheduler/reportDocument.ts)는 명시적으로 연 보고서만 가상 문서로 제공합니다.
 
-결과·잠금은 globalStorageUri 아래에 저장합니다. 정상 비활성화는 프로세스 트리 취소와 저장 완료를 기다리고, 강제 종료로 남은 실행 중 상태는 재시작 시 추적 중단·일시 정지로 복구합니다. CLI 실행 정책·사용법·한계는 [features.md §16.3](./features.md#163-claude-code-예약-실행)에서 관리합니다.
+결과·잠금은 globalStorageUri 아래에 저장합니다. 정상 비활성화는 프로세스 트리 취소와 저장 완료를 기다리고, 강제 종료로 남은 실행 중 상태는 재시작 시 추적 중단·일시 정지로 복구합니다. CLI 실행 정책·사용법·한계는 [features.md §16.2](./features.md#162-claude-code-예약-실행)에서 관리합니다.

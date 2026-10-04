@@ -38,6 +38,26 @@ suite('TaskHub 기능 런처', () => {
         }
     });
 
+    test('제거된 Jenkins 명령·설정·뷰와 최근 런처 항목을 제공하지 않는다', async () => {
+        const extension = vscode.extensions.getExtension('Munseop.taskhub');
+        assert.ok(extension);
+        await extension.activate();
+
+        const commands = await vscode.commands.getCommands(true);
+        assert.deepStrictEqual(commands.filter(command => command.startsWith('taskhub.jenkins.')), []);
+        assert.doesNotMatch(JSON.stringify(extension.packageJSON.contributes), /jenkins/i,
+            'manifest에 Jenkins 명령·설정·뷰·메뉴를 남기지 않는다');
+
+        for (const claudeSchedulerEnabled of [false, true]) {
+            const items = buildFeatureLauncherItems(['jenkins', 'doctor'], 0, claudeSchedulerEnabled);
+            assert.ok(items.every(item => String(item.featureId) !== 'jenkins'));
+            assert.strictEqual(items.filter(item => item.featureId === 'doctor').length, 1);
+            assert.strictEqual(items.find(item => item.featureId === 'doctor')?.command, 'taskhub.doctor');
+            assert.strictEqual(items.find(item => item.featureId === 'claudeScheduler')?.command,
+                claudeSchedulerEnabled ? 'taskhub.claudeScheduler.showSchedules' : 'workbench.action.openSettings');
+        }
+    });
+
     test('손상·중복·알 수 없는 최근 항목을 버리고 세 개로 제한한다', () => {
         assert.deepStrictEqual(normalizeFeatureLauncherRecent(undefined), []);
         assert.deepStrictEqual(normalizeFeatureLauncherRecent('hexViewer'), []);
@@ -47,6 +67,8 @@ suite('TaskHub 기능 런처', () => {
             ]),
             ['hexViewer', 'memoryMap', 'hexConverter']
         );
+        // 제거된 기능(Jenkins)의 최근 기록은 업데이트 후에도 런처에 남지 않는다.
+        assert.deepStrictEqual(normalizeFeatureLauncherRecent(['jenkins', 'doctor']), ['doctor']);
     });
 
     test('최근 사용을 먼저 두고 일반 그룹에서는 중복을 제거한다', () => {
@@ -63,8 +85,8 @@ suite('TaskHub 기능 런처', () => {
             .filter(item => item.kind !== vscode.QuickPickItemKind.Separator)
             .map(item => item.featureId);
         const uniqueFeatureIds = new Set(allFeatureIds);
-        assert.strictEqual(uniqueFeatureIds.size, 15);
-        assert.strictEqual(allFeatureIds.length, 15, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
+        assert.strictEqual(uniqueFeatureIds.size, 14);
+        assert.strictEqual(allFeatureIds.length, 14, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
         assert.ok(allFeatureIds.every(id => typeof id === 'string'));
         assert.ok(items.filter(item => item.featureId).every(item => item.label.includes('$(')));
     });
@@ -75,63 +97,6 @@ suite('TaskHub 기능 런처', () => {
         assert.ok(item?.description?.includes('2'));
         const read = buildFeatureLauncherItems([]).find(candidate => candidate.featureId === 'whatsNew');
         assert.notStrictEqual(read?.description, item?.description);
-    });
-
-    test('Jenkins가 꺼져 있어도 활성화 경로를 표시하고 최근 항목과 중복하지 않는다', () => {
-        const enabled = buildFeatureLauncherItems(['jenkins'], 0, true);
-        const jenkins = enabled.filter(item => item.featureId === 'jenkins');
-        assert.strictEqual(jenkins.length, 1);
-        assert.strictEqual(jenkins[0].command, 'taskhub.jenkins.showRuns');
-        assert.strictEqual(enabled[1].featureId, 'jenkins');
-
-        const disabled = buildFeatureLauncherItems(['jenkins'], 0, false);
-        const enableJenkins = disabled.filter(item => item.featureId === 'jenkins');
-        assert.strictEqual(enableJenkins.length, 1);
-        assert.strictEqual(enableJenkins[0].command, 'workbench.action.openSettings');
-        assert.notStrictEqual(enableJenkins[0].label, jenkins[0].label);
-        assert.strictEqual(disabled[1].featureId, 'jenkins');
-        assert.strictEqual(disabled.filter(item => item.featureId).length, 15);
-        assert.ok(buildFeatureLauncherItems([], 0, false).some(item => item.featureId === 'jenkins'),
-            '최근 사용 기록이 없는 신규 사용자에게도 활성화 경로를 표시해야 한다');
-    });
-
-    test('런처에서 꺼진 Jenkins는 활성화 설정을 열고 켠 뒤에는 실행 목록을 연다', async () => {
-        const originalGetConfiguration = vscode.workspace.getConfiguration;
-        const originalShowQuickPick = vscode.window.showQuickPick;
-        const originalExecuteCommand = vscode.commands.executeCommand;
-        const executions: Array<{ command: string; args: unknown[] }> = [];
-        const { memento } = createMemoryState();
-        const context = { globalState: memento } as unknown as vscode.ExtensionContext;
-        let enabled = false;
-        try {
-            (vscode.workspace as any).getConfiguration = (section: string) => {
-                assert.strictEqual(section, 'taskhub');
-                return { get: (key: string, fallback: unknown) => key === 'experimental.jenkins.enabled' ? enabled : fallback };
-            };
-            (vscode.window as any).showQuickPick = async (items: ReturnType<typeof buildFeatureLauncherItems>) => {
-                const jenkins = items.filter(item => item.featureId === 'jenkins');
-                assert.strictEqual(jenkins.length, 1, '설정 상태와 관계없이 선택할 수 있어야 한다');
-                return jenkins[0];
-            };
-            (vscode.commands as any).executeCommand = async (command: string, ...args: unknown[]) => {
-                executions.push({ command, args });
-            };
-            await showFeatureLauncher(context);
-            enabled = true;
-            await showFeatureLauncher(context);
-            enabled = false;
-            await showFeatureLauncher(context);
-            assert.deepStrictEqual(executions, [
-                { command: 'workbench.action.openSettings', args: ['@id:taskhub.experimental.jenkins.enabled'] },
-                { command: 'taskhub.jenkins.showRuns', args: [] },
-                { command: 'workbench.action.openSettings', args: ['@id:taskhub.experimental.jenkins.enabled'] },
-            ]);
-            assert.deepStrictEqual(memento.get(FEATURE_LAUNCHER_RECENT_KEY), ['jenkins']);
-        } finally {
-            (vscode.workspace as any).getConfiguration = originalGetConfiguration;
-            (vscode.window as any).showQuickPick = originalShowQuickPick;
-            (vscode.commands as any).executeCommand = originalExecuteCommand;
-        }
     });
 
     test('새로운 기능을 읽으면 상태 표시줄의 표시와 접근성 설명이 갱신된다', () => {

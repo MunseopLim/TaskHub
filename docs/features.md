@@ -879,123 +879,7 @@ uint64_t mask = 0x100000000ULL | 1ULL; // Result: 4294967297
 mask |= 0x80;  // 변수의 현재 값과 타입을 확정할 수 없다는 안내
 ```
 
-### 16.2. Jenkins 테스트 추적
-
-등록한 여러 서버의 결과를 **브랜치 → SHA → 조회/요청 회차 → 서버별 빌드·단계·테스트**로 확인합니다.
-같은 SHA도 실행별 빌드 URL을 고정하고 별도 이력으로 보관합니다. 사내 서버의 파라미터와 실제 테스트 범위는 현장에서 선택합니다.
-
-**사내에서 처음 사용하기:**
-
-1. 시험 VSIX를 설치한 뒤 하단 **TaskHub** [기능 런처](#status-bar-기능-런처)에서 **Jenkins 테스트 활성화… (실험적)** 를 선택합니다.
-   열리는 User Settings의 `taskhub.experimental.jenkins.enabled`를 켜면 재시작 없이 Jenkins 뷰·명령이 나타나고, 런처 항목도 실행 목록을 여는 **Jenkins 테스트 (실험적)** 으로 바뀝니다.
-   기능을 꺼도 런처의 활성화 항목은 남아 다시 켤 수 있습니다.
-   TaskHub 사이드바의 **Jenkins 테스트 (실험적)** 에서 **서버 관리**로 각 서버의 이름·URL·사용자 ID·API token을 등록합니다.
-   URL에는 프로토콜·포트·접속 경로를 포함합니다. 사내 CA 인증서를 지정할 수 있으며 token은 SecretStorage에 저장됩니다.
-2. **브랜치 테스트 요청**은 선택한 서버/job에 테스트를 한 번 요청합니다. 현재 브랜치는 커밋·푸시되어 있고 수정·추적되지 않은 파일이 없어야 하며
-   브랜치·SHA·요청 ID를 job이 선언한 파라미터에 연결합니다. SHA 파라미터로 실제 checkout을 고정할지는 Pipeline이 결정합니다.
-   로컬 브랜치와 upstream 이름이 다르면 원격 브랜치를 전달합니다. String·Text·Choice·Boolean 파라미터를 지원합니다.
-3. **SHA 결과 조회 / 다시 조회**는 빌드를 실행하지 않고 이미 실행된 post-commit 등의 결과를 조회합니다.
-   현재 저장소의 SHA를 기본값으로 제안하고 전체 SHA를 입력할 수 있습니다. 이 조회에는 미커밋·추적되지 않은 파일, upstream 유무, 푸시 상태, 원격 연결 상태를 검사하지 않습니다. 종료된 요청의 우클릭 메뉴로 다시 조회하면 새 회차가 생깁니다.
-4. 처음에 등록 서버에서 **이번 SHA에 대해 실행할 테스트 job 전체**를 선택합니다. 이 고정 목록을 완료 기준으로 삼고 다음 요청에서 재사용할 수 있습니다.
-   서버에 등록된 모든 job이 자동으로 테스트 대상이 되는 것은 아닙니다. 실행하지 않을 job은 제외하고, 범위가 바뀌면 다시 선택하세요.
-   일부 서버의 목록 조회가 실패하면 해당 서버와 원인을 알리고 조회된 서버의 job을 선택할 수 있습니다.
-   요청 모드에서는 대표 job도 포함되며, 전송 확인창에서 대표 job 이름·전체 조회 개수·최대 조회 시간을 확인합니다. Git checkout 정보가 없는 테스트 job은 공통 SHA 파라미터 이름을 명시적으로 설정할 수 있습니다.
-5. 결과 행의 서버·빌드 번호·요청 SHA와 실제 SHA를 확인합니다. 빌드 수와 JUnit 사례 수는 다른 단위이며,
-   JUnit/Pipeline 보고서를 제공하지 않는 job에서는 빌드 결과만 표시합니다. `2/2`는 서버 수가 아닌 통과 빌드/선택된 전체 빌드 수입니다.
-   행 펼치기로 브라우저가 열리지 않으며, 별도 빌드 열기·로그 열기 액션을 제공합니다. 큰 로그는 앞부분 프리뷰와 생략 안내를 표시합니다.
-
-**SHA 연결과 완료:**
-
-- 선택한 job의 최근 빌드에서 정확한 checkout SHA가 일치하는 실행을 찾습니다. SSH·HTTPS·Gerrit 주소 표기가 달라도 SHA로 연결하지만, 저장소가 명확히 일치하는 checkout의 SHA 불일치는 거부합니다. Git 정보가 없을 때만 지정한 SHA 파라미터를 이용하며,
-  요청 파라미터를 실제 checkout 확인으로 표시하지 않습니다. 알려진 실제 SHA가 다르면 통과로 확정하지 않습니다.
-- 읽기 전용 조회는 같은 SHA 중 빌드 번호가 가장 큰 실행을 선택하고, 찾은 URL을 고정합니다. 이후 새로운 실행으로 바꾸지 않습니다.
-  새 테스트 요청은 대표 job을 포함해 POST 전에 기록한 빌드 번호 이후의 실행만 찾으므로 이전 같은 SHA의 성공 결과로 완료되지 않습니다.
-  대표 job의 큐 대기·접근 오류와 무관하게 다른 서버를 관측합니다. 큐 ID가 있으면 Git checkout 정보가 없는 대표 실행도 해당 ID로 연결합니다. 실제 SHA 불일치가 확인되면 결과에 그대로 표시합니다.
-  실제 전송 후 POST 응답을 확인하지 못한 경우 빌드를 재전송하지 않고 SHA 결과 조회만 계속합니다. 전송 전 중단·실패는 **빌드 요청 전 중지**로 표시하고 자동 조회를 시작하지 않습니다.
-  SHA 기준 조회는 같은 SHA를 동시에 실행한 사람/회차까지 증명하지는 않습니다. 정확한 회차 연결에는 요청 ID/실행 관계가 필요합니다.
-- 선택 목록의 모든 빌드가 종료되면 자동 조회를 끝냅니다. 모두 통과하면 전체 통과, 실패가 있으면 실패입니다.
-  종료된 빌드 결과는 고정하고 다시 조회하지 않습니다. 상세 보고서는 한 번씩 확인하며, 예산·회차 취소·로컬 재시도 대기나 요청 대기열 한도로 HTTP를 보내지 못한 보고서만 전체 제한 시간 안에서 다음 회차로 넘깁니다.
-  실제 보고서 접근 오류는 재시도하지 않고 **조회 실패: 결과 미확인**으로 종료하며 확인된 빌드 결과는 유지합니다. 서버 설정 삭제도 해당 선택 job의 조회 실패로 종료합니다.
-  아직 실행이 발견되지 않았거나 본체 조회가 실패한 테스트는 제한 시간까지 확인하고 통과로 간주하지 않습니다.
-- 기존 요청 ID/manifest 방식의 이력도 지원합니다. 전체 목록을 확정하지 못한 기존 요청에서 발견한 빌드만 통과하면 **잠정 통과 · 전체 범위 미확인**입니다.
-  오류·한도·진행 중 탐색 없이 최근 빌드 범위의 탐색을 끝내고 발견한 모든 빌드와 보고서가 종료되면 잠정 결과로 조회를 마칩니다. 나중에 나타나는 실행까지 보장하지 않으며 새 SHA 조회로 다시 확인할 수 있습니다.
-  선택 목록을 사용하는 새 조회에는 manifest가 필요하지 않습니다.
-
-**조회 간격·종료·삭제:**
-
-- 최초 조회는 바로 시도하고, 시작 후 1시간까지 10분 간격, 이후 20분 간격으로 확인합니다. 자동 조회 HTTP는 **VS Code 창마다** 모든 활성 SHA와 서버를 합쳐 10분당 최대 60회입니다. 같은 워크스페이스를 여러 창에서 열면 창별 예산을 사용합니다. 실제 전송 시도만 차감하고 로컬 대기·거부는 차감하지 않습니다.
-  같은 회차의 동일 URL 조회는 공유하고 요청별로 예산을 나눕니다. 예산이 없어 전혀 조회하지 못한 요청은 다음 10분 예산 창에서 확인합니다.
-  선택 job이 많거나 여러 SHA가 겹치면 2시간 내 전수 확인을 보장하지 않습니다. 예를 들어 100개 job은 결과·보고서 한 차례 확인에 최대 300회가 필요하며 실행 중 조회는 추가됩니다. 필요하면 시작 전에 제한 시간을 늘려주세요.
-  서버 전체 목록은 범위 선택 시에만 가져오고 SHA 폴링에서는 선택한 job만 조회합니다. 사용자가 시작한 목록 선택과 제출 전 빌드 번호 확인은 각각 별도의 150회·30초 한도를 적용합니다. 목록 선택은 서버별로 예산을 나누고, 남은 예산은 목록을 더 읽어야 하는 서버에 재분배합니다. 이미 읽은 폴더는 다시 요청하지 않으며 서버별 시간 제한으로 다른 서버의 조회 기회를 보장합니다.
-- 기본 제한 시간은 **2시간**입니다. `taskhub.jenkins.trackingTimeoutHours`로 새 조회를 1~168시간으로 설정할 수 있습니다.
-  시작 시 제한 시간을 저장하므로 이후 설정 변경은 기존 조회에 적용되지 않습니다. 제한 시간에는 추가 HTTP 없이 **조회 시간 만료**로 종료합니다. 이미 확인된 실패가 있으면 FAIL 표시와 만료 안내를 함께 유지합니다.
-  확인된 결과를 지우거나 테스트 자체가 실패했다고 바꾸지 않습니다.
-- 완료·시간 초과·추적 중지 후에는 새로 고침, 서버 복구, token 변경, 창 재시작으로 자동 재개하지 않습니다.
-  다시 확인할 때는 **SHA 결과 조회 / 다시 조회**를 명시적으로 실행합니다. 이 동작은 빌드를 다시 실행하지 않습니다.
-- 요청 우클릭 **결과 지우기**는 그 항목을 지웁니다. 뷰 제목/명령 팔레트의 **결과 지우기**는 진행 중 조회 수를 알리고 확인 후 전체 목록을 비웁니다.
-  추적 중인 항목도 로컬 조회를 중단하고 저장 이력에서 삭제합니다. Jenkins 빌드는 취소하지 않습니다.
-- `taskhub.jenkins.pollIntervalSeconds`는 기존 5~300 값의 검증 호환성을 위해 남은 폐기 예정 설정이며, 실제 조회는 위 10분/20분 정책을 따릅니다.
-  구버전 이력에 기한이 없으면 기존 명시 설정 또는 종전 기본값 24시간으로 최초 복원 시 확정합니다. 이후 설정 변경으로 그 기한이 바뀌지는 않습니다.
-  새로 고침으로 간격을 우회하거나 완료된 결과를 재조회하지 않으며 다음 자동 조회 시각을 알립니다. SHA 행은 최신 관측 상태를, 상태 표시줄은 활성·실패·종료 개수를 제공합니다. `taskhub.jenkins.notifications`로 알림을 조절합니다.
-
-**개발 환경과 서버 장애 대응:**
-
-- **서버 관리 → 연결 확인**은 `GET <Jenkins 기본 URL>/whoAmI/api/json`으로 사용자 인증을 검사합니다. 성공해도 Job 조회·빌드 권한까지 확인한 것은 아닙니다.
-  실패하면 상세 창에서 요청 주소·UTC 시각·HTTP 상태·응답 형식·인증 사용자 분류·서버가 요구한 알려진 권한·네트워크/TLS 오류 코드를 확인하고 **진단 정보 복사**로 복사할 수 있습니다. 재시도 대기로 HTTP를 보내지 않은 경우도 구분합니다.
-  403만으로 빌드 권한 부족을 단정하지 않습니다. 사용자 ID와 사용자 설정에서 발급한 API 토큰, 직접 API 주소/context path, 프록시·SSO의 Basic 인증 허용과 Authorization 헤더 전달 여부를 확인하세요. 서버가 `Overall/Read`를 요구했다면 보고된 인증 상태와 함께 관리자에게 전달합니다. 헤더가 없으면 응답 주체나 인증 상태는 확정하지 않습니다.
-  진단 정보에는 응답 본문·토큰·인증 헤더·쿠키·리다이렉트 주소를 담지 않습니다. 서버/프록시 로그의 같은 시각·요청 경로와 대조하면 원인을 더 좁힐 수 있습니다. Jenkins의 [API 인증](https://www.jenkins.io/doc/book/system-administration/authenticating-scripted-clients/)과 [권한 안내](https://www.jenkins.io/doc/book/security/access-control/permissions/)도 참고하세요.
-- VPN/DNS/포트 차단, 서버 재시작, 인증 만료, 인증서 오류, 응답 지연은 조회 오류로 표시합니다. 장애 서버는 재조회 간격을 늘리며 다른 서버는 계속 확인합니다. 설정·키체인·초기화 오류도 Jenkins 기능 안에서 처리합니다.
-- 진행 중인 요청·응답 크기·이력에는 [자원 상한](architecture.md#보안-가드)이 있습니다. 서버는 최대 32개, 동시 추적은 20개입니다. 한도를 넘으면 조회 불완전 또는 중지 상태로 남기며 원격 빌드를 취소하거나 전체 PASS로 바꾸지 않습니다. 많은 완료 이력이 쌓이면 오래된 이력부터 정리합니다.
-- 작업 탐색의 취소 버튼, 요청의 추적 중지, 기능 비활성화로 기다리는 조회를 중단할 수 있습니다. 기능 비활성화는 진행 중인 Git 확인도 중단합니다. Git 설정·작업 파일·브랜치를 수정하지 않습니다.
-- 상세 단계·사례가 크면 일부만 표시합니다. 총 테스트 개수와 PASS/FAIL 판정은 전체 보고서의 합계를 사용하며, 생략된 상세는 Jenkins 웹에서 확인합니다.
-- 같은 주소·계정의 서버 이름을 수정할 때 토큰을 빈 값으로 확인하면 기존 토큰을 유지합니다. Esc는 수정을 취소합니다. 주소나 계정이 바뀌면 새 토큰을 입력해야 합니다.
-- HTTPS를 권장하며 사내 인증서라면 CA 파일을 지정합니다. HTTP는 토큰과 데이터가 평문으로 전송되므로 서버 등록/수정 시 별도로 허용해야 합니다. 이전 시험판의 HTTP 설정은 서버를 수정해 다시 허용하기 전까지 연결하지 않습니다.
-- 연결에는 등록한 직접 URL을 사용합니다. SSO 로그인 페이지로 리다이렉트되거나 API가 다른 호스트명을 반환하면 자동으로 인증을 따라 보내지 않습니다. 이 경우 사내 Jenkins의 API용 URL·사용자 ID·토큰·CA 구성을 확인해야 합니다. VS Code 프록시 설정이나 TLS 검증을 임의로 변경하지 않습니다.
-
-**선택적 관련 빌드 manifest:**
-
-대표 job이 `taskhub-jenkins-runs.json`을 Jenkins artifact로 게시하면 여러 서버의 실행을 명확하게 연결할 수 있습니다.
-아래 예시는 사내 Pipeline 담당자가 적용하는 형식이며, 사용자가 테스트마다 입력하는 내용이 아닙니다.
-
-```json
-{
-  "schemaVersion": 1,
-  "rootBuildUrl": "https://jenkins-a.example.internal/job/fw-test/42/",
-  "complete": true,
-  "runs": [
-    { "buildUrl": "https://jenkins-a.example.internal/job/host-test/151/" },
-    { "buildUrl": "https://jenkins-b.example.internal/job/ftl-test/315/" }
-  ]
-}
-```
-
-`rootBuildUrl`은 이번 대표 빌드의 정확한 URL이어야 합니다. 대신 이번 TaskHub 요청과 일치하는 `requestId`를 넣을 수도 있습니다. 둘 다 넣으면 모두 일치해야 합니다.
-`complete: true`는 추가로 시작할 테스트가 없고 필요한 하위 빌드 목록이 모두 담겼다는 Pipeline의 선언입니다.
-아직 목록을 만드는 중이면 `false`로 유지합니다. 연결 대상은 사용자가 등록한 Jenkins 서버에 한하며 manifest는 최대 1,000개 빌드를 담을 수 있습니다.
-파일명이 다르면 고급 설정 `taskhub.jenkins.manifestArtifact`를 변경합니다. 이 설정 자체가 Jenkins job을 수정하거나 결과 목록을 생성하지는 않습니다.
-
-**조회·보관·중지:**
-
-- 빌드 결과와 보고서 조회 상태를 구분합니다. 보고서 권한이 없으면 확인된 빌드 통과/실패와 함께 보고서 미확인 및 권한 안내를 표시합니다. 403이면 해당 보고서의 재조회만 잠시 대기하고 같은 서버의 다른 API는 계속 조회합니다. 401 인증 실패는 서버 전체 재시도를 늦추므로 사용자 이름·토큰을 확인해야 합니다. 권한 오류가 추적 용량을 넘으면 해당 서버의 조회를 잠시 중지하고 별도 한도 안내를 표시합니다. 보고서 조회 오류가 있으면 전체 통과로 확정하지 않으며, 종료된 빌드의 보고서는 자동 재시도하지 않습니다.
-
-- `taskhub.jenkins.discoveryIntervalSeconds`는 기존 요청 ID/manifest 방식의 관련 빌드 탐색에 사용합니다. 실제 자동 조회 간격은 위 정책보다 짧아지지 않습니다.
-  탐색은 서버별 `taskhub.jenkins.discoveryJobLimit`개 job과 job별 `taskhub.jenkins.recentBuildLimit`개 최근 빌드 안에서 진행합니다.
-  같은 회차의 탐색을 여러 요청이 공유하고, 많은 폴더·job은 다음 회차에 이어서 조회합니다. 요청 행의 범위 미확인 표시는 탐색 회차가 바뀌어도 유지하고, 진행 여부는 펼친 상세에 따로 표시합니다. 그래프/범위 한도는 탐색 한도로 표시합니다.
-  Job/폴더 수나 목록 보관 용량 한도에 걸린 서버는 같은 탐색을 반복하지 않습니다. **Jenkins: 결과 새로 고침**으로 해당 서버를 다시 탐색할 수 있습니다. 폴더 수·깊이 한도 자체는 유지하므로 서버의 폴더 구조를 정리한 뒤 재시도하거나 manifest로 목록을 제공하세요. 서버 연결 정보나 `taskhub.jenkins.discoveryJobLimit`을 수정하거나 기능을 껐다 켜도 다시 탐색합니다.
-  오래된 빌드나 많은 job이 있는 환경에서는 목록이 제한될 수 있으며, 한도 안의 검색 결과만으로 전체 PASS를 보장하지 않습니다.
-- `taskhub.jenkins.historyLimit`으로 완료된 요청의 보관량을 조절합니다. 진행 중인 요청은 보존하고 VS Code를 다시 열면 저장한 요청의 조회를 재개합니다.
-  저장 용량이 차면 오래된 완료 이력부터 제거하고, 남은 요청도 오래된 순서로 단계 상세를 줄입니다. 빌드 결과·SHA·JUnit 개수는 우선 보존하며, 더 줄일 수 없으면 전체 범위 미확인 상태로 추적을 중지합니다.
-  전송 중 종료되어 대기열 주소를 확보하지 못한 요청은 전송 결과 미확인으로 남깁니다. 제출 전 빌드 번호를 저장한 SHA 요청은 GET 조회만 계속하고, 근거가 없는 구버전 요청은 추적을 중지합니다. POST는 자동 재전송하지 않으며, 다시 빌드를 요청하기 전 Jenkins에서 수락 여부를 확인합니다.
-  VS Code가 종료된 동안에는 확장 알림을 받을 수 없습니다.
-- **요청 추적 중지**는 활성 요청에만 제공하며 완료 결과를 변경하지 않습니다. 전송 준비 중 중지·삭제하면 뒤늦게 POST하지 않습니다. 실제 전송 전 중지는 빌드를 요청하지 않았다고 안내하며 이력을 다시 열어도 구분합니다. 이미 전송한 요청의 수락 여부는 Jenkins에서 확인해야 하며 로컬 조회만 중지합니다. Jenkins 빌드를 취소하지 않습니다.
-  시작할 때 저장한 제한 시간을 넘기면 조회 시간 만료로 표시하고 미확인 결과와 만료 이유를 남깁니다. 기능 설정을 꺼도 서버 빌드는 계속 실행됩니다.
-- 서버·계정은 확장의 로컬 공통 상태, 요청 이력·job 파라미터 연결은 워크스페이스별 상태에 보관하고 token은 VS Code SecretStorage에 분리합니다.
-  JUnit 통과·실패·건너뜀 개수는 이력에 저장하지만 개별 테스트의 이름·오류 본문은 저장하지 않습니다. 재시작 후 완료된 실행의 상세는 Jenkins에서 확인합니다.
-  Jenkins 로그와 테스트 보고서에는 사내 데이터가 포함될 수 있으므로 TaskHub는 이를 외부 서비스로 자동 전송하거나 별도 파일로 자동 내보내지 않습니다.
-  로그는 한 개의 읽기 전용 가상 문서를 재사용하고 재시작 시 본문을 복원하지 않습니다. 사용자의 복사·다른 이름으로 저장이나 다른 확장의 문서 접근까지 막는 보안 격리는 아닙니다.
-- Jenkins 계정에는 필요한 job의 조회·실행 권한만 부여하고 관리자 계정은 피합니다. API 토큰은 해당 계정의 권한으로 동작합니다. 실제 서버의 권한·플러그인·인증서·망 정책은 별도로 확인해야 하며, 정상 서버가 제공한 결과/manifest의 정확성을 TaskHub가 독립적으로 증명하지는 못합니다.
-
-### 16.3. Claude Code 예약 실행
+### 16.2. Claude Code 예약 실행
 
 TaskHub 런처의 **Claude 예약 실행 활성화… (실험적)** 에서 `taskhub.experimental.claudeScheduler.enabled`를 켜면 **Claude 예약 실행** 뷰가 나타납니다. **Claude Code CLI 2.1.248 이상**을 설치하고 해당 실행 환경에서 로그인한 뒤 사용하세요. 매 실행 전에 버전을 확인하며 구버전이나 지원하지 않는 옵션은 보고서에 업데이트 안내를 남깁니다. 기본 실행 파일은 `claude`이며, PATH에 없다면 `taskhub.claudeScheduler.executable`에 절대 경로를 설정합니다. Windows에서는 네이티브 `claude.exe`를 사용합니다. 배치 래퍼와 셸 명령 문자열은 지원하지 않습니다.
 
@@ -1628,23 +1512,14 @@ Prev/Next 또는 찾기 입력의 `Enter`·`Shift+Enter`로 결과를 순환합�
 | `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. 그 용도의 기억이 없으면 가장 최근에 사용한 다이얼로그 위치를 이어받는다. `false`면 TaskHub가 시작 위치를 **일절 지정하지 않고** VS Code의 기본 규칙과 `files.dialog.defaultPath` 설정에 맡긴다. 저장 다이얼로그는 제안 파일명도 함께 사라진다. 액션 JSON의 `options.defaultUri`는 어느 쪽이든 존중한다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
-| `taskhub.experimental.claudeScheduler.enabled` | `boolean` | `false` | **[실험적]** Claude 예약 실행 활성화. 머신 범위. | [§16.3 Claude Code 예약 실행](#163-claude-code-예약-실행) |
-| `taskhub.claudeScheduler.executable` | `string` | `"claude"` | CLI 실행 파일 이름/절대 경로. Windows는 네이티브 exe. 머신 범위. | [§16.3 Claude Code 예약 실행](#163-claude-code-예약-실행) |
-| `taskhub.claudeScheduler.model` | `string` | `""` | 비우면 CLI 기본 모델. 머신 범위. | [§16.3 Claude Code 예약 실행](#163-claude-code-예약-실행) |
-| `taskhub.claudeScheduler.timeoutSeconds` | `integer` | `600` (10–3600) | 실행 제한 시간(초). 머신 범위. | [§16.3 Claude Code 예약 실행](#163-claude-code-예약-실행) |
-| `taskhub.claudeScheduler.maxTurns` | `integer` | `20` (1–100) | 실행당 최대 턴 수. 머신 범위. | [§16.3 Claude Code 예약 실행](#163-claude-code-예약-실행) |
-| `taskhub.claudeScheduler.maxBudgetUsd` | `number` | `1` (0.01–100) | CLI의 실행당 API 비용 상한(USD). 머신 범위. | [§16.3 Claude Code 예약 실행](#163-claude-code-예약-실행) |
-| `taskhub.claudeScheduler.maxDailyRuns` | `integer` | `24` (1–1000) | 폴더별 최근 24시간 실행 횟수. 머신 범위. | [§16.3 Claude Code 예약 실행](#163-claude-code-예약-실행) |
-| `taskhub.claudeScheduler.maxDailyBudgetUsd` | `number` | `5` (0.01–1000) | 폴더별 최근 24시간 API 비용 한도(USD). 머신 범위. | [§16.3 Claude Code 예약 실행](#163-claude-code-예약-실행) |
-| `taskhub.experimental.jenkins.enabled` | `boolean` | `false` | **[실험적]** Jenkins 연결·요청·결과 추적 활성화. 끄면 로컬 조회만 멈추며 서버 빌드는 취소하지 않는다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
-| `taskhub.jenkins.pollIntervalSeconds` | `integer` | `15` (5–300) | 폐기 예정·값 무시. 최초 즉시·첫 1시간 10분·이후 20분 정책 적용. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
-| `taskhub.jenkins.discoveryIntervalSeconds` | `integer` | `60` (15–600) | 여러 서버의 관련 빌드 탐색 간격(초). 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
-| `taskhub.jenkins.notifications` | `"all"` \| `"failures"` \| `"off"` | `"all"` | 요청 결과 알림 정책. 알림을 꺼도 목록에서 조회할 수 있다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
-| `taskhub.jenkins.trackingTimeoutHours` | `integer` | `2` (1–168) | 새 조회의 제한 시간. 시간 초과는 조회 실패로 종료하며 확인된 결과를 보존한다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
-| `taskhub.jenkins.historyLimit` | `integer` | `50` (10–500) | 완료된 요청 보관 개수. 진행 중인 요청은 추적이 끝날 때까지 유지. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
-| `taskhub.jenkins.discoveryJobLimit` | `integer` | `200` (20–2000) | 등록 서버별 관련 빌드 탐색 대상 job 상한. 제한으로 누락된 결과는 통과로 간주하지 않는다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
-| `taskhub.jenkins.recentBuildLimit` | `integer` | `20` (5–200) | 탐색 시 job별 최근 빌드 조회 상한. 오래된 빌드는 범위 밖일 수 있다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
-| `taskhub.jenkins.manifestArtifact` | `string` | `"taskhub-jenkins-runs.json"` | 관련 빌드 목록을 게시한 선택적 artifact 이름. Pipeline이 문서 형식을 제공해야 한다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.experimental.claudeScheduler.enabled` | `boolean` | `false` | **[실험적]** Claude 예약 실행 활성화. 머신 범위. | [§16.2 Claude Code 예약 실행](#162-claude-code-예약-실행) |
+| `taskhub.claudeScheduler.executable` | `string` | `"claude"` | CLI 실행 파일 이름/절대 경로. Windows는 네이티브 exe. 머신 범위. | [§16.2 Claude Code 예약 실행](#162-claude-code-예약-실행) |
+| `taskhub.claudeScheduler.model` | `string` | `""` | 비우면 CLI 기본 모델. 머신 범위. | [§16.2 Claude Code 예약 실행](#162-claude-code-예약-실행) |
+| `taskhub.claudeScheduler.timeoutSeconds` | `integer` | `600` (10–3600) | 실행 제한 시간(초). 머신 범위. | [§16.2 Claude Code 예약 실행](#162-claude-code-예약-실행) |
+| `taskhub.claudeScheduler.maxTurns` | `integer` | `20` (1–100) | 실행당 최대 턴 수. 머신 범위. | [§16.2 Claude Code 예약 실행](#162-claude-code-예약-실행) |
+| `taskhub.claudeScheduler.maxBudgetUsd` | `number` | `1` (0.01–100) | CLI의 실행당 API 비용 상한(USD). 머신 범위. | [§16.2 Claude Code 예약 실행](#162-claude-code-예약-실행) |
+| `taskhub.claudeScheduler.maxDailyRuns` | `integer` | `24` (1–1000) | 폴더별 최근 24시간 실행 횟수. 머신 범위. | [§16.2 Claude Code 예약 실행](#162-claude-code-예약-실행) |
+| `taskhub.claudeScheduler.maxDailyBudgetUsd` | `number` | `5` (0.01–1000) | 폴더별 최근 24시간 API 비용 한도(USD). 머신 범위. | [§16.2 Claude Code 예약 실행](#162-claude-code-예약-실행) |
 | `taskhub.preset.selected` | `string` | `"none"` | 목록에 병합할 프리셋 ID. `"none"`이면 프리셋 병합만 끈다. 확장 번들은 `example`, 워크스페이스 프리셋은 `폴더이름:integration` 형식이며, 번들 예제 표시 설정은 독립적이다. | [§17 Preset](#17-preset-기능) |
 
 ### 21.2. 설정 추가 체크리스트

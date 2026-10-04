@@ -22,7 +22,6 @@ const FEATURE_IDS = [
     'settings',
     'checkForUpdates',
     'whatsNew',
-    'jenkins',
     'claudeScheduler',
 ] as const;
 
@@ -49,7 +48,7 @@ export interface FeatureLauncherItem extends vscode.QuickPickItem {
 
 const FEATURE_ID_SET = new Set<string>(FEATURE_IDS);
 
-function buildFeatureLauncherDefinitions(unreadCount: number, jenkinsEnabled: boolean, claudeSchedulerEnabled: boolean): readonly FeatureLauncherDefinition[] {
+function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEnabled: boolean): readonly FeatureLauncherDefinition[] {
     const definitions: FeatureLauncherDefinition[] = [
         {
             id: 'taskhubView',
@@ -148,24 +147,6 @@ function buildFeatureLauncherDefinitions(unreadCount: number, jenkinsEnabled: bo
         },
     ];
     definitions.push({
-        id: 'jenkins',
-        command: jenkinsEnabled ? 'taskhub.jenkins.showRuns' : 'workbench.action.openSettings',
-        commandArgs: jenkinsEnabled ? undefined : ['@id:taskhub.experimental.jenkins.enabled'],
-        group: 'actions',
-        label: `$(beaker) ${jenkinsEnabled
-            ? t('Jenkins 테스트 (실험적)', 'Jenkins tests (Experimental)')
-            : t('Jenkins 테스트 활성화… (실험적)', 'Enable Jenkins tests… (Experimental)')}`,
-        description: jenkinsEnabled
-            ? t(
-                '여러 서버의 테스트를 브랜치와 커밋별로 확인합니다.',
-                'Track tests by branch and commit across Jenkins servers.'
-            )
-            : t(
-                'Jenkins 기능을 켜는 사용자 설정을 엽니다.',
-                'Open the user setting to enable Jenkins.'
-            ),
-    });
-    definitions.push({
         id: 'claudeScheduler',
         command: claudeSchedulerEnabled ? 'taskhub.claudeScheduler.showSchedules' : 'workbench.action.openSettings',
         commandArgs: claudeSchedulerEnabled ? undefined : ['@id:taskhub.experimental.claudeScheduler.enabled'],
@@ -213,10 +194,9 @@ function toQuickPickItem(definition: FeatureLauncherDefinition): FeatureLauncher
 export function buildFeatureLauncherItems(
     recentValue: unknown,
     unreadCount = 0,
-    jenkinsEnabled = vscode.workspace.getConfiguration('taskhub').get<boolean>('experimental.jenkins.enabled', false),
     claudeSchedulerEnabled = vscode.workspace.getConfiguration('taskhub').get<boolean>('experimental.claudeScheduler.enabled', false)
 ): FeatureLauncherItem[] {
-    const definitions = buildFeatureLauncherDefinitions(unreadCount, jenkinsEnabled, claudeSchedulerEnabled);
+    const definitions = buildFeatureLauncherDefinitions(unreadCount, claudeSchedulerEnabled);
     const byId = new Map(definitions.map(definition => [definition.id, definition]));
     const recent = normalizeFeatureLauncherRecent(recentValue).filter(id => byId.has(id));
     const items: FeatureLauncherItem[] = [];

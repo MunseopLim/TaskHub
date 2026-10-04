@@ -667,10 +667,10 @@ suite('Claude experimental feature gate', () => {
         }
     });
     test('launcher exposes enable setting when off and opens schedules when on', () => {
-        const disabled = buildFeatureLauncherItems([], 0, false, false).find(item => item.featureId === 'claudeScheduler');
+        const disabled = buildFeatureLauncherItems([], 0, false).find(item => item.featureId === 'claudeScheduler');
         assert.strictEqual(disabled?.command, 'workbench.action.openSettings');
         assert.deepStrictEqual(disabled?.commandArgs, ['@id:taskhub.experimental.claudeScheduler.enabled']);
-        const enabled = buildFeatureLauncherItems(['claudeScheduler'], 0, false, true).filter(item => item.featureId === 'claudeScheduler');
+        const enabled = buildFeatureLauncherItems(['claudeScheduler'], 0, true).filter(item => item.featureId === 'claudeScheduler');
         assert.strictEqual(enabled.length, 1); assert.strictEqual(enabled[0].command, 'taskhub.claudeScheduler.showSchedules');
     });
 });

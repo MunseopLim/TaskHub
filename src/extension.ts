@@ -14,9 +14,9 @@ import { openBrowserTask } from './browserTask';
 import { promptLinkTitle, readClipboardLinkUrl } from './linkInput';
 import type { MemoryMapConfig, MemoryMapOpenHistory } from './memoryMapViewer';
 import type { HexViewerOpenHistory } from './hexViewer';
-import { registerJenkins } from './jenkins/controller';
 import { ClaudeSchedulerRegistration, registerClaudeScheduler } from './claudeScheduler/controller';
 import { registerFeatureLauncher } from './featureLauncher';
+import { removeRetiredJenkinsData } from './retiredJenkinsCleanup';
 import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
 import { registerUpdateService } from './updateService';
 import { stripUtf8Bom } from './jsonEditorUtils';
@@ -11936,9 +11936,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (context.globalState.get(RUN_ANY_ACTION_MRU_KEY) !== undefined) {
         void context.globalState.update(RUN_ANY_ACTION_MRU_KEY, undefined);
     }
+    // 제거된 Jenkins 기능이 남긴 API token·이력 정리. 실패하면 다음 활성화에서 다시 시도한다.
+    void removeRetiredJenkinsData(context).catch(error => outputChannel.appendLine(
+        `[Jenkins Cleanup] Failed to remove retired data: ${error instanceof Error ? error.message : String(error)}`));
     const whatsNew = registerWhatsNew(context);
     registerFeatureLauncher(context, whatsNew);
-    context.subscriptions.push(registerJenkins(context));
     claudeSchedulerRegistration = registerClaudeScheduler(context, killProcessTree);
     context.subscriptions.push(claudeSchedulerRegistration);
     registerUpdateService(context, {
