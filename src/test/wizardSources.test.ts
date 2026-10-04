@@ -192,6 +192,8 @@ suite('multi-root 액션 파일 오류 격리', () => {
         ] } }];
         fs.writeFileSync(path.join(good, '.vscode', 'actions.json'), JSON.stringify(goodActions));
         const brokenPath = path.join(bad, '.vscode', 'actions.json');
+        // VS Code URI는 Windows 드라이브 문자를 소문자로 정규화한다.
+        const brokenUri = vscode.Uri.file(brokenPath);
         fs.writeFileSync(brokenPath, '{ invalid JSON');
         const descriptor = Object.getOwnPropertyDescriptor(vscode.workspace, 'workspaceFolders')!;
         const getConfiguration = vscode.workspace.getConfiguration;
@@ -208,10 +210,14 @@ suite('multi-root 액션 파일 오류 격리', () => {
             invalidateActionsCache();
             const actions = loadAllActions(context);
             assert.deepStrictEqual(actions.map(action => action.id), ['healthy']);
-            assert.strictEqual(currentActionSourceLoadErrors()[0].filePath, brokenPath);
+            assert.strictEqual(currentActionSourceLoadErrors().length, 1);
+            assert.strictEqual(currentActionSourceLoadErrors()[0].filePath, brokenUri.fsPath);
             provider = new MainViewProvider(context, () => loadAllActions(context), undefined, undefined, undefined, currentActionSourceLoadErrors);
             const rows = await provider.getChildren();
-            assert.ok(rows.some(row => row.contextValue === 'actionsLoadError' && row.command?.arguments?.[0].fsPath === brokenPath));
+            const errorRows = rows.filter(row => row.contextValue === 'actionsLoadError');
+            assert.strictEqual(errorRows.length, 1);
+            assert.strictEqual(errorRows[0].command?.command, 'vscode.open');
+            assert.strictEqual(errorRows[0].command?.arguments?.[0].toString(), brokenUri.toString());
             assert.ok(rows.some(row => row.label === 'Healthy'));
             await executeActionPipeline(actions[0].action!, context, 'healthy', good, [good, bad]);
             assert.strictEqual(fs.realpathSync(fs.readFileSync(path.join(good, 'marker.txt'), 'utf8')), fs.realpathSync(good));
