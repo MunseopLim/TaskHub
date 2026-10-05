@@ -53,7 +53,7 @@
 *   **워크스페이스 링크 패널 (`mainView.linkWorkspace`)**: 현재 워크스페이스에 정의된 링크를 표시하며, 'L' 아이콘으로 식별됩니다.
 *   **즐겨찾기 패널 (`mainView.favorite`)**: 구성 가능한 즐겨찾는 파일 목록을 표시하며, 'F' 아이콘으로 식별됩니다.
 *   **히스토리 패널 (`mainView.history`)**: 최근 실행한 액션들의 기록을 추적하고 관리하며, 'R' 아이콘으로 식별됩니다.
-*   **AI 예약 실행 패널 (`mainView.claudeSchedules`)**: 요청문 파일을 반복 실행하는 예약을 관리합니다([§26](#26-ai-예약-실행)).
+*   **AI 예약 실행 패널 (`mainView.aiSchedules`)**: 요청문 파일을 반복 실행하는 예약을 관리합니다([§26](#26-ai-예약-실행)).
 
 ### Status Bar 기능 런처
 
@@ -1767,7 +1767,9 @@ TaskHub가 여는 다이얼로그는 같은 용도로 마지막에 사용한 디
 
 AI 예약 실행은 기본으로 활성화되며 TaskHub 사이드바에 표시됩니다. 런처의 **AI 예약 실행**으로도 목록을 엽니다. 설정의 **AI Scheduler: Show Panel**(`taskhub.aiScheduler.showPanel`)을 끄면 패널만 숨기고 등록된 예약은 계속 실행합니다. 숨긴 뒤 런처의 **AI 예약 실행 표시…**나 **AI: 예약 목록 열기**를 선택하면 표시 설정을 엽니다. 실행 자체를 중단하려면 **AI Scheduler: Enabled**(`taskhub.aiScheduler.enabled`)를 끕니다. 이 경우 진행 중인 실행과 예약 실행을 멈추고 예약 데이터는 유지합니다.
 
-현재 지원하는 실행 엔진은 **Claude Code CLI 2.1.248 이상**입니다. CLI를 설치하고 해당 실행 환경에서 로그인한 뒤 사용하세요. 매 실행 전에 버전을 확인하며 버전 또는 실행 옵션이 호환되지 않으면 보고서에 선택한 CLI와 실패 원인을 남깁니다. 기본 실행 파일은 `claude`이며, PATH에 없다면 `taskhub.aiScheduler.executable`에 절대 경로를 설정합니다. Windows에서는 네이티브 `claude.exe`를 사용합니다. 배치 래퍼와 셸 명령 문자열은 지원하지 않습니다. 기존 예약과 명령 ID는 그대로 사용합니다. 설정 화면은 `AI Scheduler` 이름을 사용합니다. 이전 `taskhub.experimental.aiScheduler.enabled`·`taskhub.experimental.claudeScheduler.enabled`와 `taskhub.claudeScheduler.*` 사용자 설정은 새 사용자 설정을 명시하지 않았을 때만 읽습니다. 활성화 설정은 새 정식 키 → 이전 AI 키 → 이전 Claude 키 순으로 명시한 사용자 값을 적용하며, 모두 없으면 기본 활성화합니다. 워크스페이스 파일의 실행 파일·활성화 설정은 받지 않습니다.
+현재 지원하는 실행 엔진은 **Claude Code CLI 2.1.248 이상**입니다. CLI를 설치하고 해당 실행 환경에서 로그인한 뒤 사용하세요. 매 실행 전에 버전을 확인하며 버전 또는 실행 옵션이 호환되지 않으면 보고서에 선택한 CLI와 실패 원인을 남깁니다. 기본 실행 파일은 `claude`이며, PATH에 없다면 `taskhub.aiScheduler.executable`에 절대 경로를 설정합니다. Windows에서는 네이티브 `claude.exe`를 사용합니다. 배치 래퍼와 셸 명령 문자열은 지원하지 않습니다.
+
+기능 명령 ID는 `taskhub.aiScheduler.*`를 사용합니다. 이전 명령 ID로 만든 단축키도 계속 사용할 수 있고, 기존 예약·보고서·최근 사용 기록도 유지합니다. 설정 화면은 `AI Scheduler` 이름을 사용합니다. 이전 `taskhub.experimental.aiScheduler.enabled`·`taskhub.experimental.claudeScheduler.enabled`와 `taskhub.claudeScheduler.*` 사용자 설정은 새 사용자 설정을 명시하지 않았을 때만 읽습니다. 활성화 설정은 새 정식 키 → 이전 AI 키 → 이전 Claude 키 순으로 명시한 사용자 값을 적용하며, 모두 없으면 기본 활성화합니다. 워크스페이스 파일의 실행 파일·활성화 설정은 받지 않습니다.
 
 **다른 CLI를 지정한 경우:** 실행 파일 설정은 프로그램 경로를 선택할 뿐 실행 엔진을 바꾸지 않습니다. 현재 실행기는 선택한 프로그램의 `--version` 응답을 위 Claude 버전 기준으로 확인한 뒤 Claude 전용 비대화형·권한·JSON 결과 옵션을 전달합니다. 다른 형식의 버전 응답이면 요청문을 보내기 전에 실패하고, 보고서에 실행 파일과 실제 응답을 남깁니다. 사내 CLI 등의 지원에는 해당 도구의 비대화형 실행, 권한 제한, 입력과 결과 형식에 맞는 실행기 연결이 필요합니다.
 

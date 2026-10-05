@@ -5,24 +5,25 @@ import { constants } from 'fs';
 import * as path from 'path';
 import lockfile from 'proper-lockfile';
 import { t } from '../i18n';
-import { ClaudeRunResult, ClaudeSchedule } from './model';
+import { AiRunResult, AiSchedule } from './model';
+import { legacyAiScheduler } from './compatibility';
 
 const promptLimit = 256 * 1024;
 const outputLimit = 4 * 1024 * 1024;
 const errorLimit = 256 * 1024;
 // Include input snapshots and UTF-8 replacement characters in diagnostic reports.
 const reportLimit = 16 * 1024 * 1024;
-export const MIN_CLAUDE_CLI_VERSION = '2.1.248';
-export interface ClaudeCliOptions {
+export const MIN_SUPPORTED_CLI_VERSION = '2.1.248';
+export interface AiCliOptions {
     executable: string;
     model?: string;
     timeoutSeconds: number;
     /** Test fixtures can prepend a Node script without enabling arbitrary shell text. */
     prefixArgs?: readonly string[];
 }
-export type KillClaudeProcess = (child: ChildProcess) => Promise<boolean>;
+export type KillCliProcess = (child: ChildProcess) => Promise<boolean>;
 
-interface ClaudeInvocation {
+interface CliInvocation {
     phase: 'version' | 'prompt';
     executable: string;
     args: string[];
@@ -34,13 +35,13 @@ interface ClaudeInvocation {
 }
 
 /** A display command for POSIX shells or PowerShell; the runner itself never uses a shell. */
-export function formatClaudeCommand(executable: string, args: readonly string[], platform: NodeJS.Platform = process.platform): string {
+export function formatCliCommand(executable: string, args: readonly string[], platform: NodeJS.Platform = process.platform): string {
     const quote = (value: string): string => platform === 'win32'
         ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, "'\\''")}'`;
     return (platform === 'win32' ? '& ' : '') + [executable, ...args].map(quote).join(' ');
 }
 
-function invocationDetails(invocations: ClaudeInvocation[]): string {
+function invocationDetails(invocations: CliInvocation[]): string {
     if (!invocations.length) {
         return t('CLI는 시작되지 않았고 요청문도 전송되지 않았습니다.', 'The CLI was not started and the prompt was not sent.');
     }
@@ -55,7 +56,7 @@ function invocationDetails(invocations: ClaudeInvocation[]): string {
     for (const invocation of invocations) {
         lines.push('', invocation.phase === 'version' ? t('버전 확인', 'Version check') : t('요청문 실행', 'Prompt execution'),
             process.platform === 'win32' ? t('명령 (PowerShell 표기):', 'Command (PowerShell syntax):') : t('명령 (POSIX 셸 표기):', 'Command (POSIX shell syntax):'),
-            formatClaudeCommand(invocation.executable, invocation.args),
+            formatCliCommand(invocation.executable, invocation.args),
             t(`작업 폴더: ${invocation.cwd}`, `Working directory: ${invocation.cwd}`),
             invocation.started ? t('CLI 시작됨', 'CLI started') : t('CLI 시작되지 않음', 'CLI not started'),
             t(`stdin: ${inputStates[invocation.stdinStatus]} (${invocation.stdinBytes}바이트)`, `stdin: ${inputStates[invocation.stdinStatus]} (${invocation.stdinBytes} bytes)`));
@@ -81,7 +82,7 @@ function boundReportText(text: string, budget: number): string {
     return bytes.subarray(0, budget - Buffer.byteLength(note, 'utf8') - 4).toString('utf8') + note;
 }
 
-export function claudeArguments(job: ClaudeSchedule, options: ClaudeCliOptions): string[] {
+export function aiCliArguments(job: AiSchedule, options: AiCliOptions): string[] {
     const bash = job.mode === 'edit' ? job.bashRules ?? [] : [];
     const tools = job.mode === 'edit' ? `Read,Glob,Grep,Edit,Write${bash.length ? ',Bash' : ''}` : 'Read,Glob,Grep';
     const allowed = ['Read(./**)', 'Glob', 'Grep', ...(job.mode === 'edit' ? ['Edit(./**)', ...bash] : [])];
@@ -120,7 +121,7 @@ async function boundedRead(file: string, limit: number): Promise<Buffer> {
 }
 
 /** The JSON result distinguishes CLI failures and permission denials from a completed answer. */
-export function parseClaudeResult(stdout: string, exitCode: number | null): { success: boolean; text: string } {
+export function parseCliResult(stdout: string, exitCode: number | null): { success: boolean; text: string } {
     let result: Record<string, unknown>;
     try { result = JSON.parse(stdout); }
     catch { return { success: false, text: t('CLI가 올바른 JSON 결과를 반환하지 않았습니다.', 'The CLI did not return a valid JSON result.') + '\n' + stdout }; }
@@ -138,14 +139,14 @@ export function parseClaudeResult(stdout: string, exitCode: number | null): { su
     return { success, text: denied ? t('허용되지 않은 도구 요청이 있어 작업을 완료로 처리하지 않았습니다.', 'The run requested tools without permission and was not marked complete.') + '\n' + text : text };
 }
 
-async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: ClaudeCliOptions, signal: AbortSignal, kill: KillClaudeProcess,
-    invocations: ClaudeInvocation[], versionOnly = false): Promise<{ status: ClaudeRunResult['status']; text: string }> {
+async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions, signal: AbortSignal, kill: KillCliProcess,
+    invocations: CliInvocation[], versionOnly = false): Promise<{ status: AiRunResult['status']; text: string }> {
     if (signal.aborted) { return { status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }; }
     if (!options.executable || /[\r\n\0]/.test(options.executable) || /\.(?:cmd|bat)$/i.test(options.executable)) {
         throw new Error(t('CLI 실행 파일 경로를 확인하세요. Windows에서는 네이티브 실행 파일을 사용하세요.', 'Check the CLI executable path. On Windows, use a native executable.'));
     }
-    const invocation: ClaudeInvocation = { phase: versionOnly ? 'version' : 'prompt', executable: options.executable,
-        args: versionOnly ? [...(options.prefixArgs ?? []), '--version'] : claudeArguments(job, options), cwd: job.workspacePath,
+    const invocation: CliInvocation = { phase: versionOnly ? 'version' : 'prompt', executable: options.executable,
+        args: versionOnly ? [...(options.prefixArgs ?? []), '--version'] : aiCliArguments(job, options), cwd: job.workspacePath,
         started: false, stdinStatus: 'notSent', stdinBytes: 0 };
     invocations.push(invocation);
     return new Promise(resolve => {
@@ -165,7 +166,7 @@ async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: Claude
             signal.removeEventListener('abort', abort);
             await termination;
             const output = Buffer.concat(stdout).toString('utf8');
-            const parsed = versionOnly ? { success: exitCode === 0, text: output } : parseClaudeResult(output, exitCode);
+            const parsed = versionOnly ? { success: exitCode === 0, text: output } : parseCliResult(output, exitCode);
             const errors = Buffer.concat(stderr).toString('utf8');
             if (/unknown option|unrecognized option|unsupported option/i.test(errors)) {
                 reason = t(`선택한 CLI '${options.executable}'가 현재 실행기에 필요한 옵션을 지원하지 않습니다. CLI의 비대화형 실행·권한·결과 형식 호환성을 확인하세요.`,
@@ -231,42 +232,56 @@ async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: Claude
     });
 }
 
-export function supportsClaudeVersion(text: string): boolean {
+export function supportsCliVersion(text: string): boolean {
     const version = text.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:\s|$)/);
     if (!version) { return false; }
     const actual = version.slice(1).map(Number);
-    const minimum = MIN_CLAUDE_CLI_VERSION.split('.').map(Number);
+    const minimum = MIN_SUPPORTED_CLI_VERSION.split('.').map(Number);
     for (let index = 0; index < 3; index++) {
         if (actual[index] !== minimum[index]) { return actual[index] > minimum[index]; }
     }
     return true;
 }
 
-export function claudeReportDirectory(storage: string, jobId: string): string {
+export function aiReportDirectory(storage: string, jobId: string): string {
     if (!/^[a-f0-9-]{36}$/.test(jobId)) { throw new Error(t('예약 ID가 잘못되었습니다.', 'Invalid schedule ID.')); }
-    return path.join(storage, 'claude-scheduler', 'reports', jobId);
+    return path.join(storage, 'ai-scheduler', 'reports', jobId);
 }
-export async function readClaudeReport(storage: string, job: ClaudeSchedule): Promise<string> {
+/** Retain the shared lease namespace so an older window cannot run alongside an upgraded one. */
+export function aiWorkspaceLeaseDirectory(storage: string, workspacePath: string): string {
+    return path.join(storage, legacyAiScheduler.storageDirectory, 'locks', createHash('sha256').update(pathKey(workspacePath)).digest('hex'));
+}
+export async function readAiReport(storage: string, job: AiSchedule): Promise<string> {
     if (!job.lastRun?.report || !/^[a-f0-9-]{36}\.txt$/.test(job.lastRun.report)) { throw new Error(t('실행 보고서가 없습니다.', 'No run report.')); }
-    return (await boundedRead(path.join(claudeReportDirectory(storage, job.id), job.lastRun.report), reportLimit)).toString('utf8');
+    const directory = aiReportDirectory(storage, job.id);
+    try { return (await boundedRead(path.join(directory, job.lastRun.report), reportLimit)).toString('utf8'); }
+    catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+        return (await boundedRead(path.join(storage, legacyAiScheduler.storageDirectory, 'reports', job.id, job.lastRun.report), reportLimit)).toString('utf8');
+    }
 }
 
 /** Bound disk use across removed jobs as well as active schedules. */
-export async function pruneClaudeReports(storage: string, currentJobId: string, currentReport: string): Promise<void> {
-    const root = path.join(storage, 'claude-scheduler', 'reports');
-    const folders = await fs.readdir(root, { withFileTypes: true });
+export async function pruneAiReports(storage: string, currentJobId: string, currentReport: string): Promise<void> {
     const reports: Array<{ file: string; jobId: string; name: string; time: number; size: number }> = [];
-    for (const folder of folders.filter(entry => entry.isDirectory() && /^[a-f0-9-]{36}$/.test(entry.name))) {
-        const directory = path.join(root, folder.name);
-        const entries = await fs.readdir(directory, { withFileTypes: true });
-        for (const entry of entries.filter(file => file.isFile() && /^[a-f0-9-]{36}\.txt$/.test(file.name))) {
-            const file = path.join(directory, entry.name);
-            const stats = await fs.stat(file).catch(error => {
-                if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
-                throw error;
-            });
-            if (!stats) { continue; }
-            reports.push({ file, jobId: folder.name, name: entry.name, time: stats.mtimeMs, size: stats.size });
+    for (const storageDirectory of ['ai-scheduler', legacyAiScheduler.storageDirectory]) {
+        const root = path.join(storage, storageDirectory, 'reports');
+        const folders = await fs.readdir(root, { withFileTypes: true }).catch(error => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
+            throw error;
+        });
+        for (const folder of folders.filter(entry => entry.isDirectory() && /^[a-f0-9-]{36}$/.test(entry.name))) {
+            const directory = path.join(root, folder.name);
+            const entries = await fs.readdir(directory, { withFileTypes: true });
+            for (const entry of entries.filter(file => file.isFile() && /^[a-f0-9-]{36}\.txt$/.test(file.name))) {
+                const file = path.join(directory, entry.name);
+                const stats = await fs.stat(file).catch(error => {
+                    if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
+                    throw error;
+                });
+                if (!stats) { continue; }
+                reports.push({ file, jobId: folder.name, name: entry.name, time: stats.mtimeMs, size: stats.size });
+            }
         }
     }
     const counts = new Map<string, number>();
@@ -284,16 +299,16 @@ export async function pruneClaudeReports(storage: string, currentJobId: string, 
 }
 
 /** Workspace-wide lease also prevents two windows from running the same persisted slot. */
-export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSignal, scheduledAt: number | undefined,
-    storage: string, workspacePaths: readonly string[], options: ClaudeCliOptions, kill: KillClaudeProcess): Promise<ClaudeRunResult> {
+export async function runScheduledAi(job: AiSchedule, signal: AbortSignal, scheduledAt: number | undefined,
+    storage: string, workspacePaths: readonly string[], options: AiCliOptions, kill: KillCliProcess): Promise<AiRunResult> {
     const startedAt = Date.now();
     let release: (() => Promise<void>) | undefined;
     const abort = new AbortController();
     const onAbort = (): void => abort.abort();
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) { abort.abort(); }
-    let text = ''; let status: ClaudeRunResult['status'] = 'failed';
-    const invocations: ClaudeInvocation[] = [];
+    let text = ''; let status: AiRunResult['status'] = 'failed';
+    const invocations: CliInvocation[] = [];
     try {
         const root = await fs.realpath(job.workspacePath);
         const openRoots = await Promise.all(workspacePaths.map(folder => fs.realpath(folder).catch(() => '')));
@@ -304,7 +319,7 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
         if (!inside(root, promptPath)) { throw new Error(t('요청문 파일은 선택한 워크스페이스 안에 있어야 합니다.', 'The prompt file must be inside the selected workspace.')); }
         const prompt = await boundedRead(promptPath, promptLimit);
         if (!prompt.toString('utf8').replace(/^\uFEFF/, '').trim()) { throw new Error(t('요청문 파일이 비어 있습니다.', 'The prompt file is empty.')); }
-        const lockDirectory = path.join(storage, 'claude-scheduler', 'locks', createHash('sha256').update(pathKey(root)).digest('hex'));
+        const lockDirectory = aiWorkspaceLeaseDirectory(storage, root);
         await fs.mkdir(lockDirectory, { recursive: true });
         try {
             release = await lockfile.lock(lockDirectory, {
@@ -316,13 +331,13 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
             throw error;
         }
         if (abort.signal.aborted) { return { status: 'stopped', startedAt, finishedAt: Date.now() }; }
-        const probe = await invokeClaude({ ...job, workspacePath: root }, Buffer.alloc(0), options, abort.signal, kill, invocations, true);
+        const probe = await invokeCli({ ...job, workspacePath: root }, Buffer.alloc(0), options, abort.signal, kill, invocations, true);
         if (probe.status !== 'success') { status = probe.status; throw new Error(probe.text); }
-        if (!supportsClaudeVersion(probe.text)) {
+        if (!supportsCliVersion(probe.text)) {
             const observed = probe.text.trim().slice(0, 1000);
             throw new Error(t(
-                `CLI '${options.executable}'의 --version 응답을 현재 실행기로 확인할 수 없습니다. 현재 실행기는 Claude Code ${MIN_CLAUDE_CLI_VERSION} 이상을 기준으로 합니다. 실행 파일만 바꿔도 다른 CLI를 지원하는 것은 아니며, 해당 CLI의 실행 옵션과 결과 형식이 호환되어야 합니다. 요청문은 아직 전달하지 않았습니다.\n버전 응답: ${observed}`,
-                `The --version response from CLI '${options.executable}' did not pass this runner's check. The current runner targets Claude Code ${MIN_CLAUDE_CLI_VERSION} or later. Changing the executable alone does not add another CLI's execution options and result format. The prompt has not been sent.\nVersion response: ${observed}`
+                `CLI '${options.executable}'의 --version 응답을 현재 실행기로 확인할 수 없습니다. 현재 실행기는 Claude Code ${MIN_SUPPORTED_CLI_VERSION} 이상을 기준으로 합니다. 실행 파일만 바꿔도 다른 CLI를 지원하는 것은 아니며, 해당 CLI의 실행 옵션과 결과 형식이 호환되어야 합니다. 요청문은 아직 전달하지 않았습니다.\n버전 응답: ${observed}`,
+                `The --version response from CLI '${options.executable}' did not pass this runner's check. The current runner targets Claude Code ${MIN_SUPPORTED_CLI_VERSION} or later. Changing the executable alone does not add another CLI's execution options and result format. The prompt has not been sent.\nVersion response: ${observed}`
             ));
         }
         if (scheduledAt !== undefined) {
@@ -335,7 +350,7 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
             if (previous >= scheduledAt) { return { status: 'skipped', startedAt, finishedAt: Date.now(), detail: t('이 예약 시각은 다른 창에서 처리했습니다.', 'This scheduled slot was handled by another window.') }; }
             await fs.writeFile(marker, JSON.stringify(scheduledAt), { mode: 0o600 });
         }
-        const result = await invokeClaude({ ...job, workspacePath: root }, prompt, options, abort.signal, kill, invocations);
+        const result = await invokeCli({ ...job, workspacePath: root }, prompt, options, abort.signal, kill, invocations);
         status = result.status; text = result.text;
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -346,7 +361,7 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
         try { await release?.(); } catch { status = 'failed'; text += '\n' + t('워크스페이스 잠금 해제 실패.', 'Workspace lease release failed.'); }
     }
     const finishedAt = Date.now();
-    const directory = claudeReportDirectory(storage, job.id);
+    const directory = aiReportDirectory(storage, job.id);
     const report = `${randomUUID()}.txt`;
     await fs.mkdir(directory, { recursive: true });
     const statusLabel = status === 'success' ? t('완료', 'Completed') : status === 'stopped' ? t('중지', 'Stopped')
@@ -355,6 +370,6 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
     const details = invocationDetails(invocations);
     const budget = reportLimit - Buffer.byteLength(header, 'utf8') - Buffer.byteLength(details, 'utf8') - 3;
     await fs.writeFile(path.join(directory, report), [header, boundReportText(text, budget), '', details].join('\n'), { flag: 'wx', mode: 0o600 });
-    await pruneClaudeReports(storage, job.id, report);
+    await pruneAiReports(storage, job.id, report);
     return { status, startedAt, finishedAt, report };
 }

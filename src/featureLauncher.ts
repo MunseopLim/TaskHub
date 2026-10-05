@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 import { WHATS_NEW_COMMAND, WhatsNewController } from './whatsNew';
-import { aiSchedulesEnabled } from './claudeScheduler/settings';
+import { aiSchedulesEnabled } from './aiScheduler/settings';
+import { legacyAiScheduler } from './aiScheduler/compatibility';
 
 export const FEATURE_LAUNCHER_COMMAND = 'taskhub.showFeatureLauncher';
 export const FEATURE_LAUNCHER_STATUS_ID = 'taskhub.featureLauncher';
@@ -23,7 +24,7 @@ const FEATURE_IDS = [
     'settings',
     'checkForUpdates',
     'whatsNew',
-    'claudeScheduler',
+    'aiScheduler',
 ] as const;
 
 export type FeatureLauncherFeatureId = typeof FEATURE_IDS[number];
@@ -49,7 +50,7 @@ export interface FeatureLauncherItem extends vscode.QuickPickItem {
 
 const FEATURE_ID_SET = new Set<string>(FEATURE_IDS);
 
-function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEnabled: boolean, aiSchedulesVisible: boolean): readonly FeatureLauncherDefinition[] {
+function buildFeatureLauncherDefinitions(unreadCount: number, aiSchedulerEnabled: boolean, aiSchedulesVisible: boolean): readonly FeatureLauncherDefinition[] {
     const definitions: FeatureLauncherDefinition[] = [
         {
             id: 'taskhubView',
@@ -148,14 +149,14 @@ function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEna
         },
     ];
     definitions.push({
-        id: 'claudeScheduler',
-        command: claudeSchedulerEnabled && aiSchedulesVisible ? 'taskhub.claudeScheduler.showSchedules' : 'workbench.action.openSettings',
-        commandArgs: !claudeSchedulerEnabled ? ['@id:taskhub.aiScheduler.enabled'] : !aiSchedulesVisible ? ['@id:taskhub.aiScheduler.showPanel'] : undefined,
+        id: 'aiScheduler',
+        command: aiSchedulerEnabled && aiSchedulesVisible ? 'taskhub.aiScheduler.showSchedules' : 'workbench.action.openSettings',
+        commandArgs: !aiSchedulerEnabled ? ['@id:taskhub.aiScheduler.enabled'] : !aiSchedulesVisible ? ['@id:taskhub.aiScheduler.showPanel'] : undefined,
         group: 'actions',
-        label: `$(clock) ${!claudeSchedulerEnabled
+        label: `$(clock) ${!aiSchedulerEnabled
             ? t('AI 예약 실행 활성화…', 'Enable AI Schedules…')
             : !aiSchedulesVisible ? t('AI 예약 실행 표시…', 'Show AI Schedules…') : t('AI 예약 실행', 'AI Schedules')}`,
-        description: t('요청문 파일로 AI 작업을 정기 실행합니다. 현재 실행 엔진: Claude Code.', 'Schedule AI tasks from prompt files. Current engine: Claude Code.'),
+        description: t('요청문 파일로 AI 작업을 정기 실행합니다.', 'Schedule AI tasks from prompt files.'),
     });
     return definitions;
 }
@@ -172,7 +173,8 @@ function groupLabel(group: FeatureLauncherGroup): string {
 export function normalizeFeatureLauncherRecent(value: unknown): FeatureLauncherFeatureId[] {
     if (!Array.isArray(value)) { return []; }
     const result: FeatureLauncherFeatureId[] = [];
-    for (const item of value) {
+    for (const previous of value) {
+        const item = previous === legacyAiScheduler.featureId ? 'aiScheduler' : previous;
         if (typeof item !== 'string' || !FEATURE_ID_SET.has(item)) { continue; }
         const id = item as FeatureLauncherFeatureId;
         if (!result.includes(id)) { result.push(id); }
@@ -195,10 +197,10 @@ function toQuickPickItem(definition: FeatureLauncherDefinition): FeatureLauncher
 export function buildFeatureLauncherItems(
     recentValue: unknown,
     unreadCount = 0,
-    claudeSchedulerEnabled = aiSchedulesEnabled(),
+    aiSchedulerEnabled = aiSchedulesEnabled(),
     aiSchedulesVisible = vscode.workspace.getConfiguration('taskhub').get<boolean>('aiScheduler.showPanel', true)
 ): FeatureLauncherItem[] {
-    const definitions = buildFeatureLauncherDefinitions(unreadCount, claudeSchedulerEnabled, aiSchedulesVisible);
+    const definitions = buildFeatureLauncherDefinitions(unreadCount, aiSchedulerEnabled, aiSchedulesVisible);
     const byId = new Map(definitions.map(definition => [definition.id, definition]));
     const recent = normalizeFeatureLauncherRecent(recentValue).filter(id => byId.has(id));
     const items: FeatureLauncherItem[] = [];

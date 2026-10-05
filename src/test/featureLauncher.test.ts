@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { DIALOG_SCOPE, initDialogMemory } from '../dialogMemory';
+import { legacyAiScheduler } from '../aiScheduler/compatibility';
 import {
     buildFeatureLauncherItems,
     FEATURE_LAUNCHER_COMMAND,
@@ -48,13 +49,13 @@ suite('TaskHub 기능 런처', () => {
         assert.doesNotMatch(JSON.stringify(extension.packageJSON.contributes), /jenkins/i,
             'manifest에 Jenkins 명령·설정·뷰·메뉴를 남기지 않는다');
 
-        for (const claudeSchedulerEnabled of [false, true]) {
-            const items = buildFeatureLauncherItems(['jenkins', 'doctor'], 0, claudeSchedulerEnabled);
+        for (const aiSchedulerEnabled of [false, true]) {
+            const items = buildFeatureLauncherItems(['jenkins', 'doctor'], 0, aiSchedulerEnabled);
             assert.ok(items.every(item => String(item.featureId) !== 'jenkins'));
             assert.strictEqual(items.filter(item => item.featureId === 'doctor').length, 1);
             assert.strictEqual(items.find(item => item.featureId === 'doctor')?.command, 'taskhub.doctor');
-            assert.strictEqual(items.find(item => item.featureId === 'claudeScheduler')?.command,
-                claudeSchedulerEnabled ? 'taskhub.claudeScheduler.showSchedules' : 'workbench.action.openSettings');
+            assert.strictEqual(items.find(item => item.featureId === 'aiScheduler')?.command,
+                aiSchedulerEnabled ? 'taskhub.aiScheduler.showSchedules' : 'workbench.action.openSettings');
         }
     });
 
@@ -99,6 +100,15 @@ suite('TaskHub 기능 런처', () => {
             assert.match(calculatorItems[0].label, /^\$\(symbol-operator\) /);
             assert.strictEqual(calculatorItems[0].command, 'taskhub.showDeveloperCalculator');
         }
+    });
+
+    test('이전 AI 예약 최근 사용 기록은 새 기능으로 복원하고 중복을 제거한다', () => {
+        assert.deepStrictEqual(normalizeFeatureLauncherRecent([legacyAiScheduler.featureId, 'aiScheduler', 'doctor']), ['aiScheduler', 'doctor']);
+        const items = buildFeatureLauncherItems([legacyAiScheduler.featureId], 0, true, true);
+        const schedules = items.filter(item => item.featureId === 'aiScheduler');
+        assert.strictEqual(schedules.length, 1);
+        assert.strictEqual(items[1], schedules[0]);
+        assert.strictEqual(schedules[0].command, 'taskhub.aiScheduler.showSchedules');
     });
 
     test('새로운 기능의 읽지 않은 버전 수를 런처에 표시한다', () => {

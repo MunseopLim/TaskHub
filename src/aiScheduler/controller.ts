@@ -4,30 +4,35 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { t } from '../i18n';
 import { plainNotificationText } from '../notificationText';
-import { ClaudeSchedulesProvider, cadenceLabel } from '../providers/claudeSchedulesProvider';
-import { CLAUDE_SCHEDULES_KEY, ClaudeCadence, ClaudeSchedule, ClaudeScheduleChanges, ClaudeScheduler, ClaudeSchedulerError, SchedulerDependencies, validBashRules } from './model';
-import { ClaudeCliOptions, KillClaudeProcess, runScheduledClaude } from './runner';
-import { ClaudeReportDocuments } from './reportDocument';
+import { AiSchedulesProvider, cadenceLabel } from '../providers/aiSchedulesProvider';
+import { AI_SCHEDULES_KEY, AiCadence, AiSchedule, AiScheduleChanges, AiScheduler, AiSchedulerError, SchedulerDependencies, validBashRules } from './model';
+import { AiCliOptions, KillCliProcess, runScheduledAi } from './runner';
+import { AiReportDocuments } from './reportDocument';
 import { aiScheduleSetting, aiSchedulesEnabled } from './settings';
+import { legacyAiScheduler } from './compatibility';
 
 const commands = ['add', 'edit', 'pause', 'resume', 'runNow', 'stop', 'remove', 'openReport', 'showSchedules', 'reset'] as const;
-const enableSettings = ['aiScheduler.enabled', 'experimental.aiScheduler.enabled', 'experimental.claudeScheduler.enabled'];
+const enableSettings = ['aiScheduler.enabled', 'experimental.aiScheduler.enabled', legacyAiScheduler.enabledSetting];
+function storedSchedules(context: vscode.ExtensionContext): unknown {
+    const current = context.workspaceState.get(AI_SCHEDULES_KEY);
+    return current === undefined ? context.workspaceState.get(legacyAiScheduler.stateKey) : current;
+}
 function showError(error: unknown): void {
-    const messages: Record<ClaudeSchedulerError['code'], string> = {
+    const messages: Record<AiSchedulerError['code'], string> = {
         invalidStorage: t('저장된 예약 데이터가 손상됐거나 지원하지 않는 형식입니다. 기존 데이터는 보존했습니다. "AI: 예약 데이터 초기화"로 백업 후 복구할 수 있습니다.', 'Stored schedules are corrupt or unsupported. Existing data was preserved. Use "AI: Reset Schedule Data" to back up and recover.'),
         invalidSchedule: t('예약 시각과 주기를 확인하세요.', 'Check the schedule time and cadence.'),
         disposed: t('예약 실행 기능이 꺼져 있습니다.', 'The scheduler is disabled.'),
         running: t('실행을 중지한 뒤 예약을 변경하세요.', 'Stop the run before changing its schedule.'),
         tooMany: t('예약은 최대 50개까지 등록할 수 있습니다.', 'You can register up to 50 schedules.'),
     };
-    const detail = plainNotificationText(error instanceof ClaudeSchedulerError ? messages[error.code] : error instanceof Error ? error.message : String(error));
+    const detail = plainNotificationText(error instanceof AiSchedulerError ? messages[error.code] : error instanceof Error ? error.message : String(error));
     void vscode.window.showErrorMessage(t(`AI 예약 실행: ${detail}`, `AI schedules: ${detail}`));
 }
 function numberSetting(key: 'timeoutSeconds', fallback: number, min: number, max: number): number {
     const value = aiScheduleSetting<unknown>(key, fallback);
     return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
 }
-function cliOptions(): ClaudeCliOptions {
+function cliOptions(): AiCliOptions {
     return {
         executable: aiScheduleSetting('executable', 'claude'),
         model: aiScheduleSetting('model', '').trim() || undefined,
@@ -78,14 +83,14 @@ If no issues are found, say so and describe the scope reviewed.
 `);
 }
 
-export interface ClaudeSchedulerRegistration extends vscode.Disposable {
+export interface AiSchedulerRegistration extends vscode.Disposable {
     shutdown(): Promise<void>;
     hasRunning(): boolean;
 }
 /** Switching off aborts immediately; switching on waits for the retiring runner. */
-export function registerClaudeScheduler(context: vscode.ExtensionContext, kill: KillClaudeProcess,
-    create: () => ClaudeSchedulerController = () => new ClaudeSchedulerController(context, kill)): ClaudeSchedulerRegistration {
-    let controller: ClaudeSchedulerController | undefined;
+export function registerAiScheduler(context: vscode.ExtensionContext, kill: KillCliProcess,
+    create: () => AiSchedulerController = () => new AiSchedulerController(context, kill)): AiSchedulerRegistration {
+    let controller: AiSchedulerController | undefined;
     let disposed = false;
     let retiring: Promise<void> = Promise.resolve();
     let retiringCount = 0;
@@ -113,43 +118,43 @@ export function registerClaudeScheduler(context: vscode.ExtensionContext, kill: 
     update();
     const registration = new vscode.Disposable(() => {
         disposed = true; listener.dispose(); trustListener.dispose(); update();
-    }) as ClaudeSchedulerRegistration;
+    }) as AiSchedulerRegistration;
     registration.shutdown = async () => { registration.dispose(); await retiring; };
     registration.hasRunning = () => !!controller?.engine.runningId || retiringCount > 0;
     return registration;
 }
 
-export class ClaudeSchedulerController implements vscode.Disposable {
-    readonly engine: ClaudeScheduler;
+export class AiSchedulerController implements vscode.Disposable {
+    readonly engine: AiScheduler;
     readonly ready: Promise<void>;
-    private readonly provider: ClaudeSchedulesProvider;
+    private readonly provider: AiSchedulesProvider;
     private readonly disposables: vscode.Disposable[] = [];
     private readonly busy = new Set<string>();
-    private readonly reports: ClaudeReportDocuments;
+    private readonly reports: AiReportDocuments;
     private storageError?: unknown;
     private disposed = false;
-    constructor(private readonly context: vscode.ExtensionContext, kill: KillClaudeProcess, options: () => ClaudeCliOptions = cliOptions) {
+    constructor(private readonly context: vscode.ExtensionContext, kill: KillCliProcess, options: () => AiCliOptions = cliOptions) {
         const dependencies: SchedulerDependencies = {
             now: Date.now,
             schedule: (callback, delay) => {
                 const timer = setTimeout(callback, delay); timer.unref();
                 return new vscode.Disposable(() => clearTimeout(timer));
             },
-            save: async state => { await context.workspaceState.update(CLAUDE_SCHEDULES_KEY, state); },
-            run: (job: ClaudeSchedule, signal: AbortSignal, slot?: number) => runScheduledClaude(job, signal, slot, context.globalStorageUri.fsPath,
+            save: async state => { await context.workspaceState.update(AI_SCHEDULES_KEY, state); },
+            run: (job: AiSchedule, signal: AbortSignal, slot?: number) => runScheduledAi(job, signal, slot, context.globalStorageUri.fsPath,
                 (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file').map(folder => folder.uri.fsPath), options(), kill),
             changed: () => this.provider?.refresh(),
             error: (error: unknown) => { if (!this.disposed) { showError(error); } },
         };
-        try { this.engine = new ClaudeScheduler(context.workspaceState.get(CLAUDE_SCHEDULES_KEY), dependencies); }
-        catch (error) { this.storageError = error; this.engine = new ClaudeScheduler(undefined, dependencies); }
-        this.provider = new ClaudeSchedulesProvider(() => this.engine.list(), () => this.engine.runningId, () => this.engine.queuedIds);
-        this.reports = new ClaudeReportDocuments(context.globalStorageUri.fsPath);
+        try { this.engine = new AiScheduler(storedSchedules(context), dependencies); }
+        catch (error) { this.storageError = error; this.engine = new AiScheduler(undefined, dependencies); }
+        this.provider = new AiSchedulesProvider(() => this.engine.list(), () => this.engine.runningId, () => this.engine.queuedIds);
+        this.reports = new AiReportDocuments(context.globalStorageUri.fsPath);
         try {
-            this.disposables.push(this.provider, this.reports, vscode.workspace.registerTextDocumentContentProvider('taskhub-claude-report', this.reports),
-                vscode.window.createTreeView('mainView.claudeSchedules', { treeDataProvider: this.provider }));
+            this.disposables.push(this.provider, this.reports, vscode.workspace.registerTextDocumentContentProvider('taskhub-ai-report', this.reports),
+                vscode.window.createTreeView('mainView.aiSchedules', { treeDataProvider: this.provider }));
             for (const command of commands) {
-                this.disposables.push(vscode.commands.registerCommand(`taskhub.claudeScheduler.${command}`, async (node?: ClaudeSchedule) => {
+                const handler = async (node?: AiSchedule): Promise<void> => {
                     if (this.disposed) { return; }
                     if (this.busy.has(command)) {
                         void vscode.window.showInformationMessage(t('이 예약 명령을 이미 처리 중입니다.', 'This schedule command is already in progress.'));
@@ -159,25 +164,29 @@ export class ClaudeSchedulerController implements vscode.Disposable {
                     try { await this.ready; if (!this.disposed) { await this.execute(command, node); } }
                     catch (error) { if (!this.disposed) { showError(error); } }
                     finally { this.busy.delete(command); }
-                }));
+                };
+                for (const prefix of ['taskhub.aiScheduler', legacyAiScheduler.commandPrefix]) {
+                    this.disposables.push(vscode.commands.registerCommand(`${prefix}.${command}`, handler));
+                }
             }
+            this.disposables.push(vscode.commands.registerCommand(legacyAiScheduler.viewFocusCommand, () => this.execute('showSchedules')));
             this.ready = this.storageError ? Promise.resolve() : this.engine.initialize();
             if (this.storageError) { showError(this.storageError); }
             void this.ready.catch(error => { this.engine.dispose(); if (!this.disposed) { showError(error); } });
         } catch (error) { this.dispose(); throw error; }
     }
-    private async select(node?: ClaudeSchedule): Promise<ClaudeSchedule | undefined> {
+    private async select(node?: AiSchedule): Promise<AiSchedule | undefined> {
         const jobs = this.engine.list();
         if (node) { return jobs.find(job => job.id === node.id); }
         const picked = await vscode.window.showQuickPick(jobs.map(job => ({ label: job.name, description: cadenceLabel(job.cadence), job })),
             { placeHolder: t('AI 예약을 선택하세요.', 'Choose an AI schedule.') });
         return picked?.job;
     }
-    private async execute(command: typeof commands[number], node?: ClaudeSchedule): Promise<void> {
+    private async execute(command: typeof commands[number], node?: AiSchedule): Promise<void> {
         if (command === 'showSchedules') {
             if (!vscode.workspace.getConfiguration('taskhub').get<boolean>('aiScheduler.showPanel', true)) {
                 await vscode.commands.executeCommand('workbench.action.openSettings', '@id:taskhub.aiScheduler.showPanel');
-            } else { await vscode.commands.executeCommand('mainView.claudeSchedules.focus'); }
+            } else { await vscode.commands.executeCommand('mainView.aiSchedules.focus'); }
             return;
         }
         if (command === 'reset') { await this.resetStorage(); return; }
@@ -224,14 +233,14 @@ export class ClaudeSchedulerController implements vscode.Disposable {
         const answer = await vscode.window.showWarningMessage(t('손상된 예약 데이터를 백업하고 빈 예약 목록으로 초기화할까요?',
             'Back up corrupt schedule data and reset to an empty schedule list?'), { modal: true }, 'Yes');
         if (answer !== 'Yes' || this.disposed) { return; }
-        const backup = path.join(this.context.globalStorageUri.fsPath, 'claude-scheduler', `corrupt-schedules-${randomUUID()}.json`);
+        const backup = path.join(this.context.globalStorageUri.fsPath, 'ai-scheduler', `corrupt-schedules-${randomUUID()}.json`);
         await fs.mkdir(path.dirname(backup), { recursive: true });
-        await fs.writeFile(backup, JSON.stringify(this.context.workspaceState.get(CLAUDE_SCHEDULES_KEY)), { flag: 'wx', mode: 0o600 });
+        await fs.writeFile(backup, JSON.stringify(storedSchedules(this.context)), { flag: 'wx', mode: 0o600 });
         await this.engine.initialize();
         this.storageError = undefined;
         void vscode.window.showInformationMessage(t(`예약 목록을 초기화했습니다. 백업: ${backup}`, `Schedules reset. Backup: ${backup}`));
     }
-    private async choosePrompt(selected: vscode.Uri, workspacePath: string, existing?: ClaudeSchedule): Promise<string | undefined> {
+    private async choosePrompt(selected: vscode.Uri, workspacePath: string, existing?: AiSchedule): Promise<string | undefined> {
         const filters = { [t('요청문', 'Prompt')]: ['md', 'txt'] };
         let promptUri: vscode.Uri | undefined;
         if (!existing) {
@@ -308,7 +317,7 @@ export class ClaudeSchedulerController implements vscode.Disposable {
             prompt: t('예약 이름', 'Schedule name'), validateInput: value => value.trim() && value.trim().length <= 200 ? undefined : t('1~200자로 입력하세요.', 'Enter 1–200 characters.') });
         return name?.trim() || undefined;
     }
-    private async askMode(current: ClaudeSchedule['mode'] = 'analysis'): Promise<ClaudeSchedule['mode'] | undefined> {
+    private async askMode(current: AiSchedule['mode'] = 'analysis'): Promise<AiSchedule['mode'] | undefined> {
         const items = [
             { label: t('분석', 'Analysis'), description: t('코드를 읽고 결과 보고 — 파일 수정·명령 실행 없음', 'Read code and report findings — no file edits or commands'), mode: 'analysis' as const },
             { label: t('코드 수정', 'Code editing'), description: t('작업 폴더의 코드 수정 — 실행할 명령은 다음 단계에서 지정', 'Edit code in the working folder — choose allowed commands in the next step'), mode: 'edit' as const },
@@ -326,7 +335,7 @@ export class ClaudeSchedulerController implements vscode.Disposable {
             } });
         return input === undefined ? undefined : JSON.parse(input);
     }
-    private async askCadence(current?: ClaudeCadence): Promise<ClaudeCadence | undefined> {
+    private async askCadence(current?: AiCadence): Promise<AiCadence | undefined> {
         const items = [
             { label: t('간격 반복', 'Repeat at intervals'), description: t('예: 60분마다 실행', 'For example, run every 60 minutes'), cadenceKind: 'interval' as const },
             { label: t('매일 지정 시각', 'Daily at a set time'), description: t('예: 매일 현지 시각 오전 9시', 'For example, daily at 9 AM local time'), cadenceKind: 'daily' as const },
@@ -336,7 +345,7 @@ export class ClaudeSchedulerController implements vscode.Disposable {
             ? t('실행 주기를 변경하면 다음 예약 시각을 새 주기로 계산합니다.', 'Changing the cadence recalculates the next scheduled time.')
             : t('VS Code가 열려 있을 때 실행합니다. 첫 실행은 다음 예약 시각입니다.', 'Runs while VS Code is open. The first run is at the next scheduled time.') });
         if (!kind) { return; }
-        let cadence: ClaudeCadence;
+        let cadence: AiCadence;
         if (kind.cadenceKind === 'interval') {
             const minutes = await vscode.window.showInputBox({ value: current?.kind === 'interval' ? String(current.minutes) : '60',
                 prompt: t('실행 간격 (분, 1~10080)', 'Interval in minutes (1–10080)'),
@@ -354,7 +363,7 @@ export class ClaudeSchedulerController implements vscode.Disposable {
         }
         return cadence;
     }
-    private async editSchedule(job: ClaudeSchedule): Promise<ClaudeScheduleChanges | undefined> {
+    private async editSchedule(job: AiSchedule): Promise<AiScheduleChanges | undefined> {
         type Field = 'name' | 'promptContents' | 'promptFile' | 'workspace' | 'mode' | 'bashRules' | 'cadence';
         const items: Array<vscode.QuickPickItem & { field: Field }> = [
             { label: t('예약 이름', 'Schedule name'), description: job.name, field: 'name' },
@@ -421,7 +430,7 @@ export class ClaudeSchedulerController implements vscode.Disposable {
             }
         }
     }
-    private async wizard(): Promise<ClaudeSchedule | undefined> {
+    private async wizard(): Promise<AiSchedule | undefined> {
         const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file');
         if (!folders.length) { throw new Error(t('로컬 워크스페이스 폴더를 열어주세요.', 'Open a local workspace folder.')); }
         const selected = folders.length === 1 ? folders[0] : (await vscode.window.showQuickPick(folders.map(folder => ({ label: folder.name, description: folder.uri.fsPath, folder })),

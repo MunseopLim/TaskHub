@@ -1,32 +1,32 @@
-export const CLAUDE_SCHEDULES_KEY = 'taskhub.claudeSchedules.v1';
-export const MAX_CLAUDE_SCHEDULES = 50;
-export class ClaudeSchedulerError extends Error {
+export const AI_SCHEDULES_KEY = 'taskhub.aiSchedules.v1';
+export const MAX_AI_SCHEDULES = 50;
+export class AiSchedulerError extends Error {
     constructor(readonly code: 'invalidStorage' | 'invalidSchedule' | 'disposed' | 'running' | 'tooMany') { super(code); }
 }
 
-export type ClaudeCadence = { kind: 'interval'; minutes: number } | { kind: 'daily'; hour: number; minute: number };
-export interface ClaudeRunResult {
+export type AiCadence = { kind: 'interval'; minutes: number } | { kind: 'daily'; hour: number; minute: number };
+export interface AiRunResult {
     status: 'success' | 'failed' | 'stopped' | 'skipped' | 'queued' | 'running' | 'interrupted';
     startedAt: number;
     finishedAt?: number;
     report?: string;
     detail?: string;
 }
-export interface ClaudeSchedule {
+export interface AiSchedule {
     id: string;
     name: string;
     workspacePath: string;
     promptPath: string;
     mode: 'analysis' | 'edit';
     bashRules?: string[];
-    cadence: ClaudeCadence;
+    cadence: AiCadence;
     enabled: boolean;
     pausedAt?: number;
     nextRunAt: number;
-    lastRun?: ClaudeRunResult;
+    lastRun?: AiRunResult;
 }
-export type ClaudeScheduleChanges = Partial<Pick<ClaudeSchedule, 'name' | 'workspacePath' | 'promptPath' | 'mode' | 'bashRules' | 'cadence'>>;
-export interface ClaudeSchedulerState { version: 1; jobs: ClaudeSchedule[]; }
+export type AiScheduleChanges = Partial<Pick<AiSchedule, 'name' | 'workspacePath' | 'promptPath' | 'mode' | 'bashRules' | 'cadence'>>;
+export interface AiSchedulerState { version: 1; jobs: AiSchedule[]; }
 
 /** Memento values are JSON data; avoid structuredClone (unavailable in VS Code 1.75's Node 16). */
 function copyData<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
@@ -46,29 +46,29 @@ export function validBashRules(value: unknown): value is string[] {
     });
 }
 
-function skipQueuedRun(job: ClaudeSchedule, now: number): void {
+function skipQueuedRun(job: AiSchedule, now: number): void {
     if (job.lastRun?.status === 'queued') {
         job.lastRun = { ...job.lastRun, status: 'skipped', finishedAt: now, detail: 'scheduler-queued-cancelled' };
     }
 }
 
 /** Record only an actual transition; a legacy paused job has no known pause time to invent. */
-function pauseSchedule(job: ClaudeSchedule, now: number): void {
+function pauseSchedule(job: AiSchedule, now: number): void {
     if (job.enabled) { job.pausedAt = now; }
     job.enabled = false;
 }
 
-export function validCadence(value: unknown): value is ClaudeCadence {
+export function validCadence(value: unknown): value is AiCadence {
     if (!value || typeof value !== 'object') { return false; }
-    const cadence = value as ClaudeCadence;
+    const cadence = value as AiCadence;
     return cadence.kind === 'interval' ? isInteger(cadence.minutes, 1, 10080)
         : cadence.kind === 'daily' && isInteger(cadence.hour, 0, 23) && isInteger(cadence.minute, 0, 59);
 }
 
-export function readSchedulerState(raw: unknown): ClaudeSchedulerState {
+export function readSchedulerState(raw: unknown): AiSchedulerState {
     if (raw === undefined) { return { version: 1, jobs: [] }; }
-    const state = raw as ClaudeSchedulerState;
-    if (!state || state.version !== 1 || !Array.isArray(state.jobs) || state.jobs.length > MAX_CLAUDE_SCHEDULES
+    const state = raw as AiSchedulerState;
+    if (!state || state.version !== 1 || !Array.isArray(state.jobs) || state.jobs.length > MAX_AI_SCHEDULES
         || Buffer.byteLength(JSON.stringify(raw), 'utf8') > 1024 * 1024
         || !state.jobs.every(job => job && /^[a-f0-9-]{36}$/.test(job.id)
             && isText(job.name, 200) && isText(job.workspacePath, 4096) && isText(job.promptPath, 4096)
@@ -82,14 +82,14 @@ export function readSchedulerState(raw: unknown): ClaudeSchedulerState {
                 && (job.lastRun.report === undefined || /^[a-f0-9-]{36}\.txt$/.test(job.lastRun.report))
                 && (job.lastRun.detail === undefined || isText(job.lastRun.detail, 2000)))))
         || new Set(state.jobs.map(job => job.id)).size !== state.jobs.length) {
-        throw new ClaudeSchedulerError('invalidStorage');
+        throw new AiSchedulerError('invalidStorage');
     }
     return copyData(state);
 }
 
 /** Daily times follow the extension host's local clock, including DST. */
-export function nextClaudeRun(cadence: ClaudeCadence, after: number): number {
-    if (!validCadence(cadence) || !Number.isFinite(after)) { throw new ClaudeSchedulerError('invalidSchedule'); }
+export function nextAiRun(cadence: AiCadence, after: number): number {
+    if (!validCadence(cadence) || !Number.isFinite(after)) { throw new AiSchedulerError('invalidSchedule'); }
     if (cadence.kind === 'interval') { return after + cadence.minutes * 60_000; }
     const next = new Date(after);
     next.setHours(cadence.hour, cadence.minute, 0, 0);
@@ -101,8 +101,8 @@ export function nextClaudeRun(cadence: ClaudeCadence, after: number): number {
 }
 
 /** Keep an interval's original clock grid when skipping a slot, also across windows. */
-function skipClaudeRun(job: ClaudeSchedule, now: number): number {
-    if (job.cadence.kind === 'daily') { return nextClaudeRun(job.cadence, now); }
+function skipAiRun(job: AiSchedule, now: number): number {
+    if (job.cadence.kind === 'daily') { return nextAiRun(job.cadence, now); }
     const interval = job.cadence.minutes * 60_000;
     return job.nextRunAt + (Math.floor(Math.max(0, now - job.nextRunAt) / interval) + 1) * interval;
 }
@@ -110,15 +110,15 @@ function skipClaudeRun(job: ClaudeSchedule, now: number): number {
 export interface SchedulerDependencies {
     now(): number;
     schedule(callback: () => void, milliseconds: number): { dispose(): void };
-    save(state: ClaudeSchedulerState): Promise<void>;
-    run(job: ClaudeSchedule, signal: AbortSignal, scheduledAt?: number): Promise<ClaudeRunResult>;
+    save(state: AiSchedulerState): Promise<void>;
+    run(job: AiSchedule, signal: AbortSignal, scheduledAt?: number): Promise<AiRunResult>;
     changed(): void;
     error(error: unknown): void;
 }
 
 /** One run at a time; reserve and persist a slot before dispatching the CLI. */
-export class ClaudeScheduler {
-    private state: ClaudeSchedulerState;
+export class AiScheduler {
+    private state: AiSchedulerState;
     private mutations: Promise<unknown> = Promise.resolve();
     private timer?: { dispose(): void };
     private active?: { id: string; abort: AbortController; done: Promise<void> };
@@ -127,11 +127,11 @@ export class ClaudeScheduler {
     private disposed = false;
     private initialized = false;
     constructor(raw: unknown, private readonly deps: SchedulerDependencies) { this.state = readSchedulerState(raw); }
-    list(): ClaudeSchedule[] { return copyData(this.state.jobs); }
+    list(): AiSchedule[] { return copyData(this.state.jobs); }
     get runningId(): string | undefined { return this.active?.id; }
     get queuedIds(): string[] { return this.pending.map(item => item.id); }
 
-    private change(edit: (state: ClaudeSchedulerState) => void): Promise<void> {
+    private change(edit: (state: AiSchedulerState) => void): Promise<void> {
         const next = this.mutations.then(async () => {
             const state = copyData(this.state);
             edit(state);
@@ -148,7 +148,7 @@ export class ClaudeScheduler {
         await this.change(state => {
             const now = this.deps.now();
             for (const job of state.jobs) {
-                if (job.nextRunAt <= now) { job.nextRunAt = skipClaudeRun(job, now); }
+                if (job.nextRunAt <= now) { job.nextRunAt = skipAiRun(job, now); }
                 if (job.lastRun?.status === 'running') {
                     job.lastRun.status = 'interrupted';
                     pauseSchedule(job, now);
@@ -159,12 +159,12 @@ export class ClaudeScheduler {
         this.arm();
     }
 
-    async put(job: ClaudeSchedule): Promise<void> {
+    async put(job: AiSchedule): Promise<void> {
         await this.change(state => {
-            if (this.disposed) { throw new ClaudeSchedulerError('disposed'); }
-            if (this.active?.id === job.id || this.pending.some(item => item.id === job.id)) { throw new ClaudeSchedulerError('running'); }
+            if (this.disposed) { throw new AiSchedulerError('disposed'); }
+            if (this.active?.id === job.id || this.pending.some(item => item.id === job.id)) { throw new AiSchedulerError('running'); }
             const index = state.jobs.findIndex(item => item.id === job.id);
-            if (index < 0 && state.jobs.length >= MAX_CLAUDE_SCHEDULES) { throw new ClaudeSchedulerError('tooMany'); }
+            if (index < 0 && state.jobs.length >= MAX_AI_SCHEDULES) { throw new AiSchedulerError('tooMany'); }
             const saved = copyData(job);
             // A wizard may outlive a run or a pause. Merge only editable fields.
             if (index >= 0) {
@@ -172,25 +172,25 @@ export class ClaudeScheduler {
                 saved.pausedAt = state.jobs[index].pausedAt;
                 saved.lastRun = state.jobs[index].lastRun;
             }
-            saved.nextRunAt = nextClaudeRun(saved.cadence, this.deps.now());
+            saved.nextRunAt = nextAiRun(saved.cadence, this.deps.now());
             if (index < 0) { state.jobs.push(saved); } else { state.jobs[index] = saved; }
         });
         this.arm();
     }
     /** Apply only edited fields to the current job, without restarting its clock or reviving deleted jobs. */
-    async update(id: string, changes: ClaudeScheduleChanges): Promise<boolean> {
+    async update(id: string, changes: AiScheduleChanges): Promise<boolean> {
         let updated = false;
         await this.change(state => {
-            if (this.disposed) { throw new ClaudeSchedulerError('disposed'); }
+            if (this.disposed) { throw new AiSchedulerError('disposed'); }
             const job = state.jobs.find(item => item.id === id);
             if (!job) { return; }
-            if (this.active?.id === id || this.pending.some(item => item.id === id)) { throw new ClaudeSchedulerError('running'); }
+            if (this.active?.id === id || this.pending.some(item => item.id === id)) { throw new AiSchedulerError('running'); }
             const cadence = changes.cadence;
             const sameCadence = !cadence || (cadence.kind === 'interval'
                 ? job.cadence.kind === 'interval' && cadence.minutes === job.cadence.minutes
                 : job.cadence.kind === 'daily' && cadence.hour === job.cadence.hour && cadence.minute === job.cadence.minute);
             Object.assign(job, copyData(changes));
-            if (!sameCadence) { job.nextRunAt = nextClaudeRun(job.cadence, this.deps.now()); }
+            if (!sameCadence) { job.nextRunAt = nextAiRun(job.cadence, this.deps.now()); }
             updated = true;
         });
         this.arm();
@@ -198,13 +198,13 @@ export class ClaudeScheduler {
     }
     async setEnabled(id: string, enabled: boolean): Promise<void> {
         await this.change(state => {
-            if (enabled && this.disposed) { throw new ClaudeSchedulerError('disposed'); }
+            if (enabled && this.disposed) { throw new AiSchedulerError('disposed'); }
             const job = state.jobs.find(item => item.id === id);
             if (!job) { return; }
             if (enabled) {
                 job.enabled = true;
                 delete job.pausedAt;
-                job.nextRunAt = nextClaudeRun(job.cadence, this.deps.now());
+                job.nextRunAt = nextAiRun(job.cadence, this.deps.now());
             } else {
                 const now = this.deps.now();
                 pauseSchedule(job, now);
@@ -218,7 +218,7 @@ export class ClaudeScheduler {
     }
     async remove(id: string): Promise<void> {
         await this.change(state => {
-            if (this.active?.id === id) { throw new ClaudeSchedulerError('running'); }
+            if (this.active?.id === id) { throw new AiSchedulerError('running'); }
             state.jobs = state.jobs.filter(job => job.id !== id);
         });
         this.pending = this.pending.filter(item => item.id !== id);
@@ -251,7 +251,7 @@ export class ClaudeScheduler {
                 await this.change(state => {
                     const current = state.jobs.find(item => item.id === job.id);
                     if (current?.enabled && current.nextRunAt === job.nextRunAt) {
-                        current.nextRunAt = skipClaudeRun(current, now);
+                        current.nextRunAt = skipAiRun(current, now);
                         if (this.active?.id === current.id || this.pending.some(item => item.id === current.id)) { return; }
                         if (now - job.nextRunAt < 60_000) {
                             current.lastRun = { status: 'queued', startedAt: job.nextRunAt };
@@ -292,12 +292,12 @@ export class ClaudeScheduler {
         const active = { id, abort, done: Promise.resolve() };
         this.active = active;
         active.done = (async () => {
-            let snapshot: ClaudeSchedule | undefined;
+            let snapshot: AiSchedule | undefined;
             try {
                 await this.change(state => {
                     const job = state.jobs.find(item => item.id === id);
                     if (!job || (scheduledAt !== undefined && (!job.enabled || job.lastRun?.status !== 'queued' || job.lastRun.startedAt !== scheduledAt))) { return; }
-                    if (scheduledAt === undefined) { job.nextRunAt = nextClaudeRun(job.cadence, this.deps.now()); }
+                    if (scheduledAt === undefined) { job.nextRunAt = nextAiRun(job.cadence, this.deps.now()); }
                     job.lastRun = { status: 'running', startedAt: this.deps.now() };
                     snapshot = copyData(job);
                 });

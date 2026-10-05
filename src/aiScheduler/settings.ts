@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
+import { legacyAiScheduler } from './compatibility';
 
 const settingNames = {
-    enabled: ['aiScheduler.enabled', 'experimental.aiScheduler.enabled', 'experimental.claudeScheduler.enabled'],
-    executable: ['aiScheduler.executable', 'claudeScheduler.executable'],
-    model: ['aiScheduler.model', 'claudeScheduler.model'],
-    timeoutSeconds: ['aiScheduler.timeoutSeconds', 'claudeScheduler.timeoutSeconds'],
+    enabled: ['aiScheduler.enabled', 'experimental.aiScheduler.enabled', legacyAiScheduler.enabledSetting],
+    executable: ['aiScheduler.executable', legacyAiScheduler.executableSetting],
+    model: ['aiScheduler.model', legacyAiScheduler.modelSetting],
+    timeoutSeconds: ['aiScheduler.timeoutSeconds', legacyAiScheduler.timeoutSetting],
 } as const;
 
 /** These settings are machine-scoped: only explicit user values may override their defaults. */

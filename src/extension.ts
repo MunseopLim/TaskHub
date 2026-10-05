@@ -14,7 +14,7 @@ import { openBrowserTask } from './browserTask';
 import { promptLinkTitle, readClipboardLinkUrl } from './linkInput';
 import type { MemoryMapConfig, MemoryMapOpenHistory } from './memoryMapViewer';
 import type { HexViewerOpenHistory } from './hexViewer';
-import { ClaudeSchedulerRegistration, registerClaudeScheduler } from './claudeScheduler/controller';
+import { AiSchedulerRegistration, registerAiScheduler } from './aiScheduler/controller';
 import { registerFeatureLauncher } from './featureLauncher';
 import { removeRetiredJenkinsData } from './retiredJenkinsCleanup';
 import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
@@ -11921,7 +11921,7 @@ export async function saveActionFolderState(context: vscode.ExtensionContext, fo
     }
 }
 
-let claudeSchedulerRegistration: ClaudeSchedulerRegistration | undefined;
+let aiSchedulerRegistration: AiSchedulerRegistration | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     startRegexWorkerPool();
@@ -11941,10 +11941,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         `[Jenkins Cleanup] Failed to remove retired data: ${error instanceof Error ? error.message : String(error)}`));
     const whatsNew = registerWhatsNew(context);
     registerFeatureLauncher(context, whatsNew);
-    claudeSchedulerRegistration = registerClaudeScheduler(context, killProcessTree);
-    context.subscriptions.push(claudeSchedulerRegistration);
+    aiSchedulerRegistration = registerAiScheduler(context, killProcessTree);
+    context.subscriptions.push(aiSchedulerRegistration);
     registerUpdateService(context, {
-        hasRunningActions: () => collectRunningActionIds().length > 0 || activeTasks.size > 0 || actionChildProcesses.size > 0 || claudeSchedulerRegistration?.hasRunning() === true,
+        hasRunningActions: () => collectRunningActionIds().length > 0 || activeTasks.size > 0 || actionChildProcesses.size > 0 || aiSchedulerRegistration?.hasRunning() === true,
         log: message => outputChannel.appendLine(message),
     });
     // Publish the initial (idle) value so the *Stop All Actions* button is
@@ -14168,8 +14168,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export async function deactivate(): Promise<void> {
-    await claudeSchedulerRegistration?.shutdown();
-    claudeSchedulerRegistration = undefined;
+    await aiSchedulerRegistration?.shutdown();
+    aiSchedulerRegistration = undefined;
     shutdownRegexWorkerPool();
     backgroundCompletionBatcher?.dispose();
     backgroundCompletionBatcher = undefined;

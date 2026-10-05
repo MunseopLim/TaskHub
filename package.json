@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.64",
+  "version": "0.8.65",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -374,8 +374,8 @@
           "when": "config.taskhub.history.showPanel"
         },
         {
-          "id": "mainView.claudeSchedules",
-          "name": "%view.claudeSchedules%",
+          "id": "mainView.aiSchedules",
+          "name": "%view.aiSchedules%",
           "when": "taskhub.aiScheduler.enabled && config.taskhub.aiScheduler.showPanel"
         }
       ]
@@ -411,9 +411,9 @@
         "contents": "%welcome.noHistory%"
       },
       {
-        "view": "mainView.claudeSchedules",
+        "view": "mainView.aiSchedules",
         "when": "taskhub.aiScheduler.enabled",
-        "contents": "%welcome.claudeSchedules%"
+        "contents": "%welcome.aiSchedules%"
       }
     ],
     "commands": [
@@ -803,71 +803,71 @@
         "category": "TaskHub"
       },
       {
-        "command": "taskhub.claudeScheduler.add",
-        "title": "%cmd.claudeScheduler.add%",
+        "command": "taskhub.aiScheduler.add",
+        "title": "%cmd.aiScheduler.add%",
         "category": "TaskHub",
         "icon": "$(add)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.edit",
-        "title": "%cmd.claudeScheduler.edit%",
+        "command": "taskhub.aiScheduler.edit",
+        "title": "%cmd.aiScheduler.edit%",
         "category": "TaskHub",
         "icon": "$(edit)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.pause",
-        "title": "%cmd.claudeScheduler.pause%",
+        "command": "taskhub.aiScheduler.pause",
+        "title": "%cmd.aiScheduler.pause%",
         "category": "TaskHub",
         "icon": "$(debug-pause)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.resume",
-        "title": "%cmd.claudeScheduler.resume%",
+        "command": "taskhub.aiScheduler.resume",
+        "title": "%cmd.aiScheduler.resume%",
         "category": "TaskHub",
         "icon": "$(play)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.runNow",
-        "title": "%cmd.claudeScheduler.runNow%",
+        "command": "taskhub.aiScheduler.runNow",
+        "title": "%cmd.aiScheduler.runNow%",
         "category": "TaskHub",
         "icon": "$(play)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.stop",
-        "title": "%cmd.claudeScheduler.stop%",
+        "command": "taskhub.aiScheduler.stop",
+        "title": "%cmd.aiScheduler.stop%",
         "category": "TaskHub",
         "icon": "$(debug-stop)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.remove",
-        "title": "%cmd.claudeScheduler.remove%",
+        "command": "taskhub.aiScheduler.remove",
+        "title": "%cmd.aiScheduler.remove%",
         "category": "TaskHub",
         "icon": "$(trash)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.openReport",
-        "title": "%cmd.claudeScheduler.openReport%",
+        "command": "taskhub.aiScheduler.openReport",
+        "title": "%cmd.aiScheduler.openReport%",
         "category": "TaskHub",
         "icon": "$(output)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.showSchedules",
-        "title": "%cmd.claudeScheduler.showSchedules%",
+        "command": "taskhub.aiScheduler.showSchedules",
+        "title": "%cmd.aiScheduler.showSchedules%",
         "category": "TaskHub",
         "icon": "$(clock)",
         "enablement": "taskhub.aiScheduler.enabled"
       },
       {
-        "command": "taskhub.claudeScheduler.reset",
-        "title": "%cmd.claudeScheduler.reset%",
+        "command": "taskhub.aiScheduler.reset",
+        "title": "%cmd.aiScheduler.reset%",
         "category": "TaskHub",
         "icon": "$(discard)",
         "enablement": "taskhub.aiScheduler.enabled"
@@ -1008,43 +1008,43 @@
           "when": "false"
         },
         {
-          "command": "taskhub.claudeScheduler.add",
+          "command": "taskhub.aiScheduler.add",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.edit",
+          "command": "taskhub.aiScheduler.edit",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.pause",
+          "command": "taskhub.aiScheduler.pause",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.resume",
+          "command": "taskhub.aiScheduler.resume",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.runNow",
+          "command": "taskhub.aiScheduler.runNow",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.stop",
+          "command": "taskhub.aiScheduler.stop",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.remove",
+          "command": "taskhub.aiScheduler.remove",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.openReport",
+          "command": "taskhub.aiScheduler.openReport",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.showSchedules",
+          "command": "taskhub.aiScheduler.showSchedules",
           "when": "taskhub.aiScheduler.enabled"
         },
         {
-          "command": "taskhub.claudeScheduler.reset",
+          "command": "taskhub.aiScheduler.reset",
           "when": "taskhub.aiScheduler.enabled"
         }
       ],
@@ -1135,13 +1135,13 @@
           "group": "navigation"
         },
         {
-          "command": "taskhub.claudeScheduler.add",
-          "when": "view == mainView.claudeSchedules && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.add",
+          "when": "view == mainView.aiSchedules && taskhub.aiScheduler.enabled",
           "group": "navigation"
         },
         {
-          "command": "taskhub.claudeScheduler.reset",
-          "when": "view == mainView.claudeSchedules && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.reset",
+          "when": "view == mainView.aiSchedules && taskhub.aiScheduler.enabled",
           "group": "navigation@9"
         }
       ],
@@ -1380,43 +1380,43 @@
           "group": "context@0"
         },
         {
-          "command": "taskhub.claudeScheduler.edit",
-          "when": "view == mainView.claudeSchedules && viewItem =~ /^claudeSchedule(Enabled|Paused)$/ && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.edit",
+          "when": "view == mainView.aiSchedules && viewItem =~ /^aiSchedule(Enabled|Paused)$/ && taskhub.aiScheduler.enabled",
           "group": "context@1"
         },
         {
-          "command": "taskhub.claudeScheduler.pause",
-          "when": "view == mainView.claudeSchedules && viewItem == claudeScheduleEnabled && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.pause",
+          "when": "view == mainView.aiSchedules && viewItem == aiScheduleEnabled && taskhub.aiScheduler.enabled",
           "group": "context@1"
         },
         {
-          "command": "taskhub.claudeScheduler.resume",
-          "when": "view == mainView.claudeSchedules && viewItem == claudeSchedulePaused && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.resume",
+          "when": "view == mainView.aiSchedules && viewItem == aiSchedulePaused && taskhub.aiScheduler.enabled",
           "group": "context@1"
         },
         {
-          "command": "taskhub.claudeScheduler.runNow",
-          "when": "view == mainView.claudeSchedules && viewItem =~ /^claudeSchedule(Enabled|Paused)$/ && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.runNow",
+          "when": "view == mainView.aiSchedules && viewItem =~ /^aiSchedule(Enabled|Paused)$/ && taskhub.aiScheduler.enabled",
           "group": "context@1"
         },
         {
-          "command": "taskhub.claudeScheduler.stop",
-          "when": "view == mainView.claudeSchedules && viewItem =~ /^claudeSchedule(Running|Queued)$/ && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.stop",
+          "when": "view == mainView.aiSchedules && viewItem =~ /^aiSchedule(Running|Queued)$/ && taskhub.aiScheduler.enabled",
           "group": "inline"
         },
         {
-          "command": "taskhub.claudeScheduler.remove",
-          "when": "view == mainView.claudeSchedules && viewItem =~ /^claudeSchedule(Enabled|Paused)$/ && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.remove",
+          "when": "view == mainView.aiSchedules && viewItem =~ /^aiSchedule(Enabled|Paused)$/ && taskhub.aiScheduler.enabled",
           "group": "9_delete"
         },
         {
-          "command": "taskhub.claudeScheduler.openReport",
-          "when": "view == mainView.claudeSchedules && viewItem =~ /^claudeSchedule(Enabled|Paused|Running|Queued)$/ && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.openReport",
+          "when": "view == mainView.aiSchedules && viewItem =~ /^aiSchedule(Enabled|Paused|Running|Queued)$/ && taskhub.aiScheduler.enabled",
           "group": "context@1"
         },
         {
-          "command": "taskhub.claudeScheduler.stop",
-          "when": "view == mainView.claudeSchedules && viewItem =~ /^claudeSchedule(Running|Queued)$/ && taskhub.aiScheduler.enabled",
+          "command": "taskhub.aiScheduler.stop",
+          "when": "view == mainView.aiSchedules && viewItem =~ /^aiSchedule(Running|Queued)$/ && taskhub.aiScheduler.enabled",
           "group": "context@1"
         }
       ]
