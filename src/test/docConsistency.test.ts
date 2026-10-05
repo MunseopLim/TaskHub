@@ -32,11 +32,13 @@ function markdownDocFiles(): string[] {
     return [...roots, ...nested].sort();
 }
 
-/** Approximate GitHub's heading IDs while preserving Korean and other Unicode letters. */
+/** Collect explicit HTML anchors and approximate GitHub's Unicode heading IDs. */
 function markdownHeadingIds(body: string): Set<string> {
     const counts = new Map<string, number>();
     const ids = new Set<string>();
     for (const line of body.split('\n')) {
+        const explicit = /^ {0,3}<a\s+(?:id|name)=["']([^"']+)["']\s*><\/a>\s*$/i.exec(line);
+        if (explicit) { ids.add(explicit[1]); continue; }
         const match = /^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line);
         if (!match) { continue; }
         const base = match[1]
@@ -595,6 +597,16 @@ suite('Documentation Consistency', () => {
     // 10. 저장소 내 Markdown 링크와 heading anchor
     // =====================================================================
     suite('Markdown local links and anchors', () => {
+        test('섹션을 이동해도 명시적 HTML anchor로 기존 링크를 유지한다', () => {
+            assert.deepStrictEqual([...markdownHeadingIds([
+                '<a id="162-ai-예약-실행"></a>',
+                '',
+                '## 26. AI 예약 실행',
+                "<a name='previous-section'></a>",
+                '`<a id="inline-code"></a>`',
+                '<span id="unsupported-tag"></span>',
+            ].join('\n'))], ['162-ai-예약-실행', '26-ai-예약-실행', 'previous-section']);
+        });
         test('heading의 식별자 내부 밑줄은 유지하고 강조 구분자만 제거한다', () => {
             assert.deepStrictEqual([...markdownHeadingIds([
                 '### 15.4. 커스텀 타입 설정 (taskhub_types.json)',

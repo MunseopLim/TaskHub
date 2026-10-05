@@ -2,8 +2,14 @@ import { defineConfig } from '@vscode/test-cli';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
+import { mkdirSync, writeFileSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const userDataDir = join(tmpdir(), `taskhub-user-data-${process.pid}`);
+// Scheduler integration tests create isolated controllers and exercise activation
+// explicitly. Keep the extension's own controller out of that test-only profile.
+mkdirSync(join(userDataDir, 'User'), { recursive: true });
+writeFileSync(join(userDataDir, 'User', 'settings.json'), JSON.stringify({ 'taskhub.aiScheduler.enabled': false }));
 
 export default defineConfig({
 	files: 'out/test/**/*.test.js',
@@ -16,6 +22,6 @@ export default defineConfig({
 		'--disable-renderer-backgrounding',
 		// test-cli가 뒤에 붙이는 workspace 경로를 미등록 Chromium 옵션의
 		// 값으로 소비하지 않도록 VS Code가 아는 옵션을 마지막에 둔다.
-		`--user-data-dir=${join(tmpdir(), `taskhub-user-data-${process.pid}`)}`,
+		`--user-data-dir=${userDataDir}`,
 	],
 });

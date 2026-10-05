@@ -5,13 +5,13 @@ import { randomUUID } from 'crypto';
 import { t } from '../i18n';
 import { plainNotificationText } from '../notificationText';
 import { ClaudeSchedulesProvider, cadenceLabel } from '../providers/claudeSchedulesProvider';
-import { CLAUDE_SCHEDULES_KEY, ClaudeCadence, ClaudeSchedule, ClaudeScheduler, ClaudeSchedulerError, SchedulerDependencies, validBashRules } from './model';
+import { CLAUDE_SCHEDULES_KEY, ClaudeCadence, ClaudeSchedule, ClaudeScheduleChanges, ClaudeScheduler, ClaudeSchedulerError, SchedulerDependencies, validBashRules } from './model';
 import { ClaudeCliOptions, KillClaudeProcess, runScheduledClaude } from './runner';
 import { ClaudeReportDocuments } from './reportDocument';
 import { aiScheduleSetting, aiSchedulesEnabled } from './settings';
 
 const commands = ['add', 'edit', 'pause', 'resume', 'runNow', 'stop', 'remove', 'openReport', 'showSchedules', 'reset'] as const;
-const featureKey = 'experimental.aiScheduler.enabled';
+const enableSettings = ['aiScheduler.enabled', 'experimental.aiScheduler.enabled', 'experimental.claudeScheduler.enabled'];
 function showError(error: unknown): void {
     const messages: Record<ClaudeSchedulerError['code'], string> = {
         invalidStorage: t('저장된 예약 데이터가 손상됐거나 지원하지 않는 형식입니다. 기존 데이터는 보존했습니다. "AI: 예약 데이터 초기화"로 백업 후 복구할 수 있습니다.', 'Stored schedules are corrupt or unsupported. Existing data was preserved. Use "AI: Reset Schedule Data" to back up and recover.'),
@@ -107,7 +107,7 @@ export function registerClaudeScheduler(context: vscode.ExtensionContext, kill: 
         }
     };
     const listener = vscode.workspace.onDidChangeConfiguration(event => {
-        if (event.affectsConfiguration(`taskhub.${featureKey}`) || event.affectsConfiguration('taskhub.experimental.claudeScheduler.enabled')) { update(); }
+        if (enableSettings.some(key => event.affectsConfiguration(`taskhub.${key}`))) { update(); }
     });
     const trustListener = vscode.workspace.onDidGrantWorkspaceTrust(update);
     update();
@@ -174,7 +174,12 @@ export class ClaudeSchedulerController implements vscode.Disposable {
         return picked?.job;
     }
     private async execute(command: typeof commands[number], node?: ClaudeSchedule): Promise<void> {
-        if (command === 'showSchedules') { await vscode.commands.executeCommand('mainView.claudeSchedules.focus'); return; }
+        if (command === 'showSchedules') {
+            if (!vscode.workspace.getConfiguration('taskhub').get<boolean>('aiScheduler.showPanel', true)) {
+                await vscode.commands.executeCommand('workbench.action.openSettings', '@id:taskhub.aiScheduler.showPanel');
+            } else { await vscode.commands.executeCommand('mainView.claudeSchedules.focus'); }
+            return;
+        }
         if (command === 'reset') { await this.resetStorage(); return; }
         if (this.storageError) { throw this.storageError; }
         if (command === 'add') {
@@ -190,9 +195,14 @@ export class ClaudeSchedulerController implements vscode.Disposable {
             void vscode.window.showInformationMessage(t('다른 AI 예약이 실행 중입니다.', 'Another AI schedule is running.'));
         }
         if (command === 'edit') {
-            if (this.engine.runningId === job.id) { throw new Error(t('실행을 중지한 뒤 예약을 편집하세요.', 'Stop the run before editing its schedule.')); }
-            const updated = await this.wizard(job);
-            if (updated && !this.disposed) { await this.engine.put(updated); }
+            if (this.engine.runningId === job.id || this.engine.queuedIds.includes(job.id)) {
+                throw new Error(t('실행 중이거나 대기 중인 예약은 편집할 수 없습니다. 실행이 끝나거나 중지한 뒤 편집하세요.',
+                    'A running or queued schedule cannot be edited. Edit it after the run finishes or is stopped.'));
+            }
+            const changes = await this.editSchedule(job);
+            if (changes && !this.disposed && !await this.engine.update(job.id, changes)) {
+                throw new Error(t('이 예약은 이미 삭제됐습니다.', 'This schedule has already been deleted.'));
+            }
         }
         if (command === 'remove') {
             const yes = 'Yes';
@@ -221,7 +231,7 @@ export class ClaudeSchedulerController implements vscode.Disposable {
         this.storageError = undefined;
         void vscode.window.showInformationMessage(t(`예약 목록을 초기화했습니다. 백업: ${backup}`, `Schedules reset. Backup: ${backup}`));
     }
-    private async choosePrompt(selected: vscode.WorkspaceFolder, workspacePath: string, existing?: ClaudeSchedule): Promise<string | undefined> {
+    private async choosePrompt(selected: vscode.Uri, workspacePath: string, existing?: ClaudeSchedule): Promise<string | undefined> {
         const filters = { [t('요청문', 'Prompt')]: ['md', 'txt'] };
         let promptUri: vscode.Uri | undefined;
         if (!existing) {
@@ -229,8 +239,8 @@ export class ClaudeSchedulerController implements vscode.Disposable {
                 {
                     label: t('예제 요청문 만들기', 'Create an example prompt'),
                     description: t('처음 사용할 때 추천', 'Recommended for your first schedule'),
-                    detail: t('목표·범위·지시·결과 형식을 담은 코드 검토 예제를 열어 수정합니다. 저장 후 예약 등록을 이어갑니다.',
-                        'Edit a code review example with a goal, scope, instructions, and output format, then save and continue scheduling.'),
+                    detail: t('목표·범위·지시·결과 형식을 담은 코드 검토 예제를 엽니다. 수정하고 저장한 뒤 예약 추가에서 기존 요청문 파일을 선택하세요.',
+                        'Open a code review example with a goal, scope, instructions, and output format. Edit and save it, then use Add schedule to choose the existing prompt file.'),
                     promptSource: 'example' as const,
                 },
                 {
@@ -249,7 +259,7 @@ export class ClaudeSchedulerController implements vscode.Disposable {
             if (source.promptSource === 'example') {
                 const savedUri = await vscode.window.showSaveDialog({
                     title: t('작업 폴더 안에 예제 요청문 저장', 'Save the example prompt inside the working folder'),
-                    defaultUri: vscode.Uri.joinPath(selected.uri, 'ai-schedule-prompt.md'),
+                    defaultUri: vscode.Uri.joinPath(selected, 'ai-schedule-prompt.md'),
                     saveLabel: t('예제 요청문 만들기', 'Create example prompt'), filters,
                 });
                 if (!savedUri || this.disposed) { return; }
@@ -271,22 +281,19 @@ export class ClaudeSchedulerController implements vscode.Disposable {
                 promptUri = vscode.Uri.file(promptPath);
                 const document = await vscode.workspace.openTextDocument(promptUri);
                 await vscode.window.showTextDocument(document, { preview: false });
-                const continueLabel = t('저장하고 예약 계속', 'Save and continue scheduling');
-                const choice = await vscode.window.showInformationMessage(t(
-                    '예제의 목표·범위·지시·결과 형식을 원하는 작업으로 수정한 뒤 "저장하고 예약 계속"을 누르세요. 아직 예약은 등록되지 않았습니다.',
-                    'Edit the example’s goal, scope, instructions, and output format, then choose "Save and continue scheduling". No schedule has been registered yet.'
-                ), continueLabel);
-                if (choice !== continueLabel || this.disposed) { return; }
-                if (!await document.save()) {
-                    throw new Error(t('요청문을 저장하지 못했습니다. 저장한 뒤 예약을 다시 추가하세요.', 'Could not save the prompt. Save it and add the schedule again.'));
-                }
+                // Editing can outlast a notification toast. End Add here instead of holding its command lock.
+                void vscode.window.showInformationMessage(t(
+                    '예제 요청문을 열었습니다. 목표·범위·지시·결과 형식을 원하는 작업으로 수정하고 저장한 뒤, 예약 추가에서 "기존 요청문 파일 선택"을 고르세요. 아직 예약은 등록되지 않았습니다.',
+                    'The example prompt is open. Edit its goal, scope, instructions, and output format, then save it. Use Add schedule and choose "Choose an existing prompt file" to register it. No schedule has been registered yet.'
+                ));
+                return;
             }
         }
         if (!promptUri) {
             const files = await vscode.window.showOpenDialog({
                 title: t('반복할 작업을 작성한 요청문 파일 선택 (.md / .txt)', 'Select a prompt describing the recurring task (.md / .txt)'),
                 canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
-                defaultUri: existing ? vscode.Uri.file(existing.promptPath) : selected.uri,
+                defaultUri: existing ? vscode.Uri.file(existing.promptPath) : selected,
                 openLabel: t('요청문 파일 선택', 'Select prompt file'), filters,
             });
             promptUri = files?.[0];
@@ -296,49 +303,48 @@ export class ClaudeSchedulerController implements vscode.Disposable {
         assertPromptInsideWorkspace(workspacePath, promptPath);
         return promptPath;
     }
-    private async wizard(existing?: ClaudeSchedule): Promise<ClaudeSchedule | undefined> {
-        const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file');
-        if (!folders.length) { throw new Error(t('로컬 워크스페이스 폴더를 열어주세요.', 'Open a local workspace folder.')); }
-        const selected = folders.length === 1 ? folders[0] : (await vscode.window.showQuickPick(folders.map(folder => ({ label: folder.name, description: folder.uri.fsPath, folder })),
-            { placeHolder: t('AI 예약을 실행할 작업 폴더를 선택하세요.', 'Choose the working folder for the AI schedule.') }))?.folder;
-        if (!selected) { return; }
-        const workspacePath = await fs.realpath(selected.uri.fsPath);
-        const promptPath = await this.choosePrompt(selected, workspacePath, existing);
-        if (!promptPath || this.disposed) { return; }
-        const name = await vscode.window.showInputBox({ value: existing?.name ?? path.basename(promptPath),
+    private async askName(value: string): Promise<string | undefined> {
+        const name = await vscode.window.showInputBox({ value,
             prompt: t('예약 이름', 'Schedule name'), validateInput: value => value.trim() && value.trim().length <= 200 ? undefined : t('1~200자로 입력하세요.', 'Enter 1–200 characters.') });
-        if (!name?.trim()) { return; }
-        const mode = await vscode.window.showQuickPick([
+        return name?.trim() || undefined;
+    }
+    private async askMode(current: ClaudeSchedule['mode'] = 'analysis'): Promise<ClaudeSchedule['mode'] | undefined> {
+        const items = [
             { label: t('분석', 'Analysis'), description: t('코드를 읽고 결과 보고 — 파일 수정·명령 실행 없음', 'Read code and report findings — no file edits or commands'), mode: 'analysis' as const },
             { label: t('코드 수정', 'Code editing'), description: t('작업 폴더의 코드 수정 — 실행할 명령은 다음 단계에서 지정', 'Edit code in the working folder — choose allowed commands in the next step'), mode: 'edit' as const },
-        ], { placeHolder: t('예약 실행에 허용할 도구를 선택하세요.', 'Choose the tools allowed for this schedule.') });
-        if (!mode) { return; }
-        let bashRules: string[] = [];
-        if (mode.mode === 'edit') {
-            const input = await vscode.window.showInputBox({ value: JSON.stringify(existing?.bashRules ?? []),
-                prompt: t('Bash 허용 규칙 JSON 배열 (예: ["Bash(git diff *)", "Bash(npm test)"]). []는 Bash 제외. 허용 명령·프로젝트 스크립트는 파일 도구의 경로 제한 밖에서도 동작할 수 있습니다.',
-                    'Bash allow rules as a JSON array (e.g. ["Bash(git diff *)", "Bash(npm test)"]). [] excludes Bash. Allowed commands and project scripts can act beyond file-tool path limits.'),
-                validateInput: value => {
-                    try { if (validBashRules(JSON.parse(value))) { return undefined; } } catch { /* Validate below. */ }
-                    return t('Bash(...) 규칙 최대 20개를 JSON 배열로 입력하세요. 전체 Bash 허용은 지원하지 않습니다.', 'Enter up to 20 Bash(...) rules as a JSON array. Allowing all Bash commands is unsupported.');
-                } });
-            if (input === undefined) { return; }
-            bashRules = JSON.parse(input);
-        }
-        const kind = await vscode.window.showQuickPick([
+        ];
+        if (current === 'edit') { items.reverse(); }
+        return (await vscode.window.showQuickPick(items, { placeHolder: t('예약 실행에 허용할 도구를 선택하세요.', 'Choose the tools allowed for this schedule.') }))?.mode;
+    }
+    private async askBashRules(current: string[] = []): Promise<string[] | undefined> {
+        const input = await vscode.window.showInputBox({ value: JSON.stringify(current),
+            prompt: t('Bash 허용 규칙 JSON 배열 (예: ["Bash(git diff *)", "Bash(npm test)"]). []는 Bash 제외. 허용 명령·프로젝트 스크립트는 파일 도구의 경로 제한 밖에서도 동작할 수 있습니다.',
+                'Bash allow rules as a JSON array (e.g. ["Bash(git diff *)", "Bash(npm test)"]). [] excludes Bash. Allowed commands and project scripts can act beyond file-tool path limits.'),
+            validateInput: value => {
+                try { if (validBashRules(JSON.parse(value))) { return undefined; } } catch { /* Validate below. */ }
+                return t('Bash(...) 규칙 최대 20개를 JSON 배열로 입력하세요. 전체 Bash 허용은 지원하지 않습니다.', 'Enter up to 20 Bash(...) rules as a JSON array. Allowing all Bash commands is unsupported.');
+            } });
+        return input === undefined ? undefined : JSON.parse(input);
+    }
+    private async askCadence(current?: ClaudeCadence): Promise<ClaudeCadence | undefined> {
+        const items = [
             { label: t('간격 반복', 'Repeat at intervals'), description: t('예: 60분마다 실행', 'For example, run every 60 minutes'), cadenceKind: 'interval' as const },
             { label: t('매일 지정 시각', 'Daily at a set time'), description: t('예: 매일 현지 시각 오전 9시', 'For example, daily at 9 AM local time'), cadenceKind: 'daily' as const },
-        ], { placeHolder: t('VS Code가 열려 있을 때 실행합니다. 첫 실행은 다음 예약 시각입니다.', 'Runs while VS Code is open. The first run is at the next scheduled time.') });
+        ];
+        if (current?.kind === 'daily') { items.reverse(); }
+        const kind = await vscode.window.showQuickPick(items, { placeHolder: current
+            ? t('실행 주기를 변경하면 다음 예약 시각을 새 주기로 계산합니다.', 'Changing the cadence recalculates the next scheduled time.')
+            : t('VS Code가 열려 있을 때 실행합니다. 첫 실행은 다음 예약 시각입니다.', 'Runs while VS Code is open. The first run is at the next scheduled time.') });
         if (!kind) { return; }
         let cadence: ClaudeCadence;
         if (kind.cadenceKind === 'interval') {
-            const minutes = await vscode.window.showInputBox({ value: existing?.cadence.kind === 'interval' ? String(existing.cadence.minutes) : '60',
+            const minutes = await vscode.window.showInputBox({ value: current?.kind === 'interval' ? String(current.minutes) : '60',
                 prompt: t('실행 간격 (분, 1~10080)', 'Interval in minutes (1–10080)'),
                 validateInput: value => /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 10080 ? undefined : t('1~10080 사이의 정수를 입력하세요.', 'Enter an integer from 1 to 10080.') });
             if (!minutes) { return; }
             cadence = { kind: 'interval', minutes: Number(minutes) };
         } else {
-            const daily = existing?.cadence.kind === 'daily' ? existing.cadence : undefined;
+            const daily = current?.kind === 'daily' ? current : undefined;
             const time = await vscode.window.showInputBox({ value: daily ? `${String(daily.hour).padStart(2, '0')}:${String(daily.minute).padStart(2, '0')}` : '09:00',
                 prompt: t('매일 실행할 현지 시각 (HH:mm)', 'Daily local time (HH:mm)'),
                 validateInput: value => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value) ? undefined : t('HH:mm 형식으로 입력하세요.', 'Enter a time in HH:mm format.') });
@@ -346,8 +352,93 @@ export class ClaudeSchedulerController implements vscode.Disposable {
             const [hour, minute] = time.split(':').map(Number);
             cadence = { kind: 'daily', hour, minute };
         }
-        return { id: existing?.id ?? randomUUID(), name: name.trim(), workspacePath, promptPath, mode: mode.mode, bashRules,
-            cadence, enabled: true, nextRunAt: 0 };
+        return cadence;
+    }
+    private async editSchedule(job: ClaudeSchedule): Promise<ClaudeScheduleChanges | undefined> {
+        type Field = 'name' | 'promptContents' | 'promptFile' | 'workspace' | 'mode' | 'bashRules' | 'cadence';
+        const items: Array<vscode.QuickPickItem & { field: Field }> = [
+            { label: t('예약 이름', 'Schedule name'), description: job.name, field: 'name' },
+            { label: t('요청문 내용 편집', 'Edit prompt contents'), description: path.basename(job.promptPath),
+                detail: t('파일을 열어 수정하고 저장하면 다음 실행부터 사용합니다.', 'Edit and save the file to use the new content on the next run.'), field: 'promptContents' },
+            { label: t('요청문 파일 변경', 'Change prompt file'), description: job.promptPath, field: 'promptFile' },
+            { label: t('작업 폴더', 'Working folder'), description: job.workspacePath, field: 'workspace' },
+            { label: t('허용 도구', 'Allowed tools'), description: job.mode === 'edit' ? t('코드 수정', 'Code editing') : t('분석', 'Analysis'), field: 'mode' },
+            { label: t('실행 주기', 'Cadence'), description: cadenceLabel(job.cadence), field: 'cadence' },
+        ];
+        if (job.mode === 'edit') { items.push({ label: t('허용 명령', 'Allowed commands'), description: JSON.stringify(job.bashRules ?? []), field: 'bashRules' }); }
+        const selected = await vscode.window.showQuickPick(items, {
+            title: t(`AI 예약 편집 — ${plainNotificationText(job.name)}`, `Edit AI Schedule — ${plainNotificationText(job.name)}`),
+            placeHolder: t('변경할 항목을 선택하세요. 다른 설정과 실행 상태는 유지합니다.', 'Choose a field to edit. Other settings and run state are preserved.'),
+        });
+        if (!selected || this.disposed) { return; }
+        switch (selected.field) {
+            case 'name': {
+                const name = await this.askName(job.name);
+                return name === undefined ? undefined : { name };
+            }
+            case 'promptContents': {
+                const promptPath = await fs.realpath(job.promptPath);
+                assertPromptInsideWorkspace(await fs.realpath(job.workspacePath), promptPath);
+                const document = await vscode.workspace.openTextDocument(vscode.Uri.file(promptPath));
+                if (!this.disposed) { await vscode.window.showTextDocument(document, { preview: false }); }
+                return;
+            }
+            case 'promptFile': {
+                const workspacePath = await fs.realpath(job.workspacePath);
+                const promptPath = await this.choosePrompt(vscode.Uri.file(workspacePath), workspacePath, job);
+                return promptPath === undefined ? undefined : { promptPath };
+            }
+            case 'workspace': {
+                const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file');
+                if (!folders.length) { throw new Error(t('로컬 워크스페이스 폴더를 열어주세요.', 'Open a local workspace folder.')); }
+                // A missing folder must not block choosing one of the others.
+                const choices = (await Promise.all(folders.map(async folder => ({ label: folder.name, description: folder.uri.fsPath,
+                    folder, workspacePath: await fs.realpath(folder.uri.fsPath).catch(() => '') }))))
+                    .filter(choice => choice.workspacePath);
+                if (!choices.length) { throw new Error(t('로컬 워크스페이스 폴더를 열어주세요.', 'Open a local workspace folder.')); }
+                choices.sort((a, b) => Number(b.workspacePath === job.workspacePath) - Number(a.workspacePath === job.workspacePath));
+                const selectedFolder = await vscode.window.showQuickPick(choices, {
+                    placeHolder: t('작업 폴더를 변경하면 해당 폴더 안의 요청문 파일을 선택합니다.', 'Choose a working folder, then select a prompt file inside it.'),
+                });
+                if (!selectedFolder || selectedFolder.workspacePath === job.workspacePath || this.disposed) { return; }
+                const { folder, workspacePath } = selectedFolder;
+                const promptPath = await this.choosePrompt(folder.uri, workspacePath, { ...job, promptPath: path.join(workspacePath, path.basename(job.promptPath)) });
+                return promptPath === undefined ? undefined : { workspacePath, promptPath };
+            }
+            case 'mode': {
+                const mode = await this.askMode(job.mode);
+                if (!mode) { return; }
+                const bashRules = mode === 'edit' ? await this.askBashRules(job.bashRules) : [];
+                return bashRules === undefined ? undefined : { mode, bashRules };
+            }
+            case 'bashRules': {
+                const bashRules = await this.askBashRules(job.bashRules);
+                return bashRules === undefined ? undefined : { bashRules };
+            }
+            case 'cadence': {
+                const cadence = await this.askCadence(job.cadence);
+                return cadence === undefined ? undefined : { cadence };
+            }
+        }
+    }
+    private async wizard(): Promise<ClaudeSchedule | undefined> {
+        const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file');
+        if (!folders.length) { throw new Error(t('로컬 워크스페이스 폴더를 열어주세요.', 'Open a local workspace folder.')); }
+        const selected = folders.length === 1 ? folders[0] : (await vscode.window.showQuickPick(folders.map(folder => ({ label: folder.name, description: folder.uri.fsPath, folder })),
+            { placeHolder: t('AI 예약을 실행할 작업 폴더를 선택하세요.', 'Choose the working folder for the AI schedule.') }))?.folder;
+        if (!selected) { return; }
+        const workspacePath = await fs.realpath(selected.uri.fsPath);
+        const promptPath = await this.choosePrompt(selected.uri, workspacePath);
+        if (!promptPath || this.disposed) { return; }
+        const name = await this.askName(path.basename(promptPath));
+        if (!name) { return; }
+        const mode = await this.askMode();
+        if (!mode) { return; }
+        const bashRules = mode === 'edit' ? await this.askBashRules() : [];
+        if (!bashRules) { return; }
+        const cadence = await this.askCadence();
+        if (!cadence) { return; }
+        return { id: randomUUID(), name, workspacePath, promptPath, mode, bashRules, cadence, enabled: true, nextRunAt: 0 };
     }
     dispose(): void {
         if (this.disposed) { return; }

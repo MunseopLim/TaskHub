@@ -10,6 +10,8 @@ import { ClaudeRunResult, ClaudeSchedule } from './model';
 const promptLimit = 256 * 1024;
 const outputLimit = 4 * 1024 * 1024;
 const errorLimit = 256 * 1024;
+// Include input snapshots and UTF-8 replacement characters in diagnostic reports.
+const reportLimit = 16 * 1024 * 1024;
 export const MIN_CLAUDE_CLI_VERSION = '2.1.248';
 export interface ClaudeCliOptions {
     executable: string;
@@ -19,6 +21,54 @@ export interface ClaudeCliOptions {
     prefixArgs?: readonly string[];
 }
 export type KillClaudeProcess = (child: ChildProcess) => Promise<boolean>;
+
+interface ClaudeInvocation {
+    phase: 'version' | 'prompt';
+    executable: string;
+    args: string[];
+    cwd: string;
+    started: boolean;
+    stdinStatus: 'notSent' | 'writing' | 'written' | 'failed';
+    stdinBytes: number;
+    stdinText?: string;
+}
+
+/** A display command for POSIX shells or PowerShell; the runner itself never uses a shell. */
+export function formatClaudeCommand(executable: string, args: readonly string[], platform: NodeJS.Platform = process.platform): string {
+    const quote = (value: string): string => platform === 'win32'
+        ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, "'\\''")}'`;
+    return (platform === 'win32' ? '& ' : '') + [executable, ...args].map(quote).join(' ');
+}
+
+function invocationDetails(invocations: ClaudeInvocation[]): string {
+    if (!invocations.length) {
+        return t('CLI는 시작되지 않았고 요청문도 전송되지 않았습니다.', 'The CLI was not started and the prompt was not sent.');
+    }
+    const lines = [t('실행 상세', 'Execution details'), t(
+        '요청문은 명령 인자가 아니라 stdin 파이프에 UTF-8로 씁니다. 아래 명령은 표시용이며 실제 실행은 shell: false입니다.',
+        'The prompt is written to the stdin pipe as UTF-8, rather than passed as an argument. Commands below are for display; actual execution uses shell: false.'
+    )];
+    const inputStates = {
+        notSent: t('전송하지 않음', 'Not sent'), writing: t('기록 중 종료됨 — 일부만 전달됐을 수 있음', 'Closed during writing — delivery may be partial'),
+        written: t('stdin 파이프에 기록 완료', 'Written to the stdin pipe'), failed: t('전송 실패 — 일부만 전달됐을 수 있음', 'Delivery failed — may be partial'),
+    };
+    for (const invocation of invocations) {
+        lines.push('', invocation.phase === 'version' ? t('버전 확인', 'Version check') : t('요청문 실행', 'Prompt execution'),
+            process.platform === 'win32' ? t('명령 (PowerShell 표기):', 'Command (PowerShell syntax):') : t('명령 (POSIX 셸 표기):', 'Command (POSIX shell syntax):'),
+            formatClaudeCommand(invocation.executable, invocation.args),
+            t(`작업 폴더: ${invocation.cwd}`, `Working directory: ${invocation.cwd}`),
+            invocation.started ? t('CLI 시작됨', 'CLI started') : t('CLI 시작되지 않음', 'CLI not started'),
+            t(`stdin: ${inputStates[invocation.stdinStatus]} (${invocation.stdinBytes}바이트)`, `stdin: ${inputStates[invocation.stdinStatus]} (${invocation.stdinBytes} bytes)`));
+        if (invocation.phase === 'prompt' && invocation.stdinText !== undefined) {
+            lines.push(t('이 실행에서 stdin에 쓴 요청문 (UTF-8):', 'Prompt used for this stdin write (UTF-8):'), invocation.stdinText);
+        }
+    }
+    lines.push('', t('실행 인자와 전송 상태 (JSON)', 'Invocation arguments and delivery status (JSON)'), '',
+        JSON.stringify(invocations.map(invocation => ({ phase: invocation.phase, executable: invocation.executable,
+            args: invocation.args, cwd: invocation.cwd, shell: false, started: invocation.started,
+            stdinStatus: invocation.stdinStatus, stdinBytes: invocation.stdinBytes })), null, 4));
+    return lines.join('\n');
+}
 
 export function claudeArguments(job: ClaudeSchedule, options: ClaudeCliOptions): string[] {
     const bash = job.mode === 'edit' ? job.bashRules ?? [] : [];
@@ -73,11 +123,15 @@ export function parseClaudeResult(stdout: string, exitCode: number | null): { su
 }
 
 async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: ClaudeCliOptions, signal: AbortSignal, kill: KillClaudeProcess,
-    versionOnly = false): Promise<{ status: ClaudeRunResult['status']; text: string }> {
+    invocations: ClaudeInvocation[], versionOnly = false): Promise<{ status: ClaudeRunResult['status']; text: string }> {
     if (signal.aborted) { return { status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }; }
     if (!options.executable || /[\r\n\0]/.test(options.executable) || /\.(?:cmd|bat)$/i.test(options.executable)) {
         throw new Error(t('CLI 실행 파일 경로를 확인하세요. Windows에서는 네이티브 실행 파일을 사용하세요.', 'Check the CLI executable path. On Windows, use a native executable.'));
     }
+    const invocation: ClaudeInvocation = { phase: versionOnly ? 'version' : 'prompt', executable: options.executable,
+        args: versionOnly ? [...(options.prefixArgs ?? []), '--version'] : claudeArguments(job, options), cwd: job.workspacePath,
+        started: false, stdinStatus: 'notSent', stdinBytes: 0 };
+    invocations.push(invocation);
     return new Promise(resolve => {
         let child: ChildProcess;
         let stdoutBytes = 0; let stderrBytes = 0;
@@ -114,13 +168,30 @@ async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: Claude
         };
         const abort = (): void => terminate(t('실행을 중지했습니다.', 'Run stopped.'));
         try {
-            child = spawn(options.executable, versionOnly ? [...(options.prefixArgs ?? []), '--version'] : claudeArguments(job, options), {
-                cwd: job.workspacePath, shell: false, detached: process.platform !== 'win32',
+            child = spawn(invocation.executable, invocation.args, {
+                cwd: invocation.cwd, shell: false, detached: process.platform !== 'win32',
                 windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
             });
         } catch (error) { resolve({ status: 'failed', text: String(error) }); return; }
+        child.once('spawn', () => {
+            invocation.started = true;
+            if (!signal.aborted && child.stdin) {
+                invocation.stdinStatus = 'writing'; invocation.stdinBytes = prompt.length;
+                invocation.stdinText = prompt.toString('utf8');
+                child.stdin.end(prompt);
+            }
+        });
         child.once('error', error => {
             reason = t(`CLI '${options.executable}'를 시작하지 못했습니다: ${error.message}`, `Could not start CLI '${options.executable}': ${error.message}`);
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                reason += '\n' + t(
+                    '실행 파일 또는 작업 폴더를 찾을 수 없습니다. 사용자 설정의 taskhub.aiScheduler.executable에 설치된 CLI의 절대 경로를 지정하고 작업 폴더가 존재하는지 확인하세요. 실행 파일 이름만 지정하면 VS Code 확장 호스트의 PATH에서 찾습니다.',
+                    'The executable or working folder could not be found. Set taskhub.aiScheduler.executable in User settings to the installed CLI\'s absolute path and check that the working folder exists. A bare executable name is resolved using the VS Code extension host\'s PATH.'
+                );
+                if (versionOnly) {
+                    reason += '\n' + t('버전 확인을 시작하지 못했으며 요청문은 아직 전달하지 않았습니다.', 'The version check could not start; the prompt has not been sent.');
+                }
+            }
         });
         child.once('close', code => { closed = true; exitCode = code; void finish(); });
         child.stdout?.on('data', (chunk: Buffer) => {
@@ -133,10 +204,14 @@ async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: Claude
             if (stderrBytes > errorLimit) { terminate(t('CLI 오류 출력이 256KiB 한도를 초과했습니다.', 'CLI error output exceeds the 256 KiB limit.')); }
             else { stderr.push(chunk); }
         });
-        child.stdin?.on('error', error => { if (!closed) { terminate(t(`요청문 전달 실패: ${error.message}`, `Could not send the prompt: ${error.message}`)); } });
+        child.stdin?.on('error', error => {
+            if (invocation.started) { invocation.stdinStatus = 'failed'; }
+            if (!closed) { terminate(t(`요청문 전달 실패: ${error.message}`, `Could not send the prompt: ${error.message}`)); }
+        });
+        child.stdin?.once('finish', () => { if (invocation.stdinStatus === 'writing') { invocation.stdinStatus = 'written'; } });
         signal.addEventListener('abort', abort, { once: true });
         timeout = setTimeout(() => terminate(t('CLI 실행 시간이 제한을 초과했습니다.', 'CLI run exceeded its time limit.')), (versionOnly ? 10 : options.timeoutSeconds) * 1000);
-        if (signal.aborted) { abort(); } else { child.stdin?.end(prompt); }
+        if (signal.aborted) { abort(); }
     });
 }
 
@@ -157,7 +232,7 @@ export function claudeReportDirectory(storage: string, jobId: string): string {
 }
 export async function readClaudeReport(storage: string, job: ClaudeSchedule): Promise<string> {
     if (!job.lastRun?.report || !/^[a-f0-9-]{36}\.txt$/.test(job.lastRun.report)) { throw new Error(t('실행 보고서가 없습니다.', 'No run report.')); }
-    return (await boundedRead(path.join(claudeReportDirectory(storage, job.id), job.lastRun.report), outputLimit + errorLimit + 65536)).toString('utf8');
+    return (await boundedRead(path.join(claudeReportDirectory(storage, job.id), job.lastRun.report), reportLimit)).toString('utf8');
 }
 
 /** Bound disk use across removed jobs as well as active schedules. */
@@ -202,6 +277,7 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) { abort.abort(); }
     let text = ''; let status: ClaudeRunResult['status'] = 'failed';
+    const invocations: ClaudeInvocation[] = [];
     try {
         const root = await fs.realpath(job.workspacePath);
         const openRoots = await Promise.all(workspacePaths.map(folder => fs.realpath(folder).catch(() => '')));
@@ -224,7 +300,7 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
             throw error;
         }
         if (abort.signal.aborted) { return { status: 'stopped', startedAt, finishedAt: Date.now() }; }
-        const probe = await invokeClaude({ ...job, workspacePath: root }, Buffer.alloc(0), options, abort.signal, kill, true);
+        const probe = await invokeClaude({ ...job, workspacePath: root }, Buffer.alloc(0), options, abort.signal, kill, invocations, true);
         if (probe.status !== 'success') { status = probe.status; throw new Error(probe.text); }
         if (!supportsClaudeVersion(probe.text)) {
             const observed = probe.text.trim().slice(0, 1000);
@@ -243,7 +319,7 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
             if (previous >= scheduledAt) { return { status: 'skipped', startedAt, finishedAt: Date.now(), detail: t('이 예약 시각은 다른 창에서 처리했습니다.', 'This scheduled slot was handled by another window.') }; }
             await fs.writeFile(marker, JSON.stringify(scheduledAt), { mode: 0o600 });
         }
-        const result = await invokeClaude({ ...job, workspacePath: root }, prompt, options, abort.signal, kill);
+        const result = await invokeClaude({ ...job, workspacePath: root }, prompt, options, abort.signal, kill, invocations);
         status = result.status; text = result.text;
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -259,7 +335,8 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
     await fs.mkdir(directory, { recursive: true });
     const statusLabel = status === 'success' ? t('완료', 'Completed') : status === 'stopped' ? t('중지', 'Stopped')
         : status === 'skipped' ? t('건너뜀', 'Skipped') : t('실패', 'Failed');
-    await fs.writeFile(path.join(directory, report), [job.name, `${new Date(startedAt).toISOString()} → ${new Date(finishedAt).toISOString()}`, statusLabel, '', text].join('\n'), { flag: 'wx', mode: 0o600 });
+    await fs.writeFile(path.join(directory, report), [job.name, `${new Date(startedAt).toISOString()} → ${new Date(finishedAt).toISOString()}`,
+        statusLabel, '', text, '', invocationDetails(invocations)].join('\n'), { flag: 'wx', mode: 0o600 });
     await pruneClaudeReports(storage, job.id, report);
     return { status, startedAt, finishedAt, report };
 }

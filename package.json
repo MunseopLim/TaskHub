@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.62",
+  "version": "0.8.63",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -305,7 +305,19 @@
           "type": "boolean",
           "default": false,
           "scope": "machine",
+          "markdownDescription": "%setting.aiSchedulerEnabled%",
+          "included": false
+        },
+        "taskhub.aiScheduler.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
           "markdownDescription": "%setting.aiSchedulerEnabled%"
+        },
+        "taskhub.aiScheduler.showPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "%setting.aiSchedulerShowPanel%"
         },
         "taskhub.aiScheduler.executable": {
           "type": "string",
@@ -364,7 +376,7 @@
         {
           "id": "mainView.claudeSchedules",
           "name": "%view.claudeSchedules%",
-          "when": "taskhub.aiScheduler.enabled"
+          "when": "taskhub.aiScheduler.enabled && config.taskhub.aiScheduler.showPanel"
         }
       ]
     },

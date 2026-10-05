@@ -7,7 +7,7 @@ import { execFileSync } from 'child_process';
 import * as vscode from 'vscode';
 import { CLAUDE_SCHEDULES_KEY, ClaudeRunResult, ClaudeSchedule, ClaudeScheduler, ClaudeSchedulerState, nextClaudeRun, readSchedulerState } from '../claudeScheduler/model';
 import { ClaudeSchedulerController, registerClaudeScheduler } from '../claudeScheduler/controller';
-import { ClaudeCliOptions, claudeArguments, claudeReportDirectory, parseClaudeResult, pruneClaudeReports, readClaudeReport, runScheduledClaude, supportsClaudeVersion } from '../claudeScheduler/runner';
+import { ClaudeCliOptions, claudeArguments, claudeReportDirectory, formatClaudeCommand, parseClaudeResult, pruneClaudeReports, readClaudeReport, runScheduledClaude, supportsClaudeVersion } from '../claudeScheduler/runner';
 import { ClaudeSchedulesProvider } from '../providers/claudeSchedulesProvider';
 import { killProcessTree } from '../extension';
 import { buildFeatureLauncherItems } from '../featureLauncher';
@@ -22,6 +22,10 @@ function flagValues(args: string[], flag: string): string[] {
     const start = args.indexOf(flag) + 1;
     const end = args.findIndex((value, index) => index >= start && value.startsWith('--'));
     return args.slice(start, end < 0 ? args.length : end);
+}
+function reportInvocations(report: string): Array<{ phase: string; executable: string; args: string[]; cwd: string;
+    shell: boolean; started: boolean; stdinStatus: string; stdinBytes: number }> {
+    return JSON.parse(report.slice(report.lastIndexOf('\n\n') + 2));
 }
 async function until(condition: () => boolean | Promise<boolean>): Promise<void> {
     const deadline = Date.now() + 5000;
@@ -48,7 +52,7 @@ function fixtureEngine(jobs: ClaudeSchedule[] = []) {
         changed: () => {}, error: error => { errors.push(error); },
     });
     return { engine, calls, timers, errors, now: (value: number) => { now = value; }, saved: () => saved,
-        failSave: () => { failSave = true; }, runner: (value: typeof run) => { run = value; } };
+        failSave: (value = true) => { failSave = value; }, runner: (value: typeof run) => { run = value; } };
 }
 
 suite('Claude scheduler clock, persistence and lifecycle', () => {
@@ -162,6 +166,117 @@ suite('Claude scheduler clock, persistence and lifecycle', () => {
         assert.deepStrictEqual(f.engine.list()[0].lastRun, latest.lastRun);
         await f.engine.shutdown();
     });
+    test('field edits preserve the original clock, while a changed cadence starts a new clock', async () => {
+        const item = job({ mode: 'edit', bashRules: ['Bash(npm test)'] });
+        const f = fixtureEngine([item]);
+        try {
+            await f.engine.initialize(); f.now(59000);
+            await f.engine.update(item.id, { name: 'renamed' });
+            await f.engine.update(item.id, { cadence: { kind: 'interval', minutes: 1 } });
+            assert.strictEqual(f.engine.list()[0].nextRunAt, 60000);
+            assert.deepStrictEqual(f.engine.list()[0], { ...item, name: 'renamed' });
+            f.now(60000); await f.engine.tick(); await until(() => !f.engine.runningId && f.calls.length === 1);
+            assert.strictEqual(f.calls[0].slot, 60000);
+            const latest = f.engine.list()[0];
+            f.now(70000); await f.engine.update(item.id, { cadence: { kind: 'interval', minutes: 2 } });
+            assert.deepStrictEqual(f.engine.list()[0], { ...latest, cadence: { kind: 'interval', minutes: 2 }, nextRunAt: 190000 });
+            const daily = { kind: 'daily' as const, hour: 9, minute: 30 };
+            await f.engine.update(item.id, { cadence: daily });
+            assert.strictEqual(f.engine.list()[0].nextRunAt, nextClaudeRun(daily, 70000));
+            const due = f.engine.list()[0].nextRunAt;
+            f.now(80000); await f.engine.update(item.id, { cadence: { ...daily } });
+            assert.strictEqual(f.engine.list()[0].nextRunAt, due);
+        } finally { await f.engine.shutdown(); }
+    });
+    test('edits apply to current fields and never recreate a deleted schedule or dispatch after invalid input', async () => {
+        const item = job(); const f = fixtureEngine([item]);
+        try {
+            await f.engine.initialize();
+            await f.engine.update(item.id, { name: 'latest name' });
+            await f.engine.update(item.id, { promptPath: path.resolve('/workspace/new.md') });
+            const latest = f.engine.list()[0]; assert.strictEqual(latest.name, 'latest name');
+            for (const changes of [{ cadence: { kind: 'interval' as const, minutes: 0 } }, { bashRules: ['Bash(*)'] }]) {
+                await assert.rejects(f.engine.update(item.id, changes));
+                assert.deepStrictEqual(f.engine.list()[0], latest);
+                assert.deepStrictEqual(f.saved()?.jobs[0], latest);
+            }
+            await f.engine.remove(item.id);
+            assert.strictEqual(await f.engine.update(item.id, { name: 'must not return' }), false);
+            assert.deepStrictEqual(f.engine.list(), []); assert.deepStrictEqual(f.saved()?.jobs, []);
+        } finally { await f.engine.shutdown(); }
+    });
+    test('active and queued schedules reject field edits, and save failures leave edits unapplied', async () => {
+        const a = job(); const b = job(); const f = fixtureEngine([a, b]);
+        let release: ((result: ClaudeRunResult) => void) | undefined;
+        try {
+            await f.engine.initialize(); f.runner(() => new Promise(resolve => { release = resolve; }));
+            f.now(60000); await f.engine.tick(); await until(() => f.calls.length === 1);
+            for (const id of [a.id, b.id]) {
+                await assert.rejects(f.engine.update(id, { name: 'blocked' }), { code: 'running' });
+            }
+            await f.engine.setEnabled(b.id, false);
+            const latest = f.engine.list(); f.failSave();
+            await assert.rejects(f.engine.update(b.id, { name: 'not saved' }), /storage failure/);
+            assert.deepStrictEqual(f.engine.list(), latest);
+        } finally { f.failSave(false); release?.(success()); await f.engine.shutdown(); }
+    });
+    test('manual pause timestamps persist across edits and restart, and resume clears them', async () => {
+        const item = job({ lastRun: success(10) }); const f = fixtureEngine([item]);
+        try {
+            await f.engine.initialize(); f.now(20000); await f.engine.setEnabled(item.id, false);
+            assert.strictEqual(f.engine.list()[0].pausedAt, 20000);
+            f.now(30000); await f.engine.setEnabled(item.id, false); await f.engine.update(item.id, { name: 'paused name' });
+            assert.strictEqual(f.saved()?.jobs[0].pausedAt, 20000);
+            assert.deepStrictEqual(f.engine.list()[0].lastRun, item.lastRun);
+            const restarted = fixtureEngine(f.saved()?.jobs);
+            try {
+                restarted.now(40000); await restarted.engine.initialize();
+                assert.strictEqual(restarted.engine.list()[0].pausedAt, 20000);
+                await restarted.engine.setEnabled(item.id, true);
+                assert.strictEqual(restarted.engine.list()[0].pausedAt, undefined);
+                assert.strictEqual(restarted.engine.list()[0].nextRunAt, 100000);
+                assert.strictEqual(restarted.saved()?.jobs[0].enabled, true);
+            } finally { await restarted.engine.shutdown(); }
+        } finally { await f.engine.shutdown(); }
+    });
+    test('failure and interrupted restart record the actual pause time, while queued shutdown stays enabled', async () => {
+        const item = job(); const f = fixtureEngine([item]);
+        try {
+            await f.engine.initialize();
+            f.runner(async () => { f.now(25000); return { ...success(10000), status: 'failed' }; });
+            f.now(10000); await f.engine.runNow(item.id);
+            assert.strictEqual(f.saved()?.jobs[0].pausedAt, 25000);
+            await f.engine.update(item.id, { name: 'failed name' });
+            assert.strictEqual(f.engine.list()[0].pausedAt, 25000);
+        } finally { await f.engine.shutdown(); }
+        const interrupted = job({ lastRun: { status: 'running', startedAt: 10 } });
+        const queued = job({ lastRun: { status: 'queued', startedAt: 10 } });
+        const restarted = fixtureEngine([interrupted, queued]);
+        try {
+            restarted.now(50000); await restarted.engine.initialize();
+            assert.strictEqual(restarted.saved()?.jobs[0].pausedAt, 50000);
+            assert.strictEqual(restarted.saved()?.jobs[0].lastRun?.status, 'interrupted');
+            assert.strictEqual(restarted.saved()?.jobs[1].pausedAt, undefined);
+            assert.strictEqual(restarted.saved()?.jobs[1].enabled, true);
+        } finally { await restarted.engine.shutdown(); }
+        // Legacy paused jobs have no known pause time; later pauses and failures must not invent one.
+        const legacy = job({ enabled: false, lastRun: success(10) });
+        const legacyFailed = job({ enabled: false });
+        const old = fixtureEngine([legacy, legacyFailed]);
+        try {
+            old.now(60000); await old.engine.initialize();
+            await old.engine.setEnabled(legacy.id, false);
+            assert.strictEqual(old.saved()?.jobs[0].pausedAt, undefined);
+            old.runner(async () => ({ ...success(60000), status: 'failed', finishedAt: 61000 }));
+            await old.engine.runNow(legacyFailed.id);
+            assert.strictEqual(old.saved()?.jobs[1].pausedAt, undefined);
+            assert.strictEqual(old.saved()?.jobs[1].lastRun?.finishedAt, 61000);
+        } finally { await old.engine.shutdown(); }
+        for (const pausedAt of [-1, NaN, 'yesterday']) {
+            assert.throws(() => readSchedulerState({ version: 1, jobs: [{ ...item, pausedAt }] }));
+        }
+        assert.strictEqual(readSchedulerState({ version: 1, jobs: [{ ...item, enabled: false }] }).jobs[0].pausedAt, undefined);
+    });
     test('shutdown skips never-started slots and keeps queued schedules enabled on restart', async () => {
         const a = job(); const b = job(); const f = fixtureEngine([a, b]); await f.engine.initialize();
         f.runner((_job, signal) => new Promise(resolve => signal.addEventListener('abort', () => resolve({ ...success(), status: 'stopped' }), { once: true })));
@@ -244,8 +359,9 @@ suite('Claude CLI execution and UI integration', function () {
                 if(scenario==='hang'){fs.writeFileSync(args[1],String(process.pid));setInterval(()=>{},1000);return;}
                 if(scenario==='large'){process.stdout.write('x'.repeat(5*1024*1024));setInterval(()=>{},1000);return;}
                 if(scenario==='edit'){fs.writeFileSync(args[1],'modified by fixture');}
+                if(scenario==='full-result'){fs.writeFileSync(args[1],JSON.stringify({prompt,args,cwd:process.cwd()}));process.stderr.write('w'.repeat(256*1024));}
                 const result={type:'result',subtype:scenario==='external-failure'?'error_external':'success',is_error:scenario==='fail',
-                    total_cost_usd:scenario==='no-cost'?undefined:1000,result:JSON.stringify({prompt,args,cwd:process.cwd()}),permission_denials:scenario==='denied'?[{tool_name:'Bash'}]:[]};
+                    total_cost_usd:scenario==='no-cost'?undefined:1000,result:scenario==='full-result'?'R'.repeat(4*1024*1024-4096):JSON.stringify({prompt,args,cwd:process.cwd()}),permission_denials:scenario==='denied'?[{tool_name:'Bash'}]:[]};
                 console.log(JSON.stringify(result));if(scenario==='fail'){process.exitCode=1;}
             });}`);
         options = { executable: 'node', prefixArgs: [script, 'success'], timeoutSeconds: 5 };
@@ -269,6 +385,60 @@ suite('Claude CLI execution and UI integration', function () {
         assert.deepStrictEqual(flagValues(payload.args, '--allowedTools'), ['Read(./**)', 'Glob', 'Grep']);
         await assert.rejects(fs.stat(path.join(directory, 'injected')));
     });
+    test('reports record actual argv and stdin snapshots and do not reconstruct them after settings or file changes', async () => {
+        const prompt = await fs.readFile(item.promptPath, 'utf8');
+        options.model = 'original model with "quotes" and $literal';
+        item.lastRun = await run(item, options, storage);
+        assert.strictEqual(item.lastRun.status, 'success');
+        const original = await readClaudeReport(storage, item);
+        const received = JSON.parse(original.split('\n\n')[1]);
+        const recorded = reportInvocations(original);
+        assert.deepStrictEqual(recorded.map(entry => entry.phase), ['version', 'prompt']);
+        assert.deepStrictEqual(recorded[0].args, [script, 'success', '--version']);
+        assert.deepStrictEqual(recorded[1].args, [script, ...received.args]);
+        for (const entry of recorded) {
+            assert.strictEqual(entry.executable, 'node'); assert.strictEqual(entry.cwd, await fs.realpath(directory));
+            assert.strictEqual(entry.shell, false); assert.strictEqual(entry.started, true); assert.strictEqual(entry.stdinStatus, 'written');
+            assert.ok(original.includes(formatClaudeCommand(entry.executable, entry.args)));
+        }
+        assert.strictEqual(recorded[0].stdinBytes, 0);
+        assert.strictEqual(recorded[1].stdinBytes, Buffer.byteLength(received.prompt, 'utf8'));
+        assert.strictEqual(received.prompt, prompt);
+        assert.ok(!recorded[1].args.includes(prompt)); assert.ok(original.includes(`\n${prompt}\n`));
+        await fs.writeFile(item.promptPath, 'replacement prompt');
+        options.model = 'replacement-model'; options.executable = 'replacement-cli';
+        assert.strictEqual(await readClaudeReport(storage, item), original);
+        assert.ok(!original.includes('replacement prompt')); assert.ok(!original.includes('replacement-model')); assert.ok(!original.includes('replacement-cli'));
+        await assert.rejects(fs.stat(path.join(directory, 'injected')));
+    });
+    test('full input plus bounded output remains readable, while oversized diagnostic reports are refused', async () => {
+        const prefix = '# Full input\r\n한글 "quoted"\r\n';
+        const prompt = prefix + 'p'.repeat(256 * 1024 - Buffer.byteLength(prefix, 'utf8'));
+        await fs.writeFile(item.promptPath, prompt);
+        const receivedFile = path.join(directory, 'received.json');
+        options.prefixArgs = [script, 'full-result', receivedFile];
+        item.lastRun = await run(item, options, storage);
+        assert.strictEqual(item.lastRun.status, 'success');
+        const received = JSON.parse(await fs.readFile(receivedFile, 'utf8'));
+        assert.strictEqual(received.prompt, prompt);
+        const report = await readClaudeReport(storage, item);
+        assert.ok(Buffer.byteLength(report, 'utf8') > 4 * 1024 * 1024 + 256 * 1024 + 65536);
+        assert.ok(report.includes(`\n${prompt}\n`));
+        assert.strictEqual(reportInvocations(report)[1].stdinBytes, 256 * 1024);
+        assert.deepStrictEqual(reportInvocations(report)[1].args, [script, ...received.args]);
+        await fs.appendFile(path.join(claudeReportDirectory(storage, item.id), item.lastRun.report!), Buffer.alloc(16 * 1024 * 1024));
+        await assert.rejects(readClaudeReport(storage, item), /too large|너무 크/);
+    });
+    test('display command quoting preserves POSIX argument boundaries without expanding shell-looking values', function () {
+        if (process.platform === 'win32') { this.skip(); }
+        const marker = path.join(directory, 'display-command-injected');
+        const args = [script, 'success', '', '한글 with spaces', 'single\'quote', 'double"quote', `$(touch "${marker}")`, `\`touch "${marker}"\``, 'two\nlines'];
+        const command = formatClaudeCommand('node', args, 'linux');
+        const output = execFileSync('sh', ['-c', command], { input: 'stdin fixture', encoding: 'utf8' });
+        const received = JSON.parse(JSON.parse(output).result);
+        assert.deepStrictEqual(received.args, args.slice(1)); assert.strictEqual(received.prompt, 'stdin fixture');
+        assert.strictEqual(require('fs').existsSync(marker), false);
+    });
     test('edit mode allows explicit editing tools and changes reach the workspace through the child process', async () => {
         const output = path.join(directory, 'edited.txt');
         item.mode = 'edit'; options.prefixArgs = [script, 'edit', output];
@@ -283,6 +453,25 @@ suite('Claude CLI execution and UI integration', function () {
         assert.ok(configured[configured.indexOf('--tools') + 1].includes('Bash'));
         const analysis = claudeArguments({ ...item, mode: 'analysis' }, options);
         assert.ok(!analysis[analysis.indexOf('--tools') + 1].includes('Bash'));
+    });
+    test('model and per-schedule tool parameters reach the CLI unchanged and changes apply on the next run', async () => {
+        item.mode = 'edit'; item.bashRules = ['Bash(git diff *)', 'Bash(npm test)'];
+        options.model = 'company model $(echo literal)';
+        item.lastRun = await run(item, options, storage);
+        assert.strictEqual(item.lastRun.status, 'success');
+        const first = JSON.parse((await readClaudeReport(storage, item)).split('\n\n')[1]);
+        assert.strictEqual(first.args[first.args.indexOf('--model') + 1], options.model);
+        assert.deepStrictEqual(flagValues(first.args, '--allowedTools'), ['Read(./**)', 'Glob', 'Grep', 'Edit(./**)', ...item.bashRules]);
+        assert.strictEqual(first.args[first.args.indexOf('--permission-mode') + 1], 'dontAsk');
+        options.model = 'second-model'; item.mode = 'analysis';
+        item.lastRun = await run(item, options, storage);
+        assert.strictEqual(item.lastRun.status, 'success');
+        const second = JSON.parse((await readClaudeReport(storage, item)).split('\n\n')[1]);
+        assert.strictEqual(second.args[second.args.indexOf('--model') + 1], 'second-model');
+        assert.strictEqual(second.args[second.args.indexOf('--tools') + 1], 'Read,Glob,Grep');
+        assert.deepStrictEqual(flagValues(second.args, '--allowedTools'), ['Read(./**)', 'Glob', 'Grep']);
+        delete options.model;
+        assert.ok(!claudeArguments(item, options).includes('--model'));
     });
     test('CLI version preflight rejects unsupported versions before an edit', async () => {
         const output = path.join(directory, 'not-edited.txt');
@@ -308,6 +497,22 @@ suite('Claude CLI execution and UI integration', function () {
         assert.match(report, /prompt has not been sent|요청문은 아직 전달하지 않았습니다/);
         assert.ok(!report.includes('Update the CLI.'));
         assert.ok(!report.includes(await fs.readFile(item.promptPath, 'utf8')));
+        assert.deepStrictEqual(reportInvocations(report).map(entry => entry.phase), ['version']);
+        assert.strictEqual(reportInvocations(report)[0].stdinBytes, 0);
+    });
+    test('a missing executable reports the selected path, User setting and failed stage without sending the prompt', async () => {
+        const executable = path.join(directory, `missing-cli-${randomUUID()}`);
+        item.lastRun = await run(item, { executable, timeoutSeconds: 5 }, storage);
+        assert.strictEqual(item.lastRun.status, 'failed');
+        const report = await readClaudeReport(storage, item);
+        assert.ok(report.includes(executable)); assert.match(report, /ENOENT/);
+        assert.ok(report.includes('taskhub.aiScheduler.executable')); assert.ok(report.includes('PATH'));
+        assert.match(report, /prompt has not been sent|요청문은 아직 전달하지 않았습니다/);
+        assert.ok(!report.includes(await fs.readFile(item.promptPath, 'utf8')));
+        const recorded = reportInvocations(report);
+        assert.deepStrictEqual(recorded.map(entry => entry.phase), ['version']);
+        assert.strictEqual(recorded[0].executable, executable); assert.strictEqual(recorded[0].started, false);
+        assert.strictEqual(recorded[0].stdinBytes, 0); assert.strictEqual(recorded[0].stdinStatus, 'notSent');
     });
     test('the controller reads the general executable setting and reports that executable\'s real preflight output', async () => {
         const folder = vscode.workspace.workspaceFolders![0];
@@ -466,6 +671,62 @@ suite('Claude CLI execution and UI integration', function () {
             } finally { idle.dispose(); }
         } finally { provider.dispose(); }
     });
+    test('schedule rows show cadence before times and preserve it while running, queued or paused', () => {
+        const ko = vscode.env.language.startsWith('ko');
+        const pausedAt = new Date(2026, 9, 5, 18, 30).getTime();
+        const cadences = [
+            { cadence: { kind: 'interval' as const, minutes: 1 }, text: ko ? '1분마다' : 'Every minute' },
+            { cadence: { kind: 'interval' as const, minutes: 60 }, text: ko ? '60분마다' : 'Every 60 minutes' },
+            { cadence: { kind: 'interval' as const, minutes: 10080 }, text: ko ? '10080분마다' : 'Every 10080 minutes' },
+            { cadence: { kind: 'daily' as const, hour: 9, minute: 5 }, text: ko ? '매일 09:05 (현지 시각)' : 'Daily at 09:05 (local time)' },
+        ];
+        for (const { cadence, text } of cadences) {
+            for (const state of ['enabled', 'running', 'queued', 'paused'] as const) {
+                const scheduled = job({ cadence, enabled: state !== 'paused', pausedAt: state === 'paused' ? pausedAt : undefined,
+                    nextRunAt: pausedAt + 60000, lastRun: { ...success(), report: `${randomUUID()}.txt` } });
+                const before = structuredClone(scheduled);
+                const provider = new ClaudeSchedulesProvider(() => [scheduled], () => state === 'running' ? scheduled.id : undefined,
+                    () => state === 'queued' ? [scheduled.id] : []);
+                try {
+                    const tree = provider.getTreeItem(scheduled);
+                    const description = String(tree.description);
+                    assert.ok(description.startsWith(`${text} · `), description);
+                    assert.strictEqual(tree.label, scheduled.name); assert.strictEqual(tree.id, scheduled.id);
+                    assert.strictEqual(tree.command?.command, 'taskhub.claudeScheduler.openReport');
+                    if (state === 'enabled') { assert.ok(description.includes(new Date(scheduled.nextRunAt).toLocaleString())); }
+                    if (state === 'paused') { assert.ok(description.includes(new Date(pausedAt).toLocaleString())); }
+                    if (state === 'running') { assert.match(description, /Running|실행 중/); }
+                    if (state === 'queued') { assert.match(description, /Queued|실행 대기/); }
+                    assert.strictEqual(String(tree.tooltip).split(text).length - 1, 1, 'The tooltip must not repeat the cadence.');
+                    assert.deepStrictEqual(scheduled, before, 'Displaying a cadence must not alter the schedule.');
+                } finally { provider.dispose(); }
+            }
+        }
+    });
+    test('paused rows put local pause time before the outcome, keep explicit pauses, and support old records', () => {
+        const provider = new ClaudeSchedulesProvider(() => [item], () => undefined);
+        try {
+            const pausedAt = new Date(2026, 9, 5, 17, 48, 30).getTime();
+            item.enabled = false; item.pausedAt = pausedAt; item.lastRun = { ...success(pausedAt - 1000), status: 'failed' };
+            const description = String(provider.getTreeItem(item).description);
+            assert.ok(description.includes(new Date(pausedAt).toLocaleString()));
+            assert.ok(description.indexOf(new Date(pausedAt).toLocaleString()) < description.search(/Failed|실패/));
+            assert.ok(!/schedule paused|예약 일시 정지/.test(description));
+            assert.ok(String(provider.getTreeItem(item).tooltip).includes(new Date(pausedAt).toLocaleString()));
+            item.lastRun = success(pausedAt + 10000);
+            assert.ok(String(provider.getTreeItem(item).description).includes(new Date(pausedAt).toLocaleString()), 'Manual pause time must not be replaced by a later run finish.');
+            delete item.pausedAt;
+            item.lastRun = { status: 'failed', startedAt: pausedAt - 1, finishedAt: pausedAt };
+            assert.ok(String(provider.getTreeItem(item).description).includes(new Date(pausedAt).toLocaleString()));
+            item.lastRun = undefined;
+            assert.match(String(provider.getTreeItem(item).description), /Paused|일시 정지/);
+            assert.ok(!String(provider.getTreeItem(item).description).includes(new Date(pausedAt).toLocaleString()));
+            item.pausedAt = 0;
+            assert.ok(String(provider.getTreeItem(item).description).includes(new Date(0).toLocaleString()));
+            item.enabled = true;
+            assert.match(String(provider.getTreeItem(item).description), /Next:|다음:/);
+        } finally { provider.dispose(); }
+    });
     test('retention bounds old/deleted jobs globally and per job while preserving the current report', async () => {
         const currentDirectory = claudeReportDirectory(storage, item.id);
         await fs.mkdir(currentDirectory, { recursive: true });
@@ -521,6 +782,10 @@ suite('Claude CLI execution and UI integration', function () {
             vscode.window.showTextDocument = (async (value: vscode.TextDocument) => { document = value; return vscode.window.activeTextEditor; }) as unknown as typeof show;
             await vscode.commands.executeCommand('taskhub.claudeScheduler.openReport', completed);
             assert.ok(document?.getText().includes('modify this project'));
+            const recorded = reportInvocations(document!.getText());
+            assert.ok(document!.getText().includes('\nmodify this project\n'));
+            assert.ok(recorded[1].args.includes('Bash(npm test)'));
+            assert.strictEqual(recorded[1].stdinStatus, 'written');
             assert.strictEqual(document?.uri.scheme, 'taskhub-claude-report');
             assert.strictEqual(document?.isUntitled, false); assert.strictEqual(document?.isDirty, false);
             await vscode.commands.executeCommand('taskhub.claudeScheduler.pause', completed);
@@ -533,82 +798,149 @@ suite('Claude CLI execution and UI integration', function () {
             await fs.rm(prompt, { force: true });
         }
     });
-    for (const continueScheduling of [true, false]) {
-        test(`example prompt opens for editing before a schedule exists; continue=${continueScheduling}`, async () => {
-            const folder = vscode.workspace.workspaceFolders![0];
-            const prompt = path.join(folder.uri.fsPath, `ai-example-${randomUUID()}.md`);
-            const values = new Map<string, unknown>();
-            const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
-                get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
-            } } as unknown as vscode.ExtensionContext;
-            const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox;
-            const save = vscode.window.showSaveDialog; const open = vscode.window.showOpenDialog;
-            const show = vscode.window.showTextDocument; const information = vscode.window.showInformationMessage;
-            let controller: ClaudeSchedulerController | undefined;
-            let document: vscode.TextDocument | undefined;
-            const customPrompt = '# My recurring task\n\nReview parser edge cases and report file locations.\n';
-            try {
-                vscode.window.showQuickPick = (async (items: any, options: vscode.QuickPickOptions) => {
-                    const choices = await items;
-                    if (choices.some((choice: any) => choice.promptSource)) {
-                        assert.match(options.title ?? '', /AI/);
-                        assert.ok(choices.every((choice: any) => choice.detail));
-                    }
-                    return choices[0];
-                }) as typeof pick;
-                let count = 0; vscode.window.showInputBox = async () => ['Example schedule', '60'][count++];
-                vscode.window.showSaveDialog = async options => {
-                    assert.strictEqual(options?.defaultUri?.fsPath, vscode.Uri.joinPath(folder.uri, 'ai-schedule-prompt.md').fsPath);
-                    return vscode.Uri.file(prompt);
+    test('default registration runs jobs while the panel is hidden and routes Show Schedules to visibility settings', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const prompt = path.join(folder.uri.fsPath, `ai-visibility-${randomUUID()}.md`);
+        const initial = job({ workspacePath: await fs.realpath(folder.uri.fsPath), promptPath: prompt });
+        const values = new Map<string, unknown>([[CLAUDE_SCHEDULES_KEY, { version: 1, jobs: [initial] }]]);
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const get = vscode.workspace.getConfiguration; const execute = vscode.commands.executeCommand;
+        let visible = true; let created = 0; let controller: ClaudeSchedulerController | undefined;
+        let registration: ReturnType<typeof registerClaudeScheduler> | undefined;
+        const opened: Array<{ command: string; args: unknown[] }> = [];
+        try {
+            await fs.writeFile(prompt, 'hidden panel input fixture');
+            vscode.workspace.getConfiguration = ((section?: string, scope?: vscode.ConfigurationScope | null) => {
+                const configuration = get(section, scope);
+                if (section !== 'taskhub') { return configuration; }
+                return { ...configuration,
+                    inspect: (key: string) => ['aiScheduler.enabled', 'experimental.aiScheduler.enabled', 'experimental.claudeScheduler.enabled'].includes(key)
+                        ? { defaultValue: key === 'aiScheduler.enabled' } : configuration.inspect(key),
+                    get: (key: string, fallback: unknown) => key === 'aiScheduler.showPanel' ? visible : configuration.get(key, fallback),
                 };
-                vscode.window.showOpenDialog = async () => { throw new Error('The example must not ask for a second prompt file.'); };
-                vscode.window.showTextDocument = (async (value: vscode.TextDocument, options: vscode.TextDocumentShowOptions) => {
-                    document = value;
-                    assert.strictEqual(options.preview, false);
-                    assert.strictEqual(value.languageId, 'markdown');
-                    assert.strictEqual((value.getText().match(/^## /gm) ?? []).length, 4);
-                    assert.strictEqual(controller?.engine.list().length, 0);
-                    return {} as vscode.TextEditor;
-                }) as unknown as typeof show;
-                vscode.window.showInformationMessage = (async (_message: string, action: string) => {
-                    assert.ok(document);
-                    assert.strictEqual(controller?.engine.list().length, 0);
-                    if (!continueScheduling) { return undefined; }
-                    const edit = new vscode.WorkspaceEdit();
-                    edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), customPrompt);
-                    assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
-                    assert.strictEqual(document.isDirty, true);
-                    return action;
-                }) as unknown as typeof information;
-                controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
-                await vscode.commands.executeCommand('taskhub.claudeScheduler.add');
-                assert.ok(document, 'The example must be opened in the editor.');
-                assert.strictEqual(controller.engine.list().length, continueScheduling ? 1 : 0);
-                if (continueScheduling) {
-                    assert.strictEqual(document.isDirty, false);
-                    assert.strictEqual(await fs.readFile(prompt, 'utf8'), customPrompt);
-                    const scheduled = controller.engine.list()[0];
-                    assert.strictEqual(scheduled.mode, 'analysis');
-                    assert.strictEqual(scheduled.promptPath, await fs.realpath(prompt));
-                    assert.strictEqual(scheduled.lastRun, undefined, 'Creating a schedule must not run it immediately.');
-                    await vscode.commands.executeCommand('taskhub.claudeScheduler.runNow', scheduled);
-                    const completed = controller.engine.list()[0];
-                    assert.strictEqual(completed.lastRun?.status, 'success');
-                    assert.ok((await readClaudeReport(storage, completed)).includes('Review parser edge cases'));
-                } else {
-                    assert.deepStrictEqual(values.get(CLAUDE_SCHEDULES_KEY), { version: 1, jobs: [] });
-                    assert.strictEqual(await fs.readFile(prompt, 'utf8'), document.getText());
+            }) as unknown as typeof get;
+            vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+                if (command === 'mainView.claudeSchedules.focus' || command === 'workbench.action.openSettings') { opened.push({ command, args }); return; }
+                return execute(command, ...args);
+            }) as typeof execute;
+            registration = registerClaudeScheduler(context, killProcessTree, () => {
+                created++; controller = new ClaudeSchedulerController(context, killProcessTree, () => options); return controller;
+            });
+            await until(() => !!controller); await controller!.ready;
+            await vscode.commands.executeCommand('taskhub.claudeScheduler.showSchedules');
+            visible = false;
+            await vscode.commands.executeCommand('taskhub.claudeScheduler.showSchedules');
+            assert.deepStrictEqual(opened, [{ command: 'mainView.claudeSchedules.focus', args: [] },
+                { command: 'workbench.action.openSettings', args: ['@id:taskhub.aiScheduler.showPanel'] }]);
+            await vscode.commands.executeCommand('taskhub.claudeScheduler.runNow', initial);
+            const completed = controller!.engine.list()[0];
+            assert.strictEqual(created, 1); assert.strictEqual(completed.enabled, true); assert.strictEqual(completed.lastRun?.status, 'success');
+            const report = await readClaudeReport(storage, completed);
+            assert.strictEqual(JSON.parse(report.split('\n\n')[1]).prompt, 'hidden panel input fixture');
+            assert.strictEqual((values.get(CLAUDE_SCHEDULES_KEY) as ClaudeSchedulerState).jobs[0].lastRun?.status, 'success');
+        } finally {
+            await registration?.shutdown(); vscode.workspace.getConfiguration = get; vscode.commands.executeCommand = execute;
+            await fs.rm(prompt, { force: true });
+        }
+    });
+    test('example editing releases Add while its notification remains unanswered; Add can register the saved prompt', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const prompt = path.join(folder.uri.fsPath, `ai-example-${randomUUID()}.md`);
+        const values = new Map<string, unknown>();
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox;
+        const save = vscode.window.showSaveDialog; const open = vscode.window.showOpenDialog;
+        const show = vscode.window.showTextDocument; const information = vscode.window.showInformationMessage;
+        const history = vscode.workspace.getConfiguration('workbench.localHistory', folder.uri);
+        const historyEnabled = history.inspect<boolean>('enabled')?.globalValue;
+        let controller: ClaudeSchedulerController | undefined;
+        let document: vscode.TextDocument | undefined;
+        let preparing: Thenable<unknown> | undefined;
+        let chooseExisting = false;
+        let cancelFilePick = true;
+        let notified = false;
+        const messages: string[] = [];
+        let finishNotification!: () => void;
+        const notification = new Promise<undefined>(resolve => { finishNotification = () => resolve(undefined); });
+        const customPrompt = '# My recurring task\n\nReview parser edge cases and report file locations.\n';
+        try {
+            // The test removes its saved file; keep asynchronous local-history copies from racing cleanup.
+            await history.update('enabled', false, vscode.ConfigurationTarget.Global);
+            vscode.window.showQuickPick = (async (items: any, options: vscode.QuickPickOptions) => {
+                const choices = await items;
+                if (choices.some((choice: any) => choice.promptSource)) {
+                    assert.match(options.title ?? '', /AI/);
+                    assert.ok(choices.every((choice: any) => choice.detail));
                 }
-            } finally {
-                await controller?.shutdown();
-                vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
-                vscode.window.showSaveDialog = save; vscode.window.showOpenDialog = open;
-                vscode.window.showTextDocument = show; vscode.window.showInformationMessage = information;
-                if (document?.isDirty) { await document.save(); }
-                await fs.rm(prompt, { force: true });
-            }
-        });
-    }
+                return chooseExisting ? choices.find((choice: any) => choice.promptSource === 'file') ?? choices[0] : choices[0];
+            }) as typeof pick;
+            let count = 0; vscode.window.showInputBox = async () => ['Example schedule', '60'][count++];
+            vscode.window.showSaveDialog = async options => {
+                assert.strictEqual(options?.defaultUri?.fsPath, vscode.Uri.joinPath(folder.uri, 'ai-schedule-prompt.md').fsPath);
+                return vscode.Uri.file(prompt);
+            };
+            vscode.window.showOpenDialog = async () => {
+                assert.strictEqual(chooseExisting, true, 'Creating an example must end before asking for a prompt file.');
+                return cancelFilePick ? undefined : [vscode.Uri.file(prompt)];
+            };
+            vscode.window.showTextDocument = (async (value: vscode.TextDocument, options: vscode.TextDocumentShowOptions) => {
+                document = value;
+                assert.strictEqual(options.preview, false);
+                assert.strictEqual(value.languageId, 'markdown');
+                assert.strictEqual((value.getText().match(/^## /gm) ?? []).length, 4);
+                assert.strictEqual(controller?.engine.list().length, 0);
+                return {} as vscode.TextEditor;
+            }) as unknown as typeof show;
+            vscode.window.showInformationMessage = ((message: string) => {
+                assert.ok(document);
+                messages.push(message);
+                notified = true;
+                return notification;
+            }) as unknown as typeof information;
+            controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
+            preparing = vscode.commands.executeCommand('taskhub.claudeScheduler.add');
+            await until(() => notified);
+            assert.ok(document, 'The example must be opened in the editor.');
+            assert.deepStrictEqual(values.get(CLAUDE_SCHEDULES_KEY), { version: 1, jobs: [] });
+            assert.strictEqual(await fs.readFile(prompt, 'utf8'), document.getText());
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), customPrompt);
+            assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+            assert.strictEqual(document.isDirty, true);
+            assert.strictEqual(await document.save(), true);
+            chooseExisting = true;
+            await vscode.commands.executeCommand('taskhub.claudeScheduler.add');
+            assert.strictEqual(controller.engine.list().length, 0, 'Cancelling file selection must leave the example unscheduled.');
+            cancelFilePick = false;
+            await vscode.commands.executeCommand('taskhub.claudeScheduler.add');
+            assert.strictEqual(controller.engine.list().length, 1, 'An unanswered example notification must not block Add.');
+            await preparing;
+            assert.strictEqual(messages.length, 1, 'Add must not produce an already-in-progress notification.');
+            assert.strictEqual(document.isDirty, false);
+            assert.strictEqual(await fs.readFile(prompt, 'utf8'), customPrompt);
+            const scheduled = controller.engine.list()[0];
+            assert.strictEqual(scheduled.mode, 'analysis');
+            assert.strictEqual(scheduled.promptPath, await fs.realpath(prompt));
+            assert.strictEqual(scheduled.lastRun, undefined, 'Registering a schedule must not run it immediately.');
+            await vscode.commands.executeCommand('taskhub.claudeScheduler.runNow', scheduled);
+            const completed = controller.engine.list()[0];
+            assert.strictEqual(completed.lastRun?.status, 'success');
+            assert.ok((await readClaudeReport(storage, completed)).includes('Review parser edge cases'));
+        } finally {
+            finishNotification(); await preparing;
+            await controller?.shutdown();
+            vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
+            vscode.window.showSaveDialog = save; vscode.window.showOpenDialog = open;
+            vscode.window.showTextDocument = show; vscode.window.showInformationMessage = information;
+            if (document?.isDirty) { await document.save(); }
+            await fs.rm(prompt, { force: true });
+            await history.update('enabled', historyEnabled, vscode.ConfigurationTarget.Global);
+        }
+    });
     for (const destination of ['existing', 'outside', 'linked-parent'] as const) {
         test(`example prompt creation preserves files and workspace boundaries: ${destination}`, async () => {
             const folder = vscode.workspace.workspaceFolders![0];
@@ -662,7 +994,128 @@ suite('Claude CLI execution and UI integration', function () {
             await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showOpenDialog = open; vscode.window.showSaveDialog = save;
         }
     });
-    test('an edit wizard cannot erase a result or re-enable a schedule that failed while it was open', async () => {
+    for (const field of ['name', 'cadence', 'mode', 'bashRules', 'promptFile', 'promptContents', 'cancel'] as const) {
+        test(`editing only ${field} keeps other fields, pause time and original due time`, async () => {
+            const folder = vscode.workspace.workspaceFolders![0];
+            const prompt = path.join(folder.uri.fsPath, `ai-edit-${randomUUID()}.md`);
+            const alternate = path.join(folder.uri.fsPath, `ai-edit-${randomUUID()}.txt`);
+            const initial = job({ workspacePath: await fs.realpath(folder.uri.fsPath), promptPath: prompt, mode: 'edit',
+                bashRules: ['Bash(npm test)'], cadence: { kind: 'daily', hour: 7, minute: 15 },
+                enabled: false, pausedAt: Date.now() - 12345, nextRunAt: Date.now() + 600000, lastRun: success() });
+            const values = new Map<string, unknown>([[CLAUDE_SCHEDULES_KEY, { version: 1, jobs: [initial] }]]);
+            const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+                get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+            } } as unknown as vscode.ExtensionContext;
+            const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox;
+            const open = vscode.window.showOpenDialog; const show = vscode.window.showTextDocument;
+            let controller: ClaudeSchedulerController | undefined; let prompts = 0; let picks = 0; let opened = 0;
+            try {
+                await fs.writeFile(prompt, 'original prompt'); await fs.writeFile(alternate, 'new prompt');
+                vscode.window.showQuickPick = (async (items: any) => {
+                    const choices = await items; picks++;
+                    if (choices.some((choice: any) => choice.field)) {
+                        assert.ok(choices.some((choice: any) => choice.description === initial.name));
+                        return field === 'cancel' ? undefined : choices.find((choice: any) => choice.field === field);
+                    }
+                    if (field === 'cadence') { assert.strictEqual(choices[0].cadenceKind, 'daily'); return choices[0]; }
+                    if (field === 'mode') { assert.strictEqual(choices[0].mode, 'edit'); return choices.find((choice: any) => choice.mode === 'analysis'); }
+                    assert.fail('Editing one field must not run the full registration wizard.');
+                }) as typeof pick;
+                vscode.window.showInputBox = async options => {
+                    prompts++;
+                    if (field === 'name') { assert.strictEqual(options?.value, initial.name); return 'renamed schedule'; }
+                    if (field === 'cadence') { assert.strictEqual(options?.value, '07:15'); return '07:15'; }
+                    if (field === 'bashRules') { assert.strictEqual(options?.value, JSON.stringify(initial.bashRules)); return '["Bash(git diff *)"]'; }
+                    assert.fail('Unselected fields must not ask for input.');
+                };
+                vscode.window.showOpenDialog = async options => {
+                    assert.strictEqual(field, 'promptFile'); assert.strictEqual(options?.defaultUri?.fsPath, prompt);
+                    return [vscode.Uri.file(alternate)];
+                };
+                vscode.window.showTextDocument = (async (document: vscode.TextDocument | vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) => {
+                    assert.ok('getText' in document);
+                    assert.strictEqual(field, 'promptContents'); assert.strictEqual(document.uri.fsPath, await fs.realpath(prompt));
+                    assert.strictEqual(document.getText(), 'original prompt'); assert.strictEqual((options as vscode.TextDocumentShowOptions).preview, false); opened++;
+                    return {} as vscode.TextEditor;
+                }) as typeof show;
+                controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
+                const before = controller.engine.list()[0];
+                await vscode.commands.executeCommand('taskhub.claudeScheduler.edit', before);
+                const expected = { ...before };
+                if (field === 'name') { expected.name = 'renamed schedule'; }
+                if (field === 'bashRules') { expected.bashRules = ['Bash(git diff *)']; }
+                if (field === 'mode') { expected.mode = 'analysis'; expected.bashRules = []; }
+                if (field === 'promptFile') { expected.promptPath = await fs.realpath(alternate); }
+                assert.deepStrictEqual(controller.engine.list()[0], expected);
+                assert.deepStrictEqual((values.get(CLAUDE_SCHEDULES_KEY) as ClaudeSchedulerState).jobs[0], expected);
+                assert.strictEqual(prompts, ['name', 'cadence', 'bashRules'].includes(field) ? 1 : 0);
+                assert.strictEqual(picks, field === 'cadence' || field === 'mode' ? 2 : 1);
+                assert.strictEqual(opened, field === 'promptContents' ? 1 : 0);
+            } finally {
+                await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
+                vscode.window.showOpenDialog = open; vscode.window.showTextDocument = show;
+                await fs.rm(prompt, { force: true }); await fs.rm(alternate, { force: true });
+            }
+        });
+    }
+    test('changing a working folder commits its prompt together and cancelling leaves the old schedule intact', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const initial = job({ workspacePath: await fs.realpath(folder.uri.fsPath), promptPath: path.join(folder.uri.fsPath, 'old.md'), nextRunAt: Date.now() + 600000 });
+        const values = new Map<string, unknown>([[CLAUDE_SCHEDULES_KEY, { version: 1, jobs: [initial] }]]);
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const pick = vscode.window.showQuickPick; const open = vscode.window.showOpenDialog;
+        const folders = Object.getOwnPropertyDescriptor(vscode.workspace, 'workspaceFolders')!;
+        let controller: ClaudeSchedulerController | undefined; let cancel = true;
+        try {
+            Object.defineProperty(vscode.workspace, 'workspaceFolders', { configurable: true, get: () => [folder,
+                { name: 'new folder', index: 1, uri: vscode.Uri.file(directory) }] });
+            vscode.window.showQuickPick = (async (items: any) => {
+                const choices = await items;
+                if (choices[0].field) { return choices.find((choice: any) => choice.field === 'workspace'); }
+                assert.strictEqual(choices[0].workspacePath, initial.workspacePath);
+                return choices.find((choice: any) => choice.folder.index === 1);
+            }) as typeof pick;
+            vscode.window.showOpenDialog = async options => {
+                assert.strictEqual(options?.defaultUri?.fsPath, path.join(await fs.realpath(directory), 'old.md'));
+                return cancel ? undefined : [vscode.Uri.file(item.promptPath)];
+            };
+            controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
+            const before = controller.engine.list()[0];
+            await vscode.commands.executeCommand('taskhub.claudeScheduler.edit', before);
+            assert.deepStrictEqual(controller.engine.list()[0], before);
+            cancel = false; await vscode.commands.executeCommand('taskhub.claudeScheduler.edit', before);
+            assert.deepStrictEqual(controller.engine.list()[0], { ...before, workspacePath: await fs.realpath(directory), promptPath: await fs.realpath(item.promptPath) });
+        } finally {
+            await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showOpenDialog = open;
+            Object.defineProperty(vscode.workspace, 'workspaceFolders', folders);
+        }
+    });
+    test('deleting during field input cannot recreate a schedule when editing finishes', async () => {
+        const initial = job({ nextRunAt: Date.now() + 600000 });
+        const values = new Map<string, unknown>([[CLAUDE_SCHEDULES_KEY, { version: 1, jobs: [initial] }]]);
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox; const error = vscode.window.showErrorMessage;
+        let controller: ClaudeSchedulerController | undefined; let release: ((name: string) => void) | undefined;
+        const messages: string[] = []; let editing: Thenable<unknown> | undefined;
+        try {
+            vscode.window.showQuickPick = (async (items: any) => (await items).find((choice: any) => choice.field === 'name')) as typeof pick;
+            vscode.window.showInputBox = async () => new Promise(resolve => { release = resolve; });
+            vscode.window.showErrorMessage = (async (message: string) => { messages.push(message); return undefined; }) as typeof error;
+            controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
+            editing = vscode.commands.executeCommand('taskhub.claudeScheduler.edit', initial); await until(() => !!release);
+            await controller.engine.remove(initial.id); release!('deleted name'); await editing;
+            assert.deepStrictEqual(controller.engine.list(), []);
+            assert.match(messages.join('\n'), /already been deleted|이미 삭제/);
+        } finally {
+            release?.('cancelled'); await editing; await controller?.shutdown();
+            vscode.window.showQuickPick = pick; vscode.window.showInputBox = input; vscode.window.showErrorMessage = error;
+        }
+    });
+    test('field editing cannot erase a result or re-enable a schedule that failed while it was open', async () => {
         const folder = vscode.workspace.workspaceFolders![0];
         const prompt = path.join(folder.uri.fsPath, `claude-wizard-${randomUUID()}.md`);
         const initial = job({ workspacePath: folder.uri.fsPath, promptPath: prompt, nextRunAt: Date.now() + 600000 });
@@ -689,6 +1142,7 @@ suite('Claude CLI execution and UI integration', function () {
             const edited = controller.engine.list()[0];
             assert.strictEqual(edited.name, 'updated name'); assert.strictEqual(edited.enabled, false);
             assert.deepStrictEqual(edited.lastRun, latest.lastRun);
+            assert.strictEqual(edited.nextRunAt, latest.nextRunAt); assert.strictEqual(edited.pausedAt, latest.pausedAt);
         } finally {
             release?.('cancelled'); await controller?.shutdown();
             vscode.window.showQuickPick = pick; vscode.window.showInputBox = input; vscode.window.showOpenDialog = open;
@@ -770,15 +1224,27 @@ suite('Claude CLI execution and UI integration', function () {
     });
 });
 
-suite('AI schedule settings and experimental feature gate', () => {
-    test('general setting names are visible and the old names are hidden compatibility keys', async () => {
+suite('AI schedule settings and feature visibility', () => {
+    test('stable settings are enabled and shown by default, with hidden legacy keys and localized titles', async () => {
         const manifest = JSON.parse(await fs.readFile(path.resolve(__dirname, '../..', 'package.json'), 'utf8'));
         const properties = manifest.contributes.configuration.properties;
-        for (const key of ['experimental.claudeScheduler.enabled', 'claudeScheduler.executable', 'claudeScheduler.model', 'claudeScheduler.timeoutSeconds']) {
-            const current = key.replace('claudeScheduler', 'aiScheduler');
+        for (const key of ['experimental.aiScheduler.enabled', 'experimental.claudeScheduler.enabled', 'claudeScheduler.executable', 'claudeScheduler.model', 'claudeScheduler.timeoutSeconds']) {
             assert.strictEqual(properties[`taskhub.${key}`].included, false);
+        }
+        for (const current of ['aiScheduler.enabled', 'aiScheduler.executable', 'aiScheduler.model', 'aiScheduler.timeoutSeconds']) {
             assert.notStrictEqual(properties[`taskhub.${current}`].included, false);
             assert.strictEqual(properties[`taskhub.${current}`].scope, 'machine');
+        }
+        assert.strictEqual(properties['taskhub.aiScheduler.enabled'].default, true);
+        assert.strictEqual(properties['taskhub.aiScheduler.showPanel'].default, true);
+        assert.notStrictEqual(properties['taskhub.aiScheduler.showPanel'].included, false);
+        const view = manifest.contributes.views.mainView.find((entry: any) => entry.id === 'mainView.claudeSchedules');
+        assert.strictEqual(view.when, 'taskhub.aiScheduler.enabled && config.taskhub.aiScheduler.showPanel');
+        for (const bundle of ['package.nls.json', 'package.nls.ko.json']) {
+            const strings = JSON.parse(await fs.readFile(path.resolve(__dirname, '../..', bundle), 'utf8'));
+            assert.doesNotMatch(strings['view.claudeSchedules'], /experimental|실험적/i);
+            assert.doesNotMatch(strings['setting.aiSchedulerEnabled'], /experimental|실험적/i);
+            assert.ok(strings['setting.aiSchedulerShowPanel']);
         }
     });
     test('new user settings take precedence including false and empty values; legacy user settings still work', () => {
@@ -794,6 +1260,10 @@ suite('AI schedule settings and experimental feature gate', () => {
             assert.strictEqual(aiScheduleSetting('model', ''), 'old-model');
             assert.strictEqual(aiScheduleSetting('timeoutSeconds', 600), 120);
             user.set('experimental.aiScheduler.enabled', false);
+            assert.strictEqual(aiSchedulesEnabled(), false);
+            user.set('aiScheduler.enabled', true);
+            assert.strictEqual(aiSchedulesEnabled(), true);
+            user.set('aiScheduler.enabled', false);
             user.set('aiScheduler.executable', '/new/assistant');
             user.set('aiScheduler.model', '');
             user.set('aiScheduler.timeoutSeconds', 90);
@@ -802,8 +1272,25 @@ suite('AI schedule settings and experimental feature gate', () => {
             assert.strictEqual(aiScheduleSetting('model', ''), '');
             assert.strictEqual(aiScheduleSetting('timeoutSeconds', 600), 90);
             user.clear();
-            assert.strictEqual(aiSchedulesEnabled(), false);
+            assert.strictEqual(aiSchedulesEnabled(), true);
             assert.strictEqual(aiScheduleSetting('executable', 'claude'), 'claude');
+        } finally { vscode.workspace.getConfiguration = original; }
+    });
+    test('only explicit legacy user enable values override the stable default', () => {
+        const original = vscode.workspace.getConfiguration;
+        const user = new Map<string, boolean>();
+        try {
+            vscode.workspace.getConfiguration = (() => ({ inspect: (key: string) => ({ globalValue: user.get(key),
+                defaultValue: key === 'aiScheduler.enabled', workspaceValue: false, workspaceFolderValue: false }) })) as unknown as typeof original;
+            assert.strictEqual(aiSchedulesEnabled(), true);
+            user.set('experimental.claudeScheduler.enabled', false);
+            assert.strictEqual(aiSchedulesEnabled(), false);
+            user.set('experimental.aiScheduler.enabled', true);
+            assert.strictEqual(aiSchedulesEnabled(), true);
+            user.set('aiScheduler.enabled', false);
+            assert.strictEqual(aiSchedulesEnabled(), false);
+            user.set('aiScheduler.enabled', true); user.set('experimental.aiScheduler.enabled', false);
+            assert.strictEqual(aiSchedulesEnabled(), true);
         } finally { vscode.workspace.getConfiguration = original; }
     });
     test('workspace and folder settings cannot choose the executable through new or legacy keys', () => {
@@ -811,45 +1298,81 @@ suite('AI schedule settings and experimental feature gate', () => {
         try {
             vscode.workspace.getConfiguration = (() => ({ inspect: () => ({ workspaceValue: 'unsafe', workspaceFolderValue: 'unsafe' }) })) as unknown as typeof original;
             assert.strictEqual(aiScheduleSetting('executable', 'claude'), 'claude');
-            assert.strictEqual(aiSchedulesEnabled(), false);
+            assert.strictEqual(aiSchedulesEnabled(), true);
         } finally { vscode.workspace.getConfiguration = original; }
     });
-    test('disabled by default, runtime toggles wait for cancellation, and dispose removes listeners', async () => {
+    for (const setting of ['aiScheduler.enabled', 'experimental.aiScheduler.enabled', 'experimental.claudeScheduler.enabled']) {
+        test(`default activation and ${setting} toggles preserve cancellation and ignore panel visibility`, async () => {
+            const get = vscode.workspace.getConfiguration; const onChange = vscode.workspace.onDidChangeConfiguration;
+            const onTrust = vscode.workspace.onDidGrantWorkspaceTrust;
+            const mutableWorkspace = vscode.workspace as unknown as { onDidChangeConfiguration: typeof onChange; onDidGrantWorkspaceTrust: typeof onTrust };
+            let enabled: boolean | undefined; let changes!: (event: vscode.ConfigurationChangeEvent) => void;
+            let created = 0; let disposed = 0; let listenersDisposed = 0; let finish!: () => void;
+            const gate = new Promise<void>(resolve => { finish = resolve; });
+            let registration: ReturnType<typeof registerClaudeScheduler> | undefined;
+            try {
+                vscode.workspace.getConfiguration = (() => ({ inspect: (key: string) => key === setting ? { globalValue: enabled } : undefined })) as unknown as typeof get;
+                mutableWorkspace.onDidChangeConfiguration = ((listener: typeof changes) => { changes = listener; return new vscode.Disposable(() => { listenersDisposed++; }); }) as typeof onChange;
+                mutableWorkspace.onDidGrantWorkspaceTrust = (() => new vscode.Disposable(() => { listenersDisposed++; })) as typeof onTrust;
+                registration = registerClaudeScheduler({} as vscode.ExtensionContext, killProcessTree, () => {
+                    created++;
+                    return { engine: { runningId: 'fixture' }, dispose: () => { disposed++; }, shutdown: () => gate } as unknown as ClaudeSchedulerController;
+                });
+                await until(() => created === 1); assert.strictEqual(registration.hasRunning(), true);
+                changes({ affectsConfiguration: key => key === 'taskhub.aiScheduler.showPanel' } as vscode.ConfigurationChangeEvent);
+                await Promise.resolve(); assert.strictEqual(created, 1); assert.strictEqual(disposed, 0);
+                enabled = false; changes({ affectsConfiguration: key => key === `taskhub.${setting}` } as vscode.ConfigurationChangeEvent);
+                assert.strictEqual(disposed, 1); assert.strictEqual(registration.hasRunning(), true);
+                enabled = true; changes({ affectsConfiguration: key => key === `taskhub.${setting}` } as vscode.ConfigurationChangeEvent);
+                await Promise.resolve(); assert.strictEqual(created, 1);
+                finish(); await until(() => created === 2);
+                await registration.shutdown(); assert.strictEqual(listenersDisposed, 2); assert.strictEqual(disposed, 2);
+            } finally {
+                finish(); await registration?.shutdown(); vscode.workspace.getConfiguration = get;
+                mutableWorkspace.onDidChangeConfiguration = onChange; mutableWorkspace.onDidGrantWorkspaceTrust = onTrust;
+            }
+        });
+    }
+    test('default activation waits for workspace trust', async () => {
         const get = vscode.workspace.getConfiguration; const onChange = vscode.workspace.onDidChangeConfiguration;
         const onTrust = vscode.workspace.onDidGrantWorkspaceTrust;
+        const trusted = Object.getOwnPropertyDescriptor(vscode.workspace, 'isTrusted')!;
         const mutableWorkspace = vscode.workspace as unknown as { onDidChangeConfiguration: typeof onChange; onDidGrantWorkspaceTrust: typeof onTrust };
-        let enabled = false; let changes!: (event: vscode.ConfigurationChangeEvent) => void;
-        let created = 0; let disposed = 0; let listenersDisposed = 0; let finish!: () => void;
-        const gate = new Promise<void>(resolve => { finish = resolve; });
+        let isTrusted = false; let grant!: () => void; let created = 0; let disposed = 0;
         let registration: ReturnType<typeof registerClaudeScheduler> | undefined;
         try {
-            vscode.workspace.getConfiguration = (() => ({ get: () => enabled, inspect: () => ({ globalValue: enabled }) })) as unknown as typeof get;
-            mutableWorkspace.onDidChangeConfiguration = ((listener: typeof changes) => { changes = listener; return new vscode.Disposable(() => { listenersDisposed++; }); }) as typeof onChange;
-            mutableWorkspace.onDidGrantWorkspaceTrust = (() => new vscode.Disposable(() => { listenersDisposed++; })) as typeof onTrust;
+            vscode.workspace.getConfiguration = (() => ({ inspect: () => undefined })) as unknown as typeof get;
+            Object.defineProperty(vscode.workspace, 'isTrusted', { configurable: true, get: () => isTrusted });
+            mutableWorkspace.onDidChangeConfiguration = (() => new vscode.Disposable(() => {})) as typeof onChange;
+            mutableWorkspace.onDidGrantWorkspaceTrust = ((listener: () => void) => { grant = listener; return new vscode.Disposable(() => {}); }) as typeof onTrust;
             registration = registerClaudeScheduler({} as vscode.ExtensionContext, killProcessTree, () => {
                 created++;
-                return { engine: { runningId: 'fixture' }, dispose: () => { disposed++; }, shutdown: () => gate } as unknown as ClaudeSchedulerController;
+                return { engine: {}, dispose: () => { disposed++; }, shutdown: async () => {} } as unknown as ClaudeSchedulerController;
             });
             await Promise.resolve(); assert.strictEqual(created, 0);
-            enabled = true; changes({ affectsConfiguration: () => true } as vscode.ConfigurationChangeEvent);
-            await until(() => created === 1); assert.strictEqual(registration.hasRunning(), true);
-            enabled = false; changes({ affectsConfiguration: () => true } as vscode.ConfigurationChangeEvent); assert.strictEqual(disposed, 1);
-            enabled = true; changes({ affectsConfiguration: () => true } as vscode.ConfigurationChangeEvent);
-            await Promise.resolve(); assert.strictEqual(created, 1);
-            finish(); await until(() => created === 2);
-            await registration.shutdown(); assert.strictEqual(listenersDisposed, 2); assert.strictEqual(disposed, 2);
+            isTrusted = true; grant(); await until(() => created === 1);
+            await registration.shutdown(); assert.strictEqual(disposed, 1);
         } finally {
-            finish(); await registration?.shutdown(); vscode.workspace.getConfiguration = get;
+            await registration?.shutdown(); vscode.workspace.getConfiguration = get;
             mutableWorkspace.onDidChangeConfiguration = onChange; mutableWorkspace.onDidGrantWorkspaceTrust = onTrust;
+            Object.defineProperty(vscode.workspace, 'isTrusted', trusted);
         }
     });
     test('launcher exposes enable setting when off and opens schedules when on', () => {
-        const disabled = buildFeatureLauncherItems([], 0, false).find(item => item.featureId === 'claudeScheduler');
+        const disabled = buildFeatureLauncherItems([], 0, false, true).find(item => item.featureId === 'claudeScheduler');
         assert.strictEqual(disabled?.command, 'workbench.action.openSettings');
         assert.match(disabled?.label ?? '', /AI/);
-        assert.deepStrictEqual(disabled?.commandArgs, ['@id:taskhub.experimental.aiScheduler.enabled']);
-        const enabled = buildFeatureLauncherItems(['claudeScheduler'], 0, true).filter(item => item.featureId === 'claudeScheduler');
+        assert.deepStrictEqual(disabled?.commandArgs, ['@id:taskhub.aiScheduler.enabled']);
+        assert.doesNotMatch(disabled?.label ?? '', /experimental|실험적/i);
+        const enabled = buildFeatureLauncherItems(['claudeScheduler'], 0, true, true).filter(item => item.featureId === 'claudeScheduler');
         assert.strictEqual(enabled.length, 1); assert.strictEqual(enabled[0].command, 'taskhub.claudeScheduler.showSchedules');
         assert.match(enabled[0].label, /AI/);
+        assert.doesNotMatch(enabled[0].label, /experimental|실험적/i);
+        const hidden = buildFeatureLauncherItems(['claudeScheduler'], 0, true, false).filter(item => item.featureId === 'claudeScheduler');
+        assert.strictEqual(hidden.length, 1); assert.strictEqual(hidden[0].command, 'workbench.action.openSettings');
+        assert.deepStrictEqual(hidden[0].commandArgs, ['@id:taskhub.aiScheduler.showPanel']);
+        assert.doesNotMatch(hidden[0].label, /experimental|실험적/i);
+        const offAndHidden = buildFeatureLauncherItems([], 0, false, false).find(item => item.featureId === 'claudeScheduler');
+        assert.deepStrictEqual(offAndHidden?.commandArgs, ['@id:taskhub.aiScheduler.enabled']);
     });
 });

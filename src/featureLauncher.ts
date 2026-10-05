@@ -49,7 +49,7 @@ export interface FeatureLauncherItem extends vscode.QuickPickItem {
 
 const FEATURE_ID_SET = new Set<string>(FEATURE_IDS);
 
-function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEnabled: boolean): readonly FeatureLauncherDefinition[] {
+function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEnabled: boolean, aiSchedulesVisible: boolean): readonly FeatureLauncherDefinition[] {
     const definitions: FeatureLauncherDefinition[] = [
         {
             id: 'taskhubView',
@@ -149,12 +149,12 @@ function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEna
     ];
     definitions.push({
         id: 'claudeScheduler',
-        command: claudeSchedulerEnabled ? 'taskhub.claudeScheduler.showSchedules' : 'workbench.action.openSettings',
-        commandArgs: claudeSchedulerEnabled ? undefined : ['@id:taskhub.experimental.aiScheduler.enabled'],
+        command: claudeSchedulerEnabled && aiSchedulesVisible ? 'taskhub.claudeScheduler.showSchedules' : 'workbench.action.openSettings',
+        commandArgs: !claudeSchedulerEnabled ? ['@id:taskhub.aiScheduler.enabled'] : !aiSchedulesVisible ? ['@id:taskhub.aiScheduler.showPanel'] : undefined,
         group: 'actions',
-        label: `$(clock) ${claudeSchedulerEnabled
-            ? t('AI 예약 실행 (실험적)', 'AI Schedules (Experimental)')
-            : t('AI 예약 실행 활성화… (실험적)', 'Enable AI Schedules… (Experimental)')}`,
+        label: `$(clock) ${!claudeSchedulerEnabled
+            ? t('AI 예약 실행 활성화…', 'Enable AI Schedules…')
+            : !aiSchedulesVisible ? t('AI 예약 실행 표시…', 'Show AI Schedules…') : t('AI 예약 실행', 'AI Schedules')}`,
         description: t('요청문 파일로 AI 작업을 정기 실행합니다. 현재 실행 엔진: Claude Code.', 'Schedule AI tasks from prompt files. Current engine: Claude Code.'),
     });
     return definitions;
@@ -195,9 +195,10 @@ function toQuickPickItem(definition: FeatureLauncherDefinition): FeatureLauncher
 export function buildFeatureLauncherItems(
     recentValue: unknown,
     unreadCount = 0,
-    claudeSchedulerEnabled = aiSchedulesEnabled()
+    claudeSchedulerEnabled = aiSchedulesEnabled(),
+    aiSchedulesVisible = vscode.workspace.getConfiguration('taskhub').get<boolean>('aiScheduler.showPanel', true)
 ): FeatureLauncherItem[] {
-    const definitions = buildFeatureLauncherDefinitions(unreadCount, claudeSchedulerEnabled);
+    const definitions = buildFeatureLauncherDefinitions(unreadCount, claudeSchedulerEnabled, aiSchedulesVisible);
     const byId = new Map(definitions.map(definition => [definition.id, definition]));
     const recent = normalizeFeatureLauncherRecent(recentValue).filter(id => byId.has(id));
     const items: FeatureLauncherItem[] = [];

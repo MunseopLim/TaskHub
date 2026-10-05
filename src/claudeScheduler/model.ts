@@ -21,9 +21,11 @@ export interface ClaudeSchedule {
     bashRules?: string[];
     cadence: ClaudeCadence;
     enabled: boolean;
+    pausedAt?: number;
     nextRunAt: number;
     lastRun?: ClaudeRunResult;
 }
+export type ClaudeScheduleChanges = Partial<Pick<ClaudeSchedule, 'name' | 'workspacePath' | 'promptPath' | 'mode' | 'bashRules' | 'cadence'>>;
 export interface ClaudeSchedulerState { version: 1; jobs: ClaudeSchedule[]; }
 
 /** Memento values are JSON data; avoid structuredClone (unavailable in VS Code 1.75's Node 16). */
@@ -50,6 +52,12 @@ function skipQueuedRun(job: ClaudeSchedule, now: number): void {
     }
 }
 
+/** Record only an actual transition; a legacy paused job has no known pause time to invent. */
+function pauseSchedule(job: ClaudeSchedule, now: number): void {
+    if (job.enabled) { job.pausedAt = now; }
+    job.enabled = false;
+}
+
 export function validCadence(value: unknown): value is ClaudeCadence {
     if (!value || typeof value !== 'object') { return false; }
     const cadence = value as ClaudeCadence;
@@ -67,6 +75,7 @@ export function readSchedulerState(raw: unknown): ClaudeSchedulerState {
             && (job.mode === 'analysis' || job.mode === 'edit') && validCadence(job.cadence)
             && (job.bashRules === undefined || validBashRules(job.bashRules))
             && typeof job.enabled === 'boolean' && isInteger(job.nextRunAt, 0, 8_000_000_000_000_000)
+            && (job.pausedAt === undefined || isInteger(job.pausedAt, 0, 8_000_000_000_000_000))
             && (!job.lastRun || (['success', 'failed', 'stopped', 'skipped', 'queued', 'running', 'interrupted'].includes(job.lastRun.status)
                 && isInteger(job.lastRun.startedAt, 0, 8_000_000_000_000_000)
                 && (job.lastRun.finishedAt === undefined || isInteger(job.lastRun.finishedAt, 0, 8_000_000_000_000_000))
@@ -142,7 +151,7 @@ export class ClaudeScheduler {
                 if (job.nextRunAt <= now) { job.nextRunAt = skipClaudeRun(job, now); }
                 if (job.lastRun?.status === 'running') {
                     job.lastRun.status = 'interrupted';
-                    job.enabled = false;
+                    pauseSchedule(job, now);
                 } else { skipQueuedRun(job, now); }
             }
         });
@@ -160,6 +169,7 @@ export class ClaudeScheduler {
             // A wizard may outlive a run or a pause. Merge only editable fields.
             if (index >= 0) {
                 saved.enabled = state.jobs[index].enabled;
+                saved.pausedAt = state.jobs[index].pausedAt;
                 saved.lastRun = state.jobs[index].lastRun;
             }
             saved.nextRunAt = nextClaudeRun(saved.cadence, this.deps.now());
@@ -167,15 +177,40 @@ export class ClaudeScheduler {
         });
         this.arm();
     }
+    /** Apply only edited fields to the current job, without restarting its clock or reviving deleted jobs. */
+    async update(id: string, changes: ClaudeScheduleChanges): Promise<boolean> {
+        let updated = false;
+        await this.change(state => {
+            if (this.disposed) { throw new ClaudeSchedulerError('disposed'); }
+            const job = state.jobs.find(item => item.id === id);
+            if (!job) { return; }
+            if (this.active?.id === id || this.pending.some(item => item.id === id)) { throw new ClaudeSchedulerError('running'); }
+            const cadence = changes.cadence;
+            const sameCadence = !cadence || (cadence.kind === 'interval'
+                ? job.cadence.kind === 'interval' && cadence.minutes === job.cadence.minutes
+                : job.cadence.kind === 'daily' && cadence.hour === job.cadence.hour && cadence.minute === job.cadence.minute);
+            Object.assign(job, copyData(changes));
+            if (!sameCadence) { job.nextRunAt = nextClaudeRun(job.cadence, this.deps.now()); }
+            updated = true;
+        });
+        this.arm();
+        return updated;
+    }
     async setEnabled(id: string, enabled: boolean): Promise<void> {
         await this.change(state => {
             if (enabled && this.disposed) { throw new ClaudeSchedulerError('disposed'); }
             const job = state.jobs.find(item => item.id === id);
             if (!job) { return; }
-            job.enabled = enabled;
-            if (enabled) { job.nextRunAt = nextClaudeRun(job.cadence, this.deps.now()); }
-            else if (job.lastRun?.status === 'queued') {
-                job.lastRun = { status: 'stopped', startedAt: job.lastRun.startedAt, finishedAt: this.deps.now() };
+            if (enabled) {
+                job.enabled = true;
+                delete job.pausedAt;
+                job.nextRunAt = nextClaudeRun(job.cadence, this.deps.now());
+            } else {
+                const now = this.deps.now();
+                pauseSchedule(job, now);
+                if (job.lastRun?.status === 'queued') {
+                    job.lastRun = { status: 'stopped', startedAt: job.lastRun.startedAt, finishedAt: now };
+                }
             }
         });
         if (!enabled) { this.pending = this.pending.filter(item => item.id !== id); }
@@ -230,7 +265,7 @@ export class ClaudeScheduler {
             }
         } catch (error) {
             for (const job of this.state.jobs) {
-                job.enabled = false;
+                pauseSchedule(job, this.deps.now());
                 if (job.lastRun?.status === 'queued') { job.lastRun.status = 'interrupted'; }
             }
             this.pending = [];
@@ -270,7 +305,11 @@ export class ClaudeScheduler {
                 if (abort.signal.aborted || this.disposed) {
                     await this.change(state => {
                         const job = state.jobs.find(item => item.id === id);
-                        if (job) { job.lastRun = { status: 'stopped', startedAt: snapshot!.lastRun!.startedAt, finishedAt: this.deps.now() }; job.enabled = false; }
+                        if (job) {
+                            const now = this.deps.now();
+                            job.lastRun = { status: 'stopped', startedAt: snapshot!.lastRun!.startedAt, finishedAt: now };
+                            pauseSchedule(job, now);
+                        }
                     });
                     return;
                 }
@@ -280,12 +319,12 @@ export class ClaudeScheduler {
                     const job = state.jobs.find(item => item.id === id);
                     if (!job) { return; }
                     job.lastRun = result;
-                    if (result.status === 'failed' || result.status === 'stopped') { job.enabled = false; }
+                    if (result.status === 'failed' || result.status === 'stopped') { pauseSchedule(job, this.deps.now()); }
                 });
             } catch (error) {
                 // Storage failures must not dispatch or silently reschedule a run.
                 for (const job of this.state.jobs) {
-                    job.enabled = false;
+                    pauseSchedule(job, this.deps.now());
                     if (job.lastRun?.status === 'running' || job.lastRun?.status === 'queued') { job.lastRun.status = 'interrupted'; }
                 }
                 this.pending = [];

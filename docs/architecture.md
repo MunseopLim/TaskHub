@@ -274,7 +274,7 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 3. `activate()` 내에서 설정 확인 후 조건부 등록
 4. `docs/features.md` 섹션 16에 문서화
 
-현재 실험적 기능은 Bit Operation Hover와 AI 예약 실행입니다. 설정과 사용법은 [기능 레퍼런스](./features.md)의 실험적 기능 항목을 참조하세요.
+현재 실험적 기능은 Bit Operation Hover입니다. 설정과 사용법은 [기능 레퍼런스](./features.md)의 실험적 기능 항목을 참조하세요.
 
 > 실험적 기능의 상세 추가 가이드는 [CONTRIBUTING.md](../CONTRIBUTING.md)를 참조하세요.
 
@@ -342,6 +342,7 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   JSON 저장 전 숫자 검사는 마지막 직접 저장의 파일 식별자·크기·고해상도 수정/변경 시각이 같을 때 생략한다. Windows에서는 이 메타데이터가 외부 쓰기 전후에 같을 수 있어, 1MiB 고정 버퍼로 비동기로 나누어 읽은 원문의 SHA-256이 직접 저장한 내용과 같은지도 확인한다. 확인 중 확장 호스트를 막지 않으므로 같은 세션의 저장은 순서대로 처리하고, 확인이 끝났을 때 세션이 바뀌었으면 쓰지 않는다. 캐시는 쓴 fd의 상태와 현재 경로의 상태를 비교해 등록하며, 시각만 달라진 경우에도 내용 검사 없이 재사용하지 않는다. 외부 변경을 반영하는 saved baseline과는 분리한다. 이 검사는 동시 쓰기를 잠그거나 원자적 저장을 보장하지 않는다. 검사 크기 한도와 실패 시 동작은 [JSON Editor 데이터 보호](features.md#데이터-보호)를 참조한다. 정상 디스크 파일의 복구본은 먼저 신선도를 판정하고 복구 대상에만 숫자 검사를 적용하며, 지원 불가 데이터를 사용자 선택 없이 삭제하지 않는다.
     *   에러/정보 HTML 출력은 `escapeHtml` 경유를 강제한다.
 6.  **파서 입력 한도**
+    *   AI 예약 보고서: 요청문과 출력의 UTF-8 변환을 포함할 수 있도록 일반 파일·최대 16MiB만 읽는다. 열린 파일의 종류·크기를 확인하고 실제 읽은 바이트도 제한해 읽는 중 커진 파일을 거부한다.
     *   개발 계산기: `evaluateDeveloperExpression()`은 4096자·256토큰·중첩 32단계와 부호를 제외한 256비트 크기 한도를 적용한다. 연산자·함수 이름을 허용 목록으로 직접 파싱하고, 0 나눗셈·shift·정렬 인자를 검증한다. 복사 요청도 호스트에서 같은 모드로 재평가하며, 선택 영역은 읽기 전에 4096자 한도를 확인한다.
     *   Hex/Text 비트 계산: `evaluateHexBitwiseExpression()`은 수식을 4096자·256토큰·괄호와 `~`의 합산 중첩 32단계로 제한한다. 허용된 숫자·비트 연산자만 직접 파싱하며, `BigInt` 계산 전에 리터럴 범위와 shift 횟수를 검사한다. 동적 코드 실행은 사용하지 않는다.
     *   GNU 링커 상수식: `parseLinkerConstantExpression()`은 식당 4096자·256토큰으로 제한하고 안전한 정수 범위를 검사한다. 허용된 토큰을 직접 해석하며 `eval`이나 동적 코드 실행을 사용하지 않는다.
@@ -375,8 +376,8 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 
 ## AI 예약 실행
 
-[claudeScheduler/settings.ts](../src/claudeScheduler/settings.ts)는 예약 설정을 실행기와 기능 런처에 연결합니다. [claudeScheduler/controller.ts](../src/claudeScheduler/controller.ts)는 신뢰된 워크스페이스에서 실험적 설정을 켰을 때만 뷰·명령·타이머를 등록합니다. [model.ts](../src/claudeScheduler/model.ts)는 workspaceState에 예약 정의와 다음 시각·최종 결과를 저장하고, 슬롯을 저장한 뒤 대기열에서 순차 실행합니다. 저장 실패는 자동 실행을 중단합니다. [runner.ts](../src/claudeScheduler/runner.ts)는 쉘 없이 CLI를 시작하고 stdin으로 요청문을 전달합니다. 폴더 realpath 기반 임대 잠금과 슬롯 기록은 창 간 동시 수정·동일 시각 재실행을 막습니다. 임대가 손상되면 실행을 취소하며 CLI가 닫힐 때까지 잠금을 유지합니다. [reportDocument.ts](../src/claudeScheduler/reportDocument.ts)는 명시적으로 연 보고서만 가상 문서로 제공합니다.
+[claudeScheduler/settings.ts](../src/claudeScheduler/settings.ts)는 예약 설정을 실행기와 기능 런처에 연결하며 이전 실험적 사용자 설정을 호환합니다. [claudeScheduler/controller.ts](../src/claudeScheduler/controller.ts)는 신뢰된 워크스페이스에서 활성화 설정에 따라 뷰·명령·타이머를 등록합니다. 패널 표시 설정은 manifest의 뷰 조건으로만 적용하며 실행기의 수명주기를 바꾸지 않습니다. [model.ts](../src/claudeScheduler/model.ts)는 workspaceState에 예약 정의와 다음 시각·최종 결과를 저장하고, 슬롯을 저장한 뒤 대기열에서 순차 실행합니다. 저장 실패는 자동 실행을 중단합니다. [runner.ts](../src/claudeScheduler/runner.ts)는 쉘 없이 CLI를 시작하고 stdin으로 요청문을 전달합니다. 폴더 realpath 기반 임대 잠금과 슬롯 기록은 창 간 동시 수정·동일 시각 재실행을 막습니다. 임대가 손상되면 실행을 취소하며 CLI가 닫힐 때까지 잠금을 유지합니다. [reportDocument.ts](../src/claudeScheduler/reportDocument.ts)는 명시적으로 연 보고서만 가상 문서로 제공합니다.
 
 요청문 예제 생성은 부모 폴더의 realpath가 선택한 워크스페이스 안인지 확인하고 배타적 파일 생성으로 기존 파일·심볼릭 링크 덮어쓰기를 막습니다.
 
-결과·잠금은 globalStorageUri 아래에 저장합니다. 정상 비활성화는 프로세스 트리 취소와 저장 완료를 기다리고, 강제 종료로 남은 실행 중 상태는 재시작 시 추적 중단·일시 정지로 복구합니다. CLI 실행 정책·사용법·한계는 [features.md §16.2](./features.md#162-ai-예약-실행)에서 관리합니다.
+결과·잠금은 globalStorageUri 아래에 저장합니다. 보고서의 실행 정보는 설정에서 재구성하지 않고 실제 spawn 인자와 stdin 기록 시점에 수집합니다. 정상 비활성화는 프로세스 트리 취소와 저장 완료를 기다리고, 강제 종료로 남은 실행 중 상태는 재시작 시 추적 중단·일시 정지로 복구합니다. CLI 실행 정책·사용법·한계는 [features.md §26](./features.md#26-ai-예약-실행)에서 관리합니다.
