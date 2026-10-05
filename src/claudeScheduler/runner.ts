@@ -70,6 +70,17 @@ function invocationDetails(invocations: ClaudeInvocation[]): string {
     return lines.join('\n');
 }
 
+/** A non-string result is re-indented and can outgrow the read limit; keep the head and every execution detail. */
+function boundReportText(text: string, budget: number): string {
+    const bytes = Buffer.from(text, 'utf8');
+    if (bytes.length <= budget) { return text; }
+    const note = t(`\n\n[보고서 크기 한도를 넘어 결과 ${bytes.length}바이트 중 앞부분만 보관했습니다.]`,
+        `\n\n[The result exceeded the report size limit; kept only the beginning of ${bytes.length} bytes.]`);
+    if (budget < Buffer.byteLength(note, 'utf8') + 4) { return ''; }
+    // A cut multibyte character decodes to one U+FFFD, at most 2 bytes longer than the cut.
+    return bytes.subarray(0, budget - Buffer.byteLength(note, 'utf8') - 4).toString('utf8') + note;
+}
+
 export function claudeArguments(job: ClaudeSchedule, options: ClaudeCliOptions): string[] {
     const bash = job.mode === 'edit' ? job.bashRules ?? [] : [];
     const tools = job.mode === 'edit' ? `Read,Glob,Grep,Edit,Write${bash.length ? ',Bash' : ''}` : 'Read,Glob,Grep';
@@ -118,7 +129,12 @@ export function parseClaudeResult(stdout: string, exitCode: number | null): { su
     }
     const denied = Array.isArray(result.permission_denials) && result.permission_denials.length > 0;
     const success = exitCode === 0 && result.subtype === 'success' && result.is_error === false && !denied;
-    const text = typeof result.result === 'string' ? result.result : JSON.stringify(result, null, 2);
+    let text = typeof result.result === 'string' ? result.result : stdout;
+    if (typeof result.result !== 'string') {
+        // Valid JSON can be too deeply nested to stringify; keep the original bounded output.
+        try { text = JSON.stringify(result, null, 2); }
+        catch { /* Original JSON remains readable and the run can complete. */ }
+    }
     return { success, text: denied ? t('허용되지 않은 도구 요청이 있어 작업을 완료로 처리하지 않았습니다.', 'The run requested tools without permission and was not marked complete.') + '\n' + text : text };
 }
 
@@ -335,8 +351,10 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
     await fs.mkdir(directory, { recursive: true });
     const statusLabel = status === 'success' ? t('완료', 'Completed') : status === 'stopped' ? t('중지', 'Stopped')
         : status === 'skipped' ? t('건너뜀', 'Skipped') : t('실패', 'Failed');
-    await fs.writeFile(path.join(directory, report), [job.name, `${new Date(startedAt).toISOString()} → ${new Date(finishedAt).toISOString()}`,
-        statusLabel, '', text, '', invocationDetails(invocations)].join('\n'), { flag: 'wx', mode: 0o600 });
+    const header = [job.name, `${new Date(startedAt).toISOString()} → ${new Date(finishedAt).toISOString()}`, statusLabel, ''].join('\n');
+    const details = invocationDetails(invocations);
+    const budget = reportLimit - Buffer.byteLength(header, 'utf8') - Buffer.byteLength(details, 'utf8') - 3;
+    await fs.writeFile(path.join(directory, report), [header, boundReportText(text, budget), '', details].join('\n'), { flag: 'wx', mode: 0o600 });
     await pruneClaudeReports(storage, job.id, report);
     return { status, startedAt, finishedAt, report };
 }

@@ -237,6 +237,11 @@ suite('Claude scheduler clock, persistence and lifecycle', () => {
                 assert.strictEqual(restarted.engine.list()[0].nextRunAt, 100000);
                 assert.strictEqual(restarted.saved()?.jobs[0].enabled, true);
             } finally { await restarted.engine.shutdown(); }
+            // A cadence edit while paused keeps the pause; resume schedules from the new cadence.
+            f.now(45000); await f.engine.update(item.id, { cadence: { kind: 'interval', minutes: 2 } });
+            assert.strictEqual(f.engine.list()[0].enabled, false); assert.strictEqual(f.engine.list()[0].pausedAt, 20000);
+            f.now(50000); await f.engine.setEnabled(item.id, true);
+            assert.strictEqual(f.engine.list()[0].nextRunAt, 170000);
         } finally { await f.engine.shutdown(); }
     });
     test('failure and interrupted restart record the actual pause time, while queued shutdown stays enabled', async () => {
@@ -361,7 +366,7 @@ suite('Claude CLI execution and UI integration', function () {
                 if(scenario==='edit'){fs.writeFileSync(args[1],'modified by fixture');}
                 if(scenario==='full-result'){fs.writeFileSync(args[1],JSON.stringify({prompt,args,cwd:process.cwd()}));process.stderr.write('w'.repeat(256*1024));}
                 const result={type:'result',subtype:scenario==='external-failure'?'error_external':'success',is_error:scenario==='fail',
-                    total_cost_usd:scenario==='no-cost'?undefined:1000,result:scenario==='full-result'?'R'.repeat(4*1024*1024-4096):JSON.stringify({prompt,args,cwd:process.cwd()}),permission_denials:scenario==='denied'?[{tool_name:'Bash'}]:[]};
+                    total_cost_usd:scenario==='no-cost'?undefined:1000,result:scenario==='full-result'?'R'.repeat(4*1024*1024-4096):scenario==='expanding-result'?Array.from({length:900000},()=>[0]):scenario==='expanding-unicode-result'?Array.from({length:300000},()=>[[['한']]]):JSON.stringify({prompt,args,cwd:process.cwd()}),permission_denials:scenario==='denied'?[{tool_name:'Bash'}]:[]};
                 console.log(JSON.stringify(result));if(scenario==='fail'){process.exitCode=1;}
             });}`);
         options = { executable: 'node', prefixArgs: [script, 'success'], timeoutSeconds: 5 };
@@ -428,6 +433,33 @@ suite('Claude CLI execution and UI integration', function () {
         assert.deepStrictEqual(reportInvocations(report)[1].args, [script, ...received.args]);
         await fs.appendFile(path.join(claudeReportDirectory(storage, item.id), item.lastRun.report!), Buffer.alloc(16 * 1024 * 1024));
         await assert.rejects(readClaudeReport(storage, item), /too large|너무 크/);
+    });
+    for (const scenario of ['expanding-result', 'expanding-unicode-result']) {
+        test(`${scenario} is truncated so the report stays readable with full execution details`, async () => {
+            options.prefixArgs = [script, scenario];
+            item.lastRun = await run(item, options, storage);
+            assert.strictEqual(item.lastRun.status, 'success');
+            const report = await readClaudeReport(storage, item);
+            // Truncation keeps as much as fits: the head of the result, the header and the full details.
+            assert.ok(Buffer.byteLength(report, 'utf8') > 16 * 1024 * 1024 - 1024);
+            assert.ok(Buffer.byteLength(report, 'utf8') <= 16 * 1024 * 1024);
+            assert.ok(report.startsWith(`${item.name}\n`));
+            assert.ok(report.includes('\n\n{\n  "type": "result"'));
+            assert.match(report, /보고서 크기 한도|report size limit/);
+            assert.ok(report.includes(`\n${await fs.readFile(item.promptPath, 'utf8')}\n`));
+            assert.deepStrictEqual(reportInvocations(report).map(entry => entry.phase), ['version', 'prompt']);
+        });
+    }
+    test('a deeply nested JSON result falls back to the original output without losing result status', () => {
+        const nested = '['.repeat(10000) + '0' + ']'.repeat(10000);
+        const stdout = `{"type":"result","subtype":"success","is_error":false,"result":${nested}}`;
+        assert.deepStrictEqual(parseClaudeResult(stdout, 0), { success: true, text: stdout });
+        assert.deepStrictEqual(parseClaudeResult(stdout, 1), { success: false, text: stdout });
+        const denied = `{"type":"result","subtype":"success","is_error":false,"permission_denials":[{"tool_name":"Edit"}],"result":${nested}}`;
+        const result = parseClaudeResult(denied, 0);
+        assert.strictEqual(result.success, false);
+        assert.ok(result.text.endsWith(denied));
+        assert.match(result.text, /without permission|허용되지 않은/);
     });
     test('display command quoting preserves POSIX argument boundaries without expanding shell-looking values', function () {
         if (process.platform === 'win32') { this.skip(); }
