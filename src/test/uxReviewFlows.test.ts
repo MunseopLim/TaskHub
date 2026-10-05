@@ -171,10 +171,10 @@ suite('UX review flows', function () {
 
     suite('input profile execution freshness', () => {
         const actionId = 'ux-review-profile';
-        const workspace = vscode.workspace.workspaceFolders![0].uri.fsPath;
-        const actionsFile = path.join(workspace, '.vscode', 'actions.json');
-        const outputFile = path.join(workspace, 'taskhub-ux-review-result.txt');
-        let previousActions: Buffer | undefined;
+        const workspaceFoldersDescriptor = Object.getOwnPropertyDescriptor(vscode.workspace, 'workspaceFolders');
+        let workspace: string;
+        let actionsFile: string;
+        let outputFile: string;
         let store: InputProfileStore;
         let profileId: string;
         let context: vscode.ExtensionContext;
@@ -192,7 +192,17 @@ suite('UX review flows', function () {
         const run = () => runActionWithInputProfile({ id: actionId } as Action, context, provider, history, store);
         const replaceProfile = () => store.save({ actionId, name: 'Review', inputs: { target: { value: 'latest' } }, taskTypes: { target: 'inputBox' } }, profileId);
         setup(async () => {
-            previousActions = fs.existsSync(actionsFile) ? fs.readFileSync(actionsFile) : undefined;
+            assert.ok(workspaceFoldersDescriptor);
+            // 실제 테스트 워크스페이스의 actions.json은 VS Code가 감시한다.
+            // Windows에서 연속 덮어쓰기가 파일 핸들과 경합하지 않도록 각
+            // 테스트는 감시 대상 밖의 새 폴더에서 실제 파일을 읽고 실행한다.
+            workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-profile-freshness-'));
+            actionsFile = path.join(workspace, '.vscode', 'actions.json');
+            outputFile = path.join(workspace, 'taskhub-ux-review-result.txt');
+            Object.defineProperty(vscode.workspace, 'workspaceFolders', {
+                configurable: true,
+                value: [{ uri: vscode.Uri.file(workspace), name: 'Profile freshness', index: 0 }],
+            });
             fs.mkdirSync(path.dirname(actionsFile), { recursive: true });
             writeAction(action());
             invalidateActionsCache();
@@ -216,13 +226,19 @@ suite('UX review flows', function () {
             vscode.window.showQuickPick = (async (items: any[]) => items[0]) as unknown as typeof original.pick;
             vscode.window.showInputBox = (async () => 'fresh') as typeof original.input;
         });
-        teardown(() => {
-            provider.dispose();
-            history.dispose();
-            if (previousActions) { fs.writeFileSync(actionsFile, previousActions); }
-            else { fs.rmSync(actionsFile, { force: true }); }
-            fs.rmSync(outputFile, { force: true });
-            invalidateActionsCache();
+        teardown(async () => {
+            try {
+                provider?.dispose();
+                history?.dispose();
+            } finally {
+                if (workspaceFoldersDescriptor) {
+                    Object.defineProperty(vscode.workspace, 'workspaceFolders', workspaceFoldersDescriptor);
+                }
+                invalidateActionsCache();
+                if (workspace) {
+                    await fs.promises.rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+                }
+            }
         });
         test('a changed action and profile are re-read after selection and reach the real pipeline', async () => {
             vscode.window.showQuickPick = (async (items: any[]) => {
