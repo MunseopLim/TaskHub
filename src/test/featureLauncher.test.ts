@@ -89,6 +89,16 @@ suite('TaskHub 기능 런처', () => {
         assert.strictEqual(allFeatureIds.length, 14, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
         assert.ok(allFeatureIds.every(id => typeof id === 'string'));
         assert.ok(items.filter(item => item.featureId).every(item => item.label.includes('$(')));
+
+        // calculator는 VS Code 기본 아이콘에 없어 빈칸으로 렌더링된다.
+        // 임베디드 도구와 최근 사용 모두 지원되는 연산자 아이콘을 제공해야 한다.
+        for (const recentValue of [[], ['developerCalculator']]) {
+            const calculatorItems = buildFeatureLauncherItems(recentValue)
+                .filter(item => item.featureId === 'developerCalculator');
+            assert.strictEqual(calculatorItems.length, 1);
+            assert.match(calculatorItems[0].label, /^\$\(symbol-operator\) /);
+            assert.strictEqual(calculatorItems[0].command, 'taskhub.showDeveloperCalculator');
+        }
     });
 
     test('새로운 기능의 읽지 않은 버전 수를 런처에 표시한다', () => {

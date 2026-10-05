@@ -119,7 +119,7 @@ function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEna
             id: 'developerCalculator',
             command: 'taskhub.showDeveloperCalculator',
             group: 'embedded',
-            label: t('$(calculator) 개발 계산기', '$(calculator) Developer Calculator'),
+            label: `$(symbol-operator) ${t('개발 계산기', 'Developer Calculator')}`,
             description: t('선택한 수식·주소 차이·메모리 크기를 정확한 정수로 계산합니다.', 'Calculate selected expressions, address offsets, and memory sizes exactly.'),
         },
         {
