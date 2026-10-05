@@ -8,7 +8,6 @@ import * as vscode from 'vscode';
 import { CLAUDE_SCHEDULES_KEY, ClaudeRunResult, ClaudeSchedule, ClaudeScheduler, ClaudeSchedulerState, nextClaudeRun, readSchedulerState } from '../claudeScheduler/model';
 import { ClaudeSchedulerController, registerClaudeScheduler } from '../claudeScheduler/controller';
 import { ClaudeCliOptions, claudeArguments, claudeReportDirectory, parseClaudeResult, pruneClaudeReports, readClaudeReport, runScheduledClaude, supportsClaudeVersion } from '../claudeScheduler/runner';
-import { ClaudeBudgetLimitError, reserveClaudeBudget, recordClaudeCost } from '../claudeScheduler/budget';
 import { ClaudeSchedulesProvider } from '../providers/claudeSchedulesProvider';
 import { killProcessTree } from '../extension';
 import { buildFeatureLauncherItems } from '../featureLauncher';
@@ -238,13 +237,12 @@ suite('Claude CLI execution and UI integration', function () {
             let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>prompt+=c);process.stdin.on('end',()=>{
                 if(scenario==='hang'){fs.writeFileSync(args[1],String(process.pid));setInterval(()=>{},1000);return;}
                 if(scenario==='large'){process.stdout.write('x'.repeat(5*1024*1024));setInterval(()=>{},1000);return;}
-                if(scenario==='edit'||scenario==='cost-error'){fs.writeFileSync(args[1],'modified by fixture');}
-                if(scenario==='cost-error'){fs.writeFileSync(args[2],'{corrupt');}
-                const result={type:'result',subtype:scenario==='budget'?'error_max_budget_usd':'success',is_error:scenario==='fail',
-                    total_cost_usd:scenario==='hourly'?0.4:0.1,result:JSON.stringify({prompt,args,cwd:process.cwd()}),permission_denials:scenario==='denied'?[{tool_name:'Bash'}]:[]};
+                if(scenario==='edit'){fs.writeFileSync(args[1],'modified by fixture');}
+                const result={type:'result',subtype:scenario==='external-failure'?'error_external':'success',is_error:scenario==='fail',
+                    total_cost_usd:scenario==='no-cost'?undefined:1000,result:JSON.stringify({prompt,args,cwd:process.cwd()}),permission_denials:scenario==='denied'?[{tool_name:'Bash'}]:[]};
                 console.log(JSON.stringify(result));if(scenario==='fail'){process.exitCode=1;}
             });`);
-        options = { executable: 'node', prefixArgs: [script, 'success'], timeoutSeconds: 5, maxTurns: 20, maxBudgetUsd: 1 };
+        options = { executable: 'node', prefixArgs: [script, 'success'], timeoutSeconds: 5 };
     });
     teardown(async () => { await fs.rm(directory, { recursive: true, force: true }); });
     const run = (item: ClaudeSchedule, options: ClaudeCliOptions, storage: string, signal = new AbortController().signal, slot?: number) =>
@@ -280,7 +278,7 @@ suite('Claude CLI execution and UI integration', function () {
         const analysis = claudeArguments({ ...item, mode: 'analysis' }, options);
         assert.ok(!analysis[analysis.indexOf('--tools') + 1].includes('Bash'));
     });
-    test('CLI version preflight rejects unsupported versions before a paid edit', async () => {
+    test('CLI version preflight rejects unsupported versions before an edit', async () => {
         const output = path.join(directory, 'not-edited.txt');
         options.prefixArgs = [script, 'old', output];
         const result = await run(item, options, storage); item.lastRun = result;
@@ -290,94 +288,43 @@ suite('Claude CLI execution and UI integration', function () {
         for (const version of ['2.1.248 (Claude Code)', '2.2.0 (Claude Code)', '3.0.0']) { assert.strictEqual(supportsClaudeVersion(version), true); }
         for (const version of ['2.1.247 (Claude Code)', '2.0.999', '2.1.248-beta', 'invalid']) { assert.strictEqual(supportsClaudeVersion(version), false); }
     });
-    test('rolling daily run and budget limits survive retries and actual costs release unused budget', async () => {
-        await fs.mkdir(storage, { recursive: true });
-        const first = await reserveClaudeBudget(storage, 1, 2, 1, 1000);
-        await assert.rejects(reserveClaudeBudget(storage, 1, 2, 1, 2000), ClaudeBudgetLimitError);
-        await recordClaudeCost(storage, first, 0.1);
-        await reserveClaudeBudget(storage, 0.5, 2, 1, 2000);
-        await assert.rejects(reserveClaudeBudget(storage, 0.1, 2, 1, 3000), ClaudeBudgetLimitError);
-        await reserveClaudeBudget(storage, 1, 2, 1, 2000 + 24 * 60 * 60000);
-        await fs.writeFile(path.join(storage, 'usage.json'), '{corrupt');
-        await assert.rejects(reserveClaudeBudget(storage, 1, 2, 1), error => error instanceof Error && !(error instanceof ClaudeBudgetLimitError));
-        assert.strictEqual(await fs.readFile(path.join(storage, 'usage.json'), 'utf8'), '{corrupt');
-    });
-    test('daily limits skip both manual and scheduled model calls before a child can edit', async () => {
-        const output = path.join(directory, 'edited.txt');
-        options.maxDailyRuns = 1; options.prefixArgs = [script, 'edit', output];
-        assert.strictEqual((await run(item, options, storage)).status, 'success');
-        await fs.rm(output);
-        for (const slot of [60000, undefined]) {
-            const result = await run(item, options, storage, undefined, slot);
-            assert.strictEqual(result.status, 'skipped');
-            assert.strictEqual(result.detail, 'scheduler-budget');
-            item.lastRun = result;
-            assert.match(await readClaudeReport(storage, item), /Skipped|건너뜀/);
-        }
-        await assert.rejects(fs.stat(output));
-    });
-    test('count and cost limits keep the schedule enabled and retry at the next slot after capacity recovers', async () => {
-        const output = path.join(directory, 'edited.txt');
+    test('runs need no cost metadata, send no quota flags, and ignore legacy usage records', async () => {
         const root = await fs.realpath(directory);
         const key = process.platform === 'win32' ? path.resolve(root).toLowerCase() : path.resolve(root);
-        options.prefixArgs = [script, 'edit', output];
-        for (const limits of [{ maxDailyRuns: 1 }, { maxDailyBudgetUsd: 1 }]) {
-            const runStorage = path.join(storage, randomUUID());
-            const f = fixtureEngine([item]);
-            f.runner((current, signal, slot) => run(current, { ...options, ...limits }, runStorage, signal, slot));
-            try {
-                await f.engine.initialize();
-                await f.engine.runNow(item.id);
-                assert.strictEqual(f.engine.list()[0].lastRun?.status, 'success');
-                await fs.rm(output);
-                await f.engine.runNow(item.id);
-                assert.strictEqual(f.engine.list()[0].lastRun?.status, 'skipped');
-                assert.strictEqual(f.engine.list()[0].enabled, true);
-                await assert.rejects(fs.stat(output));
-                const ledgerPath = path.join(runStorage, 'claude-scheduler', 'locks', createHash('sha256').update(key).digest('hex'), 'usage.json');
-                const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'));
-                ledger.runs[0].at = Date.now() - 24 * 60 * 60000;
-                await fs.writeFile(ledgerPath, JSON.stringify(ledger));
-                f.now(60000); await f.engine.tick();
-                await until(() => f.engine.list()[0].lastRun?.status === 'success');
-                assert.strictEqual(f.calls.length, 3);
-                assert.strictEqual(f.calls[2].slot, 60000);
-                assert.strictEqual(f.engine.list()[0].enabled, true);
-                assert.strictEqual(await fs.readFile(output, 'utf8'), 'modified by fixture');
-            } finally { await f.engine.shutdown(); }
+        for (const scenario of ['success', 'no-cost']) {
+            const runStorage = path.join(storage, scenario);
+            const ledger = path.join(runStorage, 'claude-scheduler', 'locks', createHash('sha256').update(key).digest('hex'), 'usage.json');
+            const legacyOptions = { ...options, prefixArgs: [script, scenario], maxTurns: 1, maxBudgetUsd: 0.01, maxDailyRuns: 1, maxDailyBudgetUsd: 0.01 };
+            item.lastRun = await run(item, legacyOptions, runStorage, undefined, 60000);
+            assert.strictEqual(item.lastRun.status, 'success');
+            const payload = JSON.parse((await readClaudeReport(runStorage, item)).split('\n\n')[1]);
+            assert.ok(!payload.args.includes('--max-budget-usd'));
+            assert.ok(!payload.args.includes('--max-turns'));
+            await assert.rejects(fs.stat(ledger), { code: 'ENOENT' });
+
+            // An old, corrupt ledger must neither block a new run nor be updated.
+            await fs.writeFile(ledger, '{corrupt legacy usage');
+            item.lastRun = await run(item, legacyOptions, runStorage);
+            assert.strictEqual(item.lastRun.status, 'success');
+            assert.strictEqual(await fs.readFile(ledger, 'utf8'), '{corrupt legacy usage');
         }
     });
-    test('cost-recording errors preserve the actual Claude output and completed workspace edits', async () => {
-        const root = await fs.realpath(directory);
-        const key = process.platform === 'win32' ? path.resolve(root).toLowerCase() : path.resolve(root);
-        const ledger = path.join(storage, 'claude-scheduler', 'locks', createHash('sha256').update(key).digest('hex'), 'usage.json');
-        const output = path.join(directory, 'edited.txt');
-        item.mode = 'edit'; options.prefixArgs = [script, 'cost-error', output, ledger];
-        item.lastRun = await run(item, options, storage);
-        assert.strictEqual(item.lastRun.status, 'failed');
-        assert.strictEqual(await fs.readFile(output, 'utf8'), 'modified by fixture');
-        const report = await readClaudeReport(storage, item);
-        assert.ok(report.includes('cost-error'), 'The original Claude result must remain in the report');
-        assert.match(report, /usage is corrupt|사용량 기록이 손상/);
-    });
-    test('hourly runs costing 0.40 USD skip after eleven completions without pausing at the default daily budget', async () => {
-        item.cadence = { kind: 'interval', minutes: 60 }; item.nextRunAt = 3600000;
-        options.prefixArgs = [script, 'hourly'];
+    test('recurring runs continue past the former daily count cap', async function () {
+        this.timeout(30000);
         const f = fixtureEngine([item]);
         f.runner((current, signal, slot) => run(current, options, storage, signal, slot));
         try {
             await f.engine.initialize();
-            for (let hour = 1; hour <= 12; hour++) {
-                f.now(hour * 3600000); await f.engine.tick();
-                await until(() => !f.engine.runningId && f.engine.list()[0].lastRun?.status !== 'queued');
-                assert.strictEqual(f.engine.list()[0].lastRun?.status, hour <= 11 ? 'success' : 'skipped');
+            for (let minute = 1; minute <= 26; minute++) {
+                f.now(minute * 60000); await f.engine.tick();
+                await until(() => !f.engine.runningId && f.engine.list()[0].lastRun?.status === 'success');
                 assert.strictEqual(f.engine.list()[0].enabled, true);
             }
-            assert.strictEqual(f.engine.list()[0].lastRun?.detail, 'scheduler-budget');
-            assert.strictEqual(f.engine.list()[0].nextRunAt, 13 * 3600000);
+            assert.strictEqual(f.calls.length, 26);
+            assert.strictEqual(f.engine.list()[0].nextRunAt, 27 * 60000);
         } finally { await f.engine.shutdown(); }
     });
-    for (const scenario of ['fail', 'budget', 'denied']) {
+    for (const scenario of ['fail', 'external-failure', 'denied']) {
         test(`${scenario} result is a failed run even when the CLI can exit zero`, async () => {
             options.prefixArgs = [script, scenario];
             const result = await run(item, options, storage);
@@ -504,8 +451,8 @@ suite('Claude CLI execution and UI integration', function () {
             await fs.writeFile(prompt, 'modify this project');
             options.prefixArgs = [script, 'edit', edited];
             vscode.window.showQuickPick = (async (items: unknown) => {
-                const choices = await items as Array<{ mode?: string; label: string }>;
-                return choices.find(choice => choice.mode === 'edit') ?? choices[0];
+                const choices = await items as Array<{ mode?: string; promptSource?: string; label: string }>;
+                return choices.find(choice => choice.promptSource === 'file' || choice.mode === 'edit') ?? choices[0];
             }) as unknown as typeof pick;
             let count = 0; vscode.window.showInputBox = async () => ['CLI UI integration', '["Bash(npm test)"]', '60'][count++];
             vscode.window.showOpenDialog = async () => [vscode.Uri.file(prompt)];
@@ -531,6 +478,135 @@ suite('Claude CLI execution and UI integration', function () {
             await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
             vscode.window.showOpenDialog = open; vscode.window.showTextDocument = show;
             await fs.rm(prompt, { force: true });
+        }
+    });
+    for (const continueScheduling of [true, false]) {
+        test(`example prompt opens for editing before a schedule exists; continue=${continueScheduling}`, async () => {
+            const folder = vscode.workspace.workspaceFolders![0];
+            const prompt = path.join(folder.uri.fsPath, `ai-example-${randomUUID()}.md`);
+            const values = new Map<string, unknown>();
+            const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+                get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+            } } as unknown as vscode.ExtensionContext;
+            const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox;
+            const save = vscode.window.showSaveDialog; const open = vscode.window.showOpenDialog;
+            const show = vscode.window.showTextDocument; const information = vscode.window.showInformationMessage;
+            let controller: ClaudeSchedulerController | undefined;
+            let document: vscode.TextDocument | undefined;
+            const customPrompt = '# My recurring task\n\nReview parser edge cases and report file locations.\n';
+            try {
+                vscode.window.showQuickPick = (async (items: any, options: vscode.QuickPickOptions) => {
+                    const choices = await items;
+                    if (choices.some((choice: any) => choice.promptSource)) {
+                        assert.match(options.title ?? '', /AI/);
+                        assert.ok(choices.every((choice: any) => choice.detail));
+                    }
+                    return choices[0];
+                }) as typeof pick;
+                let count = 0; vscode.window.showInputBox = async () => ['Example schedule', '60'][count++];
+                vscode.window.showSaveDialog = async options => {
+                    assert.strictEqual(options?.defaultUri?.fsPath, vscode.Uri.joinPath(folder.uri, 'ai-schedule-prompt.md').fsPath);
+                    return vscode.Uri.file(prompt);
+                };
+                vscode.window.showOpenDialog = async () => { throw new Error('The example must not ask for a second prompt file.'); };
+                vscode.window.showTextDocument = (async (value: vscode.TextDocument, options: vscode.TextDocumentShowOptions) => {
+                    document = value;
+                    assert.strictEqual(options.preview, false);
+                    assert.strictEqual(value.languageId, 'markdown');
+                    assert.strictEqual((value.getText().match(/^## /gm) ?? []).length, 4);
+                    assert.strictEqual(controller?.engine.list().length, 0);
+                    return {} as vscode.TextEditor;
+                }) as unknown as typeof show;
+                vscode.window.showInformationMessage = (async (_message: string, action: string) => {
+                    assert.ok(document);
+                    assert.strictEqual(controller?.engine.list().length, 0);
+                    if (!continueScheduling) { return undefined; }
+                    const edit = new vscode.WorkspaceEdit();
+                    edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), customPrompt);
+                    assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+                    assert.strictEqual(document.isDirty, true);
+                    return action;
+                }) as unknown as typeof information;
+                controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
+                await vscode.commands.executeCommand('taskhub.claudeScheduler.add');
+                assert.ok(document, 'The example must be opened in the editor.');
+                assert.strictEqual(controller.engine.list().length, continueScheduling ? 1 : 0);
+                if (continueScheduling) {
+                    assert.strictEqual(document.isDirty, false);
+                    assert.strictEqual(await fs.readFile(prompt, 'utf8'), customPrompt);
+                    const scheduled = controller.engine.list()[0];
+                    assert.strictEqual(scheduled.mode, 'analysis');
+                    assert.strictEqual(scheduled.promptPath, await fs.realpath(prompt));
+                    assert.strictEqual(scheduled.lastRun, undefined, 'Creating a schedule must not run it immediately.');
+                    await vscode.commands.executeCommand('taskhub.claudeScheduler.runNow', scheduled);
+                    const completed = controller.engine.list()[0];
+                    assert.strictEqual(completed.lastRun?.status, 'success');
+                    assert.ok((await readClaudeReport(storage, completed)).includes('Review parser edge cases'));
+                } else {
+                    assert.deepStrictEqual(values.get(CLAUDE_SCHEDULES_KEY), { version: 1, jobs: [] });
+                    assert.strictEqual(await fs.readFile(prompt, 'utf8'), document.getText());
+                }
+            } finally {
+                await controller?.shutdown();
+                vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
+                vscode.window.showSaveDialog = save; vscode.window.showOpenDialog = open;
+                vscode.window.showTextDocument = show; vscode.window.showInformationMessage = information;
+                if (document?.isDirty) { await document.save(); }
+                await fs.rm(prompt, { force: true });
+            }
+        });
+    }
+    for (const destination of ['existing', 'outside', 'linked-parent'] as const) {
+        test(`example prompt creation preserves files and workspace boundaries: ${destination}`, async () => {
+            const folder = vscode.workspace.workspaceFolders![0];
+            const name = `ai-boundary-${randomUUID()}.md`;
+            const linkedParent = path.join(folder.uri.fsPath, `ai-link-${randomUUID()}`);
+            const prompt = destination === 'existing' ? path.join(folder.uri.fsPath, name) : path.join(directory, name);
+            const savePath = destination === 'linked-parent' ? path.join(linkedParent, name) : prompt;
+            const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+                get: () => undefined, update: async (_key: string, value: unknown) => { assert.deepStrictEqual(value, { version: 1, jobs: [] }); },
+            } } as unknown as vscode.ExtensionContext;
+            const pick = vscode.window.showQuickPick; const save = vscode.window.showSaveDialog;
+            const show = vscode.window.showTextDocument; const error = vscode.window.showErrorMessage;
+            const errors: string[] = [];
+            let controller: ClaudeSchedulerController | undefined;
+            try {
+                if (destination === 'existing') { await fs.writeFile(prompt, 'Preserve my existing prompt.'); }
+                if (destination === 'linked-parent') { await fs.symlink(directory, linkedParent, process.platform === 'win32' ? 'junction' : 'dir'); }
+                vscode.window.showQuickPick = (async (items: any) => (await items)[0]) as typeof pick;
+                vscode.window.showSaveDialog = async () => vscode.Uri.file(savePath);
+                vscode.window.showTextDocument = (async () => { throw new Error('Rejected files must not be opened.'); }) as typeof show;
+                vscode.window.showErrorMessage = (async (message: string) => { errors.push(message); }) as typeof error;
+                controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
+                await vscode.commands.executeCommand('taskhub.claudeScheduler.add');
+                assert.strictEqual(controller.engine.list().length, 0);
+                assert.strictEqual(errors.length, 1);
+                assert.match(errors[0], destination === 'existing' ? /already exists|이미 있습니다/ : /inside the selected workspace|워크스페이스 안/);
+                if (destination === 'existing') { assert.strictEqual(await fs.readFile(prompt, 'utf8'), 'Preserve my existing prompt.'); }
+                else { await assert.rejects(fs.stat(prompt), { code: 'ENOENT' }); }
+            } finally {
+                await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showSaveDialog = save;
+                vscode.window.showTextDocument = show; vscode.window.showErrorMessage = error;
+                await fs.rm(prompt, { force: true });
+                if (destination === 'linked-parent') { await fs.unlink(linkedParent); }
+            }
+        });
+    }
+    test('cancelling the prompt guidance does not open a file dialog or register a schedule', async () => {
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: () => undefined, update: async (_key: string, value: unknown) => { assert.deepStrictEqual(value, { version: 1, jobs: [] }); },
+        } } as unknown as vscode.ExtensionContext;
+        const pick = vscode.window.showQuickPick; const open = vscode.window.showOpenDialog; const save = vscode.window.showSaveDialog;
+        let controller: ClaudeSchedulerController | undefined;
+        try {
+            vscode.window.showQuickPick = (async () => undefined) as typeof pick;
+            vscode.window.showOpenDialog = async () => { throw new Error('No file dialog before choosing a prompt source.'); };
+            vscode.window.showSaveDialog = async () => { throw new Error('No save dialog before choosing a prompt source.'); };
+            controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
+            await vscode.commands.executeCommand('taskhub.claudeScheduler.add');
+            assert.strictEqual(controller.engine.list().length, 0);
+        } finally {
+            await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showOpenDialog = open; vscode.window.showSaveDialog = save;
         }
     });
     test('an edit wizard cannot erase a result or re-enable a schedule that failed while it was open', async () => {
@@ -623,6 +699,11 @@ suite('Claude CLI execution and UI integration', function () {
     });
     test('manifest menus follow enabled/paused state and the title has a recovery action', () => {
         const manifest = JSON.parse(require('fs').readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'));
+        const configurations = Array.isArray(manifest.contributes.configuration) ? manifest.contributes.configuration : [manifest.contributes.configuration];
+        const properties = Object.assign({}, ...configurations.map((configuration: any) => configuration.properties));
+        for (const suffix of ['maxTurns', 'maxBudgetUsd', 'maxDailyRuns', 'maxDailyBudgetUsd']) {
+            assert.ok(!Object.prototype.hasOwnProperty.call(properties, `taskhub.claudeScheduler.${suffix}`));
+        }
         const menus = manifest.contributes.menus;
         const title = menus['view/title'].filter((entry: any) => entry.when.includes('mainView.claudeSchedules'));
         assert.ok(title.some((entry: any) => entry.command.endsWith('.reset')));
@@ -669,8 +750,10 @@ suite('Claude experimental feature gate', () => {
     test('launcher exposes enable setting when off and opens schedules when on', () => {
         const disabled = buildFeatureLauncherItems([], 0, false).find(item => item.featureId === 'claudeScheduler');
         assert.strictEqual(disabled?.command, 'workbench.action.openSettings');
+        assert.match(disabled?.label ?? '', /AI/);
         assert.deepStrictEqual(disabled?.commandArgs, ['@id:taskhub.experimental.claudeScheduler.enabled']);
         const enabled = buildFeatureLauncherItems(['claudeScheduler'], 0, true).filter(item => item.featureId === 'claudeScheduler');
         assert.strictEqual(enabled.length, 1); assert.strictEqual(enabled[0].command, 'taskhub.claudeScheduler.showSchedules');
+        assert.match(enabled[0].label, /AI/);
     });
 });

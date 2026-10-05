@@ -283,7 +283,7 @@ export class ClaudeScheduler {
                     if (result.status === 'failed' || result.status === 'stopped') { job.enabled = false; }
                 });
             } catch (error) {
-                // Storage failures must not dispatch or silently reschedule a paid call.
+                // Storage failures must not dispatch or silently reschedule a run.
                 for (const job of this.state.jobs) {
                     job.enabled = false;
                     if (job.lastRun?.status === 'running' || job.lastRun?.status === 'queued') { job.lastRun.status = 'interrupted'; }

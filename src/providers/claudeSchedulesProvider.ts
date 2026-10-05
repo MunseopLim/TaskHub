@@ -41,7 +41,8 @@ export class ClaudeSchedulesProvider implements vscode.TreeDataProvider<ClaudeSc
         const detail = job.lastRun?.detail === 'scheduler-busy' ? t('다른 예약 실행과 겹쳐 건너뛰었습니다.', 'Skipped because another schedule was running.')
             : job.lastRun?.detail === 'scheduler-missed' ? t('놓친 예약 시각을 건너뛰었습니다.', 'Skipped a missed scheduled time.')
             : job.lastRun?.detail === 'scheduler-queued-cancelled' ? t('실행 대기 중 종료되어 건너뛰었습니다. 다음 예약은 유지합니다.', 'Skipped because the scheduler closed while queued. Future runs remain scheduled.')
-            : job.lastRun?.detail === 'scheduler-budget' ? t('최근 24시간 한도에 도달해 건너뛰었습니다. 다음 예약 시각에 다시 확인합니다.', 'Skipped at the rolling 24-hour limit. Capacity will be checked at the next scheduled time.') : job.lastRun?.detail;
+            // Older releases saved a cost-limit reason; omit it from the current UI.
+            : job.lastRun?.detail === 'scheduler-budget' ? undefined : job.lastRun?.detail;
         item.tooltip = [cadenceLabel(job.cadence), job.workspacePath, job.promptPath,
             job.mode === 'edit' ? t('코드 수정 허용', 'Code editing allowed') : t('분석 도구만 허용', 'Analysis tools only'),
             job.lastRun ? claudeStatusLabel(job.lastRun.status) : t('아직 실행하지 않음', 'No runs yet'), detail].filter(Boolean).join('\n');

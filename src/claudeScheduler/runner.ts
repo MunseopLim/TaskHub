@@ -6,7 +6,6 @@ import * as path from 'path';
 import lockfile from 'proper-lockfile';
 import { t } from '../i18n';
 import { ClaudeRunResult, ClaudeSchedule } from './model';
-import { ClaudeBudgetLimitError, reserveClaudeBudget, recordClaudeCost } from './budget';
 
 const promptLimit = 256 * 1024;
 const outputLimit = 4 * 1024 * 1024;
@@ -16,10 +15,6 @@ export interface ClaudeCliOptions {
     executable: string;
     model?: string;
     timeoutSeconds: number;
-    maxTurns: number;
-    maxBudgetUsd: number;
-    maxDailyRuns?: number;
-    maxDailyBudgetUsd?: number;
     /** Test fixtures can prepend a Node script without enabling arbitrary shell text. */
     prefixArgs?: readonly string[];
 }
@@ -34,8 +29,7 @@ export function claudeArguments(job: ClaudeSchedule, options: ClaudeCliOptions):
         [`Edit(${folder})`, `Edit(${folder}/**)`, `Edit(**/${folder})`, `Edit(**/${folder}/**)`])];
     return [...(options.prefixArgs ?? []), '-p', '--restricted', '--output-format', 'json', '--permission-mode', 'dontAsk',
         '--tools', tools, '--allowedTools', ...allowed, '--disallowedTools', ...denied, '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-        '--disable-slash-commands', '--no-session-persistence', '--max-turns', String(options.maxTurns),
-        '--max-budget-usd', String(options.maxBudgetUsd), ...(options.model ? ['--model', options.model] : [])];
+        '--disable-slash-commands', '--no-session-persistence', ...(options.model ? ['--model', options.model] : [])];
 }
 
 function pathKey(value: string): string {
@@ -64,8 +58,8 @@ async function boundedRead(file: string, limit: number): Promise<Buffer> {
     } finally { await handle.close(); }
 }
 
-/** The JSON result distinguishes budget/turn/permission failures from a completed answer. */
-export function parseClaudeResult(stdout: string, exitCode: number | null): { success: boolean; text: string; costUsd?: number } {
+/** The JSON result distinguishes CLI failures and permission denials from a completed answer. */
+export function parseClaudeResult(stdout: string, exitCode: number | null): { success: boolean; text: string } {
     let result: Record<string, unknown>;
     try { result = JSON.parse(stdout); }
     catch { return { success: false, text: t('Claude CLI가 올바른 JSON 결과를 반환하지 않았습니다.', 'Claude CLI did not return a valid JSON result.') + '\n' + stdout }; }
@@ -75,12 +69,11 @@ export function parseClaudeResult(stdout: string, exitCode: number | null): { su
     const denied = Array.isArray(result.permission_denials) && result.permission_denials.length > 0;
     const success = exitCode === 0 && result.subtype === 'success' && result.is_error === false && !denied;
     const text = typeof result.result === 'string' ? result.result : JSON.stringify(result, null, 2);
-    const costUsd = typeof result.total_cost_usd === 'number' && Number.isFinite(result.total_cost_usd) && result.total_cost_usd >= 0 ? result.total_cost_usd : undefined;
-    return { success, costUsd, text: denied ? t('허용되지 않은 도구 요청이 있어 작업을 완료로 처리하지 않았습니다.', 'The run requested tools without permission and was not marked complete.') + '\n' + text : text };
+    return { success, text: denied ? t('허용되지 않은 도구 요청이 있어 작업을 완료로 처리하지 않았습니다.', 'The run requested tools without permission and was not marked complete.') + '\n' + text : text };
 }
 
 async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: ClaudeCliOptions, signal: AbortSignal, kill: KillClaudeProcess,
-    versionOnly = false): Promise<{ status: ClaudeRunResult['status']; text: string; costUsd?: number }> {
+    versionOnly = false): Promise<{ status: ClaudeRunResult['status']; text: string }> {
     if (signal.aborted) { return { status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }; }
     if (!options.executable || /[\r\n\0]/.test(options.executable) || /\.(?:cmd|bat)$/i.test(options.executable)) {
         throw new Error(t('Claude 실행 파일 경로를 확인하세요. Windows에서는 네이티브 claude.exe를 사용하세요.', 'Check the Claude executable path. On Windows, use native claude.exe.'));
@@ -109,7 +102,6 @@ async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: Claude
                     `Update Claude Code CLI to ${MIN_CLAUDE_CLI_VERSION} or later. Required options are unsupported.`);
             }
             resolve({ status: signal.aborted ? 'stopped' : reason || !parsed.success ? 'failed' : 'success',
-                costUsd: 'costUsd' in parsed ? parsed.costUsd : undefined,
                 text: [reason, parsed.text, errors].filter(Boolean).join('\n\n') });
         };
         const terminate = (message: string): void => {
@@ -209,7 +201,7 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
     const onAbort = (): void => abort.abort();
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) { abort.abort(); }
-    let text = ''; let status: ClaudeRunResult['status'] = 'failed'; let detail: string | undefined;
+    let text = ''; let status: ClaudeRunResult['status'] = 'failed';
     try {
         const root = await fs.realpath(job.workspacePath);
         const openRoots = await Promise.all(workspacePaths.map(folder => fs.realpath(folder).catch(() => '')));
@@ -248,21 +240,12 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
             if (previous >= scheduledAt) { return { status: 'skipped', startedAt, finishedAt: Date.now(), detail: t('이 예약 시각은 다른 창에서 처리했습니다.', 'This scheduled slot was handled by another window.') }; }
             await fs.writeFile(marker, JSON.stringify(scheduledAt), { mode: 0o600 });
         }
-        const reservation = await reserveClaudeBudget(lockDirectory, options.maxBudgetUsd, options.maxDailyRuns ?? 24, options.maxDailyBudgetUsd ?? 5);
         const result = await invokeClaude({ ...job, workspacePath: root }, prompt, options, abort.signal, kill);
         status = result.status; text = result.text;
-        if (result.costUsd !== undefined) {
-            try { await recordClaudeCost(lockDirectory, reservation, result.costUsd); }
-            catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                throw new Error(t(`Claude 비용 기록 실패: ${message}`, `Could not record Claude cost: ${message}`));
-            }
-        }
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         text = [text, message].filter(Boolean).join('\n\n');
-        status = abort.signal.aborted ? 'stopped' : error instanceof ClaudeBudgetLimitError ? 'skipped' : 'failed';
-        if (status === 'skipped') { detail = 'scheduler-budget'; }
+        status = abort.signal.aborted ? 'stopped' : 'failed';
     } finally {
         signal.removeEventListener('abort', onAbort);
         try { await release?.(); } catch { status = 'failed'; text += '\n' + t('워크스페이스 잠금 해제 실패.', 'Workspace lease release failed.'); }
@@ -275,5 +258,5 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
         : status === 'skipped' ? t('건너뜀', 'Skipped') : t('실패', 'Failed');
     await fs.writeFile(path.join(directory, report), [job.name, `${new Date(startedAt).toISOString()} → ${new Date(finishedAt).toISOString()}`, statusLabel, '', text].join('\n'), { flag: 'wx', mode: 0o600 });
     await pruneClaudeReports(storage, job.id, report);
-    return { status, startedAt, finishedAt, report, ...(detail ? { detail } : {}) };
+    return { status, startedAt, finishedAt, report };
 }

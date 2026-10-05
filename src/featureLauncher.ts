@@ -152,9 +152,9 @@ function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEna
         commandArgs: claudeSchedulerEnabled ? undefined : ['@id:taskhub.experimental.claudeScheduler.enabled'],
         group: 'actions',
         label: `$(clock) ${claudeSchedulerEnabled
-            ? t('Claude 예약 실행 (실험적)', 'Claude schedules (Experimental)')
-            : t('Claude 예약 실행 활성화… (실험적)', 'Enable Claude schedules… (Experimental)')}`,
-        description: t('Claude Code CLI로 요청문 파일을 정기 실행합니다.', 'Run prompt files periodically with Claude Code CLI.'),
+            ? t('AI 예약 실행 (실험적)', 'AI Schedules (Experimental)')
+            : t('AI 예약 실행 활성화… (실험적)', 'Enable AI Schedules… (Experimental)')}`,
+        description: t('요청문 파일로 AI 작업을 정기 실행합니다. 현재 실행 엔진: Claude Code.', 'Schedule AI tasks from prompt files. Current engine: Claude Code.'),
     });
     return definitions;
 }
