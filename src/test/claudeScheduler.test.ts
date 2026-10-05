@@ -1034,7 +1034,8 @@ suite('Claude CLI execution and UI integration', function () {
                 };
                 vscode.window.showTextDocument = (async (document: vscode.TextDocument | vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) => {
                     assert.ok('getText' in document);
-                    assert.strictEqual(field, 'promptContents'); assert.strictEqual(document.uri.fsPath, await fs.realpath(prompt));
+                    // VS Code file URIs normalize Windows drive letters; realpath preserves their case.
+                    assert.strictEqual(field, 'promptContents'); assert.strictEqual(document.uri.fsPath, vscode.Uri.file(await fs.realpath(prompt)).fsPath);
                     assert.strictEqual(document.getText(), 'original prompt'); assert.strictEqual((options as vscode.TextDocumentShowOptions).preview, false); opened++;
                     return {} as vscode.TextEditor;
                 }) as typeof show;
@@ -1078,7 +1079,7 @@ suite('Claude CLI execution and UI integration', function () {
                 return choices.find((choice: any) => choice.folder.index === 1);
             }) as typeof pick;
             vscode.window.showOpenDialog = async options => {
-                assert.strictEqual(options?.defaultUri?.fsPath, path.join(await fs.realpath(directory), 'old.md'));
+                assert.strictEqual(options?.defaultUri?.fsPath, vscode.Uri.file(path.join(await fs.realpath(directory), 'old.md')).fsPath);
                 return cancel ? undefined : [vscode.Uri.file(item.promptPath)];
             };
             controller = new ClaudeSchedulerController(context, killProcessTree, () => options); await controller.ready;
