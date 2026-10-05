@@ -1422,7 +1422,7 @@
     "package": "npm run check-version && npm run check-types && npm run lint && node esbuild.js --production",
     "compile-tests": "npm run clean-tests && tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
-    "pretest": "npm run check-version && npm run compile-tests && npm run compile && npm run lint",
+    "pretest": "npm run check-version && npm run compile-tests && npm run lint && node esbuild.js",
     "check-version": "node scripts/check-release-version.cjs",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",

@@ -46,7 +46,7 @@ esbuild는 초기 확장·기능별 지연 로딩·공유 상태·사전 생성 
 | **Release** — [release.yml](.github/workflows/release.yml) | `v*.*.*` 패턴의 태그 push | `ubuntu-latest`, Node.js `22`, `npm ci`, Git 전체 이력 | 태그의 `v`를 뺀 값과 `package.json` 버전 일치 검사 → `xvfb-run -a npm test` → `npx --yes @vscode/vsce@3.9.0 package --out "taskhub-${VSIX_VERSION}.vsix"` (`VSIX_VERSION`은 검사한 패키지 버전) | GitHub Release 생성·릴리스 노트 자동 생성·VSIX 첨부 (`contents: write`) |
 | **Dependency Audit** — [security-audit.yml](.github/workflows/security-audit.yml) | 매주 월요일 `03:23` UTC (`23 3 * * 1`), 수동 `workflow_dispatch` | `ubuntu-latest`, Node.js `22`, `npm ci` | `npm audit --omit=dev --audit-level=high`로 운영 의존성의 high 이상 취약점 검사 | 없음 (`contents: read`) |
 
-`npm test`는 `pretest`에서 버전 검사·테스트 컴파일·타입 검사·린트·확장과 웹뷰 번들 빌드를 수행한 뒤
+`npm test`는 `pretest`에서 버전 검사·타입 검사를 포함한 테스트 컴파일·린트·확장과 웹뷰 번들 빌드를 각각 한 번 수행한 뒤
 VS Code Extension Host에서 테스트한다. 별도로 요구하는 `npm run package`도 버전 검사 후 프로덕션 빌드를 수행하며,
 VSIX 생성은 [VSIX 패키지 빌드 및 설치](#vsix-패키지-빌드-및-설치)를 참고한다. Release의 로컬
 재현에는 표에 지정한 `vsce` 버전과 패키징 명령을 사용한다. Dependency Audit는 일반 push/PR에서
@@ -246,6 +246,9 @@ suite('ModuleName Test Suite', () => {
 실제 웹뷰 테스트는 창이 다른 창에 가려져도 Chromium의 배경 타이머·렌더링 제한 때문에 멈추지 않도록
 테스트 호스트에서만 해당 제한을 해제합니다. 제품의 HTML·CSP·스크립트와 테스트 단언은 그대로 실행합니다.
 
+가짜 패널로 호스트의 타이머 동작을 검사할 때는 해당 타이머만 테스트용 시계로 진행시켜 시한 전후와
+취소를 검증합니다. 실제 브라우저·프로세스 실행이나 정규식 watchdog의 시간 검증은 실제 시간으로 실행합니다.
+
 ### 플랫폼별 실행 테스트
 
 특정 OS에서만 프로세스를 실행하는 테스트는 실행 파일 선택·인자 안전성처럼 순수 함수로 확인할 수
@@ -256,6 +259,10 @@ suite('ModuleName Test Suite', () => {
 실패 알림만으로 자식 프로세스의 실패 종료를 판정하지 않습니다. 실행 전에 거부되거나 실행 파일을
 찾지 못해도 같은 알림이 나올 수 있으므로, 실제 실행 marker와 종료 코드를 확인합니다. 성공 대기는
 실패 이벤트가 오면 즉시 끝내고, 시간 제한 안에서 실제 완료 신호를 기다립니다.
+
+임시 Git 저장소의 정리는 `await fs.promises.rm(...)`으로 완료를 기다립니다. Windows의 읽기 전용
+Git 객체를 처리하고 일시적인 파일 잠금만 제한적으로 재시도하며, 정리 실패를 경고로 숨기지 않습니다.
+작은 테스트 저장소에서는 자동 GC를 꺼 백그라운드 프로세스의 파일 핸들이 정리를 방해하지 않게 합니다.
 
 ## Pull Requests
 

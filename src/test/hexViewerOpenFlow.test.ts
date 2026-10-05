@@ -21,6 +21,48 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
     let originalCreateWebviewPanel: typeof vscode.window.createWebviewPanel;
     let originalShowError: typeof vscode.window.showErrorMessage;
     const shownErrors: string[] = [];
+    let fallbackClock: { advance(ms: number): void; pending(): number; dispose(): void } | undefined;
+
+    /** 가짜 패널의 폴백 타이머만 진행한다. 파일 접근·0ms 양보·브라우저 시간은 그대로 둔다. */
+    function controlFallbackTime(): NonNullable<typeof fallbackClock> {
+        assert.strictEqual(fallbackClock, undefined);
+        assert.strictEqual(HEX_READY_FALLBACK_MS, 3000);
+        const originalTimeout = global.setTimeout;
+        const originalClear = global.clearTimeout;
+        const timers = new Map<NodeJS.Timeout, { due: number; run(): void }>();
+        let now = 0;
+        global.setTimeout = ((callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+            if (delay !== HEX_READY_FALLBACK_MS) { return originalTimeout(callback, delay, ...args); }
+            // 실제 핸들을 써서 clearTimeout 계약을 유지하되 콜백은 시계가 실행한다.
+            const handle = originalTimeout(() => {}, delay);
+            handle.unref();
+            timers.set(handle, { due: now + delay, run: () => callback(...args) });
+            return handle;
+        }) as typeof global.setTimeout;
+        global.clearTimeout = (handle => {
+            timers.delete(handle as NodeJS.Timeout);
+            originalClear(handle);
+        }) as typeof global.clearTimeout;
+        fallbackClock = {
+            advance(ms) {
+                now += ms;
+                for (const [handle, timer] of Array.from(timers)) {
+                    if (timer.due > now) { continue; }
+                    timers.delete(handle);
+                    originalClear(handle);
+                    timer.run();
+                }
+            },
+            pending: () => timers.size,
+            dispose() {
+                global.setTimeout = originalTimeout;
+                global.clearTimeout = originalClear;
+                for (const handle of timers.keys()) { originalClear(handle); }
+                timers.clear();
+            },
+        };
+        return fallbackClock;
+    }
 
     /** 호스트가 무엇을 언제 했는지 순서대로 기록하는 가짜 패널. */
     interface FakePanel {
@@ -176,10 +218,14 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
     });
 
     teardown(() => {
-        hexPanelRegistry.clear();
-        (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
-        (vscode.window as any).showErrorMessage = originalShowError;
-        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        try { hexPanelRegistry.clear(); }
+        finally {
+            fallbackClock?.dispose();
+            fallbackClock = undefined;
+            (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
+            (vscode.window as any).showErrorMessage = originalShowError;
+            try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
     });
 
     test('파일명·파싱 오류의 명령 링크는 알림에서만 무력화하고 경로와 패널 원문을 유지한다', async () => {
@@ -587,13 +633,16 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
      * 핸드셰이크가 어떤 이유로든 실패했을 때 **아무것도 안 보내는** 것이 가장
      * 나쁘다. `ready` 가 끝내 오지 않으면 시한 뒤에 그냥 보낸다.
      */
-    test('ready 가 오지 않아도 시한 뒤에는 데이터를 보낸다', async function () {
-        this.timeout(20000);
+    test('ready 가 오지 않아도 시한 뒤에는 데이터를 보낸다', () => {
+        const clock = controlFallbackTime();
         const fake = installFakePanel();
         openHexViewerFile(createContext(), writeIntelHex('fallback.hex'));
 
         assert.strictEqual(fake.posted.length, 0, '아직은 보내지 않아야 한다');
-        await new Promise(resolve => setTimeout(resolve, 3500));
+        assert.strictEqual(clock.pending(), 1);
+        clock.advance(HEX_READY_FALLBACK_MS - 1);
+        assert.strictEqual(fake.posted.length, 0, '시한 전에 폴백을 보내면 안 된다');
+        clock.advance(1);
         assert.strictEqual(
             fake.posted.length,
             1,
@@ -834,7 +883,6 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
     });
 
     suite('Custom Editor 진입점 (resolveCustomEditor)', function () {
-        // 폴백 시한(3초)을 실제로 기다리는 케이스가 둘 있다.
         this.timeout(20000);
 
         async function resolve(filePath: string, fake: FakePanel): Promise<void> {
@@ -937,18 +985,22 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         });
 
         test('ready 가 오지 않아도 폴백으로 보낸다', async () => {
+            const clock = controlFallbackTime();
             const fake = installFakePanel();
             await resolve(writeIntelHex('custom-editor-fallback.hex'), fake);
 
             assert.strictEqual(fake.posted.length, 0);
-            // 핸드셰이크가 깨졌을 때 **아무것도 안 보내는** 것이 가장 나쁘다.
-            await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 300));
+            assert.strictEqual(clock.pending(), 1);
+            clock.advance(HEX_READY_FALLBACK_MS - 1);
+            assert.strictEqual(fake.posted.length, 0, '시한 전에 폴백을 보내면 안 된다');
+            clock.advance(1);
 
             assert.strictEqual(fake.posted.length, 1, '폴백 전송이 없다 — 화면이 영영 비어 있다');
             assert.strictEqual(fake.posted[0].command, 'hexData');
         });
 
         test('한 에디터의 ready 가 다른 에디터의 폴백을 잘라먹지 않는다', async () => {
+            const clock = controlFallbackTime();
             // `readyReceived` 를 모듈 전역으로 두면 이렇게 새어 나간다. Custom
             // Editor 는 문서마다 인스턴스가 생기므로 상태도 인스턴스별이어야 한다.
             const first = installFakePanel();
@@ -959,7 +1011,10 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
             first.sendReady();
             assert.strictEqual(first.posted.length, 1, '첫 에디터가 ready 후에도 못 받았다');
 
-            await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 300));
+            assert.strictEqual(clock.pending(), 2, '두 에디터가 독립된 타이머를 예약해야 한다');
+            clock.advance(HEX_READY_FALLBACK_MS - 1);
+            assert.strictEqual(second.posted.length, 0, '두 번째 에디터가 시한 전에 폴백을 받았다');
+            clock.advance(1);
 
             assert.strictEqual(
                 second.posted.length, 1,
@@ -977,7 +1032,8 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
     suite('폴백 타이머는 dispose 와 함께 취소된다', function () {
         this.timeout(20000);
 
-        test('ready 전에 같은 파일을 다시 열면 이전 데이터가 새 화면에 오지 않는다', async () => {
+        test('ready 전에 같은 파일을 다시 열면 이전 데이터가 새 화면에 오지 않는다', () => {
+            const clock = controlFallbackTime();
             const fake = installFakePanel();
             const ctx = createContext();
             const filePath = path.join(tempDir, 'stale.bin');
@@ -995,8 +1051,8 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
             assert.strictEqual(afterReady, 1, '최신 데이터가 한 번 가야 한다');
             assert.deepStrictEqual(Array.from(fake.posted[0].data), [0xbb]);
 
-            // 첫 렌더의 타이머 시한을 넘겨 기다린다.
-            await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 500));
+            assert.strictEqual(clock.pending(), 1, '이전 렌더의 타이머는 취소해야 한다');
+            clock.advance(HEX_READY_FALLBACK_MS);
 
             assert.strictEqual(
                 fake.posted.length, afterReady,
@@ -1005,6 +1061,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         });
 
         test('Custom Editor 를 닫으면 폴백이 페이로드를 다시 만들지 않는다', async () => {
+            const clock = controlFallbackTime();
             const fake = installFakePanel();
             let disposeHandler: (() => void) | undefined;
             (fake.panel as any).onDidDispose = (handler: () => void) => {
@@ -1022,7 +1079,8 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
             disposeHandler!();   // progress가 첫 tick을 양보한 사이 사용자가 닫는다
             await resolving;
 
-            await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 500));
+            assert.strictEqual(clock.pending(), 0, '닫힌 에디터에 폴백 타이머를 남기면 안 된다');
+            clock.advance(HEX_READY_FALLBACK_MS);
 
             assert.strictEqual(
                 fake.posted.length, 0,

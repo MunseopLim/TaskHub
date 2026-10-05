@@ -58,6 +58,13 @@ suite('릴리스 버전 검사 CLI', function () {
         return output;
     }
 
+    async function removeFixture(): Promise<void> {
+        // rmSync의 네이티브 삭제는 Windows의 읽기 전용 Git 객체에서 EPERM을
+        // 반복할 수 있다. 비동기 rm은 쓰기 속성을 복구하고, 실제 파일 잠금만
+        // 제한적으로 재시도한다. 정리를 기다리며 실패도 테스트 실패로 남긴다.
+        await fs.promises.rm(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+
     setup(() => {
         tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-release-version-'));
         repository = path.join(tempDir, 'repository with spaces 한글');
@@ -73,6 +80,8 @@ suite('릴리스 버전 검사 CLI', function () {
         git('init', '--quiet');
         git('config', 'user.name', 'Release fixture');
         git('config', 'user.email', 'release-fixture@example.invalid');
+        // 작은 테스트 저장소에 자동 GC의 백그라운드 파일 핸들은 필요 없다.
+        git('config', 'gc.auto', '0');
         writeJson('package.json', {
             name: 'fixture', version: '1.2.3', main: './dist/extension.js',
             engines: { vscode: '^1.75.0' }, scripts: { test: 'node test.js' },
@@ -93,15 +102,35 @@ suite('릴리스 버전 검사 CLI', function () {
         commit();
     });
 
-    teardown(() => {
-        // Windows에서는 방금 끝난 git 프로세스나 백신 검사가 새 저장소 핸들을 잠시
-        // 붙잡아 EPERM이 날 수 있다. os.tmpdir() 아래 임시 저장소의 정리 실패로
-        // 검사 결과를 실패시키지 않는다 (pipelineIntegration 테스트와 같은 정책).
-        try {
-            fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-        } catch (err: any) {
-            console.warn(`teardown: could not remove ${tempDir} (${err?.code ?? err?.message ?? err}); leaving for OS temp cleanup`);
+    teardown(removeFixture);
+
+    test('읽기 전용 loose Git 객체를 남기지 않고 임시 저장소를 정리한다', async () => {
+        const object = git('rev-parse', 'HEAD').trim();
+        const objectPath = path.join(repository, '.git', 'objects', object.slice(0, 2), object.slice(2));
+        fs.chmodSync(objectPath, 0o444);
+        assert.strictEqual(fs.statSync(objectPath).mode & 0o222, 0);
+        await removeFixture();
+        assert.strictEqual(fs.existsSync(tempDir), false, '읽기 전용 Git 객체 때문에 저장소를 남기면 안 된다');
+        // 테스트가 먼저 정리한 경우에도 실제 teardown은 같은 정리를 기다릴 수 있다.
+        await removeFixture();
+    });
+
+    test('읽기 전용 pack과 clone을 포함한 임시 저장소도 정리한다', async () => {
+        git('gc', '--quiet');
+        const clone = path.join(tempDir, 'clone with spaces 한글');
+        git('clone', '--quiet', '--no-local', repository, clone);
+        for (const root of [repository, clone]) {
+            const packs = path.join(root, '.git', 'objects', 'pack');
+            const files = fs.readdirSync(packs).filter(file => /\.(?:pack|idx)$/.test(file));
+            assert.ok(files.some(file => file.endsWith('.pack')));
+            for (const file of files) {
+                const target = path.join(packs, file);
+                fs.chmodSync(target, 0o444);
+                assert.strictEqual(fs.statSync(target).mode & 0o222, 0);
+            }
         }
+        await removeFixture();
+        assert.strictEqual(fs.existsSync(tempDir), false, 'packed 저장소와 clone을 모두 제거해야 한다');
     });
 
     test('현재 저장소와 npm test/package의 필수 검사 연결을 검증한다', () => {
