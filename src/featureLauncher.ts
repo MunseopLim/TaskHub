@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 import { WHATS_NEW_COMMAND, WhatsNewController } from './whatsNew';
+import { aiSchedulesEnabled } from './claudeScheduler/settings';
 
 export const FEATURE_LAUNCHER_COMMAND = 'taskhub.showFeatureLauncher';
 export const FEATURE_LAUNCHER_STATUS_ID = 'taskhub.featureLauncher';
@@ -149,7 +150,7 @@ function buildFeatureLauncherDefinitions(unreadCount: number, claudeSchedulerEna
     definitions.push({
         id: 'claudeScheduler',
         command: claudeSchedulerEnabled ? 'taskhub.claudeScheduler.showSchedules' : 'workbench.action.openSettings',
-        commandArgs: claudeSchedulerEnabled ? undefined : ['@id:taskhub.experimental.claudeScheduler.enabled'],
+        commandArgs: claudeSchedulerEnabled ? undefined : ['@id:taskhub.experimental.aiScheduler.enabled'],
         group: 'actions',
         label: `$(clock) ${claudeSchedulerEnabled
             ? t('AI 예약 실행 (실험적)', 'AI Schedules (Experimental)')
@@ -194,7 +195,7 @@ function toQuickPickItem(definition: FeatureLauncherDefinition): FeatureLauncher
 export function buildFeatureLauncherItems(
     recentValue: unknown,
     unreadCount = 0,
-    claudeSchedulerEnabled = vscode.workspace.getConfiguration('taskhub').get<boolean>('experimental.claudeScheduler.enabled', false)
+    claudeSchedulerEnabled = aiSchedulesEnabled()
 ): FeatureLauncherItem[] {
     const definitions = buildFeatureLauncherDefinitions(unreadCount, claudeSchedulerEnabled);
     const byId = new Map(definitions.map(definition => [definition.id, definition]));

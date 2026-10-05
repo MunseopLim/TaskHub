@@ -8,10 +8,10 @@ import { ClaudeSchedulesProvider, cadenceLabel } from '../providers/claudeSchedu
 import { CLAUDE_SCHEDULES_KEY, ClaudeCadence, ClaudeSchedule, ClaudeScheduler, ClaudeSchedulerError, SchedulerDependencies, validBashRules } from './model';
 import { ClaudeCliOptions, KillClaudeProcess, runScheduledClaude } from './runner';
 import { ClaudeReportDocuments } from './reportDocument';
+import { aiScheduleSetting, aiSchedulesEnabled } from './settings';
 
 const commands = ['add', 'edit', 'pause', 'resume', 'runNow', 'stop', 'remove', 'openReport', 'showSchedules', 'reset'] as const;
-const config = (): vscode.WorkspaceConfiguration => vscode.workspace.getConfiguration('taskhub');
-const featureKey = 'experimental.claudeScheduler.enabled';
+const featureKey = 'experimental.aiScheduler.enabled';
 function showError(error: unknown): void {
     const messages: Record<ClaudeSchedulerError['code'], string> = {
         invalidStorage: t('저장된 예약 데이터가 손상됐거나 지원하지 않는 형식입니다. 기존 데이터는 보존했습니다. "AI: 예약 데이터 초기화"로 백업 후 복구할 수 있습니다.', 'Stored schedules are corrupt or unsupported. Existing data was preserved. Use "AI: Reset Schedule Data" to back up and recover.'),
@@ -23,14 +23,14 @@ function showError(error: unknown): void {
     const detail = plainNotificationText(error instanceof ClaudeSchedulerError ? messages[error.code] : error instanceof Error ? error.message : String(error));
     void vscode.window.showErrorMessage(t(`AI 예약 실행: ${detail}`, `AI schedules: ${detail}`));
 }
-function numberSetting(key: string, fallback: number, min: number, max: number): number {
-    const value = config().get<unknown>(`claudeScheduler.${key}`, fallback);
+function numberSetting(key: 'timeoutSeconds', fallback: number, min: number, max: number): number {
+    const value = aiScheduleSetting<unknown>(key, fallback);
     return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
 }
 function cliOptions(): ClaudeCliOptions {
     return {
-        executable: config().get<string>('claudeScheduler.executable', 'claude'),
-        model: config().get<string>('claudeScheduler.model', '').trim() || undefined,
+        executable: aiScheduleSetting('executable', 'claude'),
+        model: aiScheduleSetting('model', '').trim() || undefined,
         timeoutSeconds: Math.floor(numberSetting('timeoutSeconds', 600, 10, 3600)),
     };
 }
@@ -90,7 +90,8 @@ export function registerClaudeScheduler(context: vscode.ExtensionContext, kill: 
     let retiring: Promise<void> = Promise.resolve();
     let retiringCount = 0;
     const update = (): void => {
-        const enabled = !disposed && config().get<unknown>(featureKey, false) === true && vscode.workspace.isTrusted;
+        const enabled = !disposed && aiSchedulesEnabled() && vscode.workspace.isTrusted;
+        void vscode.commands.executeCommand('setContext', 'taskhub.aiScheduler.enabled', enabled).then(undefined, showError);
         if (!enabled && controller) {
             const previous = controller; controller = undefined;
             previous.dispose();
@@ -99,14 +100,14 @@ export function registerClaudeScheduler(context: vscode.ExtensionContext, kill: 
         }
         if (enabled && !controller) {
             void retiring.then(() => {
-                if (disposed || controller || config().get<unknown>(featureKey, false) !== true || !vscode.workspace.isTrusted) { return; }
+                if (disposed || controller || !aiSchedulesEnabled() || !vscode.workspace.isTrusted) { return; }
                 try { controller = create(); }
                 catch (error) { showError(error); }
             });
         }
     };
     const listener = vscode.workspace.onDidChangeConfiguration(event => {
-        if (event.affectsConfiguration(`taskhub.${featureKey}`)) { update(); }
+        if (event.affectsConfiguration(`taskhub.${featureKey}`) || event.affectsConfiguration('taskhub.experimental.claudeScheduler.enabled')) { update(); }
     });
     const trustListener = vscode.workspace.onDidGrantWorkspaceTrust(update);
     update();

@@ -375,7 +375,7 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 
 ## AI 예약 실행
 
-[claudeScheduler/controller.ts](../src/claudeScheduler/controller.ts)는 신뢰된 워크스페이스에서 실험적 설정을 켰을 때만 뷰·명령·타이머를 등록합니다. [model.ts](../src/claudeScheduler/model.ts)는 workspaceState에 예약 정의와 다음 시각·최종 결과를 저장하고, 슬롯을 저장한 뒤 대기열에서 순차 실행합니다. 저장 실패는 자동 실행을 중단합니다. [runner.ts](../src/claudeScheduler/runner.ts)는 쉘 없이 CLI를 시작하고 stdin으로 요청문을 전달합니다. 폴더 realpath 기반 임대 잠금과 슬롯 기록은 창 간 동시 수정·동일 시각 재실행을 막습니다. 임대가 손상되면 실행을 취소하며 CLI가 닫힐 때까지 잠금을 유지합니다. [reportDocument.ts](../src/claudeScheduler/reportDocument.ts)는 명시적으로 연 보고서만 가상 문서로 제공합니다.
+[claudeScheduler/settings.ts](../src/claudeScheduler/settings.ts)는 예약 설정을 실행기와 기능 런처에 연결합니다. [claudeScheduler/controller.ts](../src/claudeScheduler/controller.ts)는 신뢰된 워크스페이스에서 실험적 설정을 켰을 때만 뷰·명령·타이머를 등록합니다. [model.ts](../src/claudeScheduler/model.ts)는 workspaceState에 예약 정의와 다음 시각·최종 결과를 저장하고, 슬롯을 저장한 뒤 대기열에서 순차 실행합니다. 저장 실패는 자동 실행을 중단합니다. [runner.ts](../src/claudeScheduler/runner.ts)는 쉘 없이 CLI를 시작하고 stdin으로 요청문을 전달합니다. 폴더 realpath 기반 임대 잠금과 슬롯 기록은 창 간 동시 수정·동일 시각 재실행을 막습니다. 임대가 손상되면 실행을 취소하며 CLI가 닫힐 때까지 잠금을 유지합니다. [reportDocument.ts](../src/claudeScheduler/reportDocument.ts)는 명시적으로 연 보고서만 가상 문서로 제공합니다.
 
 요청문 예제 생성은 부모 폴더의 realpath가 선택한 워크스페이스 안인지 확인하고 배타적 파일 생성으로 기존 파일·심볼릭 링크 덮어쓰기를 막습니다.
 

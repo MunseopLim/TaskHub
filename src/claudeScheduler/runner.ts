@@ -62,9 +62,9 @@ async function boundedRead(file: string, limit: number): Promise<Buffer> {
 export function parseClaudeResult(stdout: string, exitCode: number | null): { success: boolean; text: string } {
     let result: Record<string, unknown>;
     try { result = JSON.parse(stdout); }
-    catch { return { success: false, text: t('Claude CLI가 올바른 JSON 결과를 반환하지 않았습니다.', 'Claude CLI did not return a valid JSON result.') + '\n' + stdout }; }
+    catch { return { success: false, text: t('CLI가 올바른 JSON 결과를 반환하지 않았습니다.', 'The CLI did not return a valid JSON result.') + '\n' + stdout }; }
     if (!result || typeof result !== 'object' || Array.isArray(result) || result.type !== 'result') {
-        return { success: false, text: t('Claude CLI 결과 형식을 확인할 수 없습니다.', 'Unrecognized Claude CLI result format.') + '\n' + stdout };
+        return { success: false, text: t('CLI가 현재 실행기의 결과 형식(type: result)을 반환하지 않았습니다.', 'The CLI did not return the current runner\'s result format (type: result).') + '\n' + stdout };
     }
     const denied = Array.isArray(result.permission_denials) && result.permission_denials.length > 0;
     const success = exitCode === 0 && result.subtype === 'success' && result.is_error === false && !denied;
@@ -76,7 +76,7 @@ async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: Claude
     versionOnly = false): Promise<{ status: ClaudeRunResult['status']; text: string }> {
     if (signal.aborted) { return { status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }; }
     if (!options.executable || /[\r\n\0]/.test(options.executable) || /\.(?:cmd|bat)$/i.test(options.executable)) {
-        throw new Error(t('Claude 실행 파일 경로를 확인하세요. Windows에서는 네이티브 claude.exe를 사용하세요.', 'Check the Claude executable path. On Windows, use native claude.exe.'));
+        throw new Error(t('CLI 실행 파일 경로를 확인하세요. Windows에서는 네이티브 실행 파일을 사용하세요.', 'Check the CLI executable path. On Windows, use a native executable.'));
     }
     return new Promise(resolve => {
         let child: ChildProcess;
@@ -98,8 +98,8 @@ async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: Claude
             const parsed = versionOnly ? { success: exitCode === 0, text: output } : parseClaudeResult(output, exitCode);
             const errors = Buffer.concat(stderr).toString('utf8');
             if (/unknown option|unrecognized option|unsupported option/i.test(errors)) {
-                reason = t(`Claude Code CLI를 ${MIN_CLAUDE_CLI_VERSION} 이상으로 업데이트하세요. 필요한 옵션을 지원하지 않습니다.`,
-                    `Update Claude Code CLI to ${MIN_CLAUDE_CLI_VERSION} or later. Required options are unsupported.`);
+                reason = t(`선택한 CLI '${options.executable}'가 현재 실행기에 필요한 옵션을 지원하지 않습니다. CLI의 비대화형 실행·권한·결과 형식 호환성을 확인하세요.`,
+                    `The selected CLI '${options.executable}' does not support options required by this runner. Check its non-interactive execution, permissions, and result format compatibility.`);
             }
             resolve({ status: signal.aborted ? 'stopped' : reason || !parsed.success ? 'failed' : 'success',
                 text: [reason, parsed.text, errors].filter(Boolean).join('\n\n') });
@@ -120,22 +120,22 @@ async function invokeClaude(job: ClaudeSchedule, prompt: Buffer, options: Claude
             });
         } catch (error) { resolve({ status: 'failed', text: String(error) }); return; }
         child.once('error', error => {
-            reason = t(`Claude CLI를 시작하지 못했습니다: ${error.message}`, `Could not start Claude CLI: ${error.message}`);
+            reason = t(`CLI '${options.executable}'를 시작하지 못했습니다: ${error.message}`, `Could not start CLI '${options.executable}': ${error.message}`);
         });
         child.once('close', code => { closed = true; exitCode = code; void finish(); });
         child.stdout?.on('data', (chunk: Buffer) => {
             stdoutBytes += chunk.length;
-            if (stdoutBytes > outputLimit) { terminate(t('Claude 출력이 4MiB 한도를 초과했습니다.', 'Claude output exceeds the 4 MiB limit.')); }
+            if (stdoutBytes > outputLimit) { terminate(t('CLI 출력이 4MiB 한도를 초과했습니다.', 'CLI output exceeds the 4 MiB limit.')); }
             else { stdout.push(chunk); }
         });
         child.stderr?.on('data', (chunk: Buffer) => {
             stderrBytes += chunk.length;
-            if (stderrBytes > errorLimit) { terminate(t('Claude 오류 출력이 256KiB 한도를 초과했습니다.', 'Claude error output exceeds the 256 KiB limit.')); }
+            if (stderrBytes > errorLimit) { terminate(t('CLI 오류 출력이 256KiB 한도를 초과했습니다.', 'CLI error output exceeds the 256 KiB limit.')); }
             else { stderr.push(chunk); }
         });
         child.stdin?.on('error', error => { if (!closed) { terminate(t(`요청문 전달 실패: ${error.message}`, `Could not send the prompt: ${error.message}`)); } });
         signal.addEventListener('abort', abort, { once: true });
-        timeout = setTimeout(() => terminate(t('Claude 실행 시간이 제한을 초과했습니다.', 'Claude run exceeded its time limit.')), (versionOnly ? 10 : options.timeoutSeconds) * 1000);
+        timeout = setTimeout(() => terminate(t('CLI 실행 시간이 제한을 초과했습니다.', 'CLI run exceeded its time limit.')), (versionOnly ? 10 : options.timeoutSeconds) * 1000);
         if (signal.aborted) { abort(); } else { child.stdin?.end(prompt); }
     });
 }
@@ -227,8 +227,11 @@ export async function runScheduledClaude(job: ClaudeSchedule, signal: AbortSigna
         const probe = await invokeClaude({ ...job, workspacePath: root }, Buffer.alloc(0), options, abort.signal, kill, true);
         if (probe.status !== 'success') { status = probe.status; throw new Error(probe.text); }
         if (!supportsClaudeVersion(probe.text)) {
-            throw new Error(t(`Claude Code CLI ${MIN_CLAUDE_CLI_VERSION} 이상이 필요합니다. CLI를 업데이트하세요.`,
-                `Claude Code CLI ${MIN_CLAUDE_CLI_VERSION} or later is required. Update the CLI.`));
+            const observed = probe.text.trim().slice(0, 1000);
+            throw new Error(t(
+                `CLI '${options.executable}'의 --version 응답을 현재 실행기로 확인할 수 없습니다. 현재 실행기는 Claude Code ${MIN_CLAUDE_CLI_VERSION} 이상을 기준으로 합니다. 실행 파일만 바꿔도 다른 CLI를 지원하는 것은 아니며, 해당 CLI의 실행 옵션과 결과 형식이 호환되어야 합니다. 요청문은 아직 전달하지 않았습니다.\n버전 응답: ${observed}`,
+                `The --version response from CLI '${options.executable}' did not pass this runner's check. The current runner targets Claude Code ${MIN_CLAUDE_CLI_VERSION} or later. Changing the executable alone does not add another CLI's execution options and result format. The prompt has not been sent.\nVersion response: ${observed}`
+            ));
         }
         if (scheduledAt !== undefined) {
             const marker = path.join(lockDirectory, `${job.id}.json`);

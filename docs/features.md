@@ -882,7 +882,9 @@ mask |= 0x80;  // 변수의 현재 값과 타입을 확정할 수 없다는 안�
 
 ### 16.2. AI 예약 실행
 
-TaskHub 런처의 **AI 예약 실행 활성화… (실험적)** 에서 `taskhub.experimental.claudeScheduler.enabled`를 켜면 **AI 예약 실행** 뷰가 나타납니다. 현재 지원하는 실행 엔진은 **Claude Code CLI 2.1.248 이상**입니다. CLI를 설치하고 해당 실행 환경에서 로그인한 뒤 사용하세요. 매 실행 전에 버전을 확인하며 구버전이나 지원하지 않는 옵션은 보고서에 업데이트 안내를 남깁니다. 기본 실행 파일은 `claude`이며, PATH에 없다면 `taskhub.claudeScheduler.executable`에 절대 경로를 설정합니다. Windows에서는 네이티브 `claude.exe`를 사용합니다. 배치 래퍼와 셸 명령 문자열은 지원하지 않습니다. 기존 예약과 명령 ID는 그대로 사용합니다.
+TaskHub 런처의 **AI 예약 실행 활성화… (실험적)** 에서 `taskhub.experimental.aiScheduler.enabled`를 켜면 **AI 예약 실행** 뷰가 나타납니다. 현재 지원하는 실행 엔진은 **Claude Code CLI 2.1.248 이상**입니다. CLI를 설치하고 해당 실행 환경에서 로그인한 뒤 사용하세요. 매 실행 전에 버전을 확인하며 버전 또는 실행 옵션이 호환되지 않으면 보고서에 선택한 CLI와 실패 원인을 남깁니다. 기본 실행 파일은 `claude`이며, PATH에 없다면 `taskhub.aiScheduler.executable`에 절대 경로를 설정합니다. Windows에서는 네이티브 `claude.exe`를 사용합니다. 배치 래퍼와 셸 명령 문자열은 지원하지 않습니다. 기존 예약과 명령 ID는 그대로 사용합니다. 설정 화면은 `AI Scheduler` 이름을 사용합니다. 이전 `taskhub.claudeScheduler.*`와 `taskhub.experimental.claudeScheduler.enabled` 사용자 설정은 새 사용자 설정을 명시하지 않았을 때만 읽으며, 워크스페이스 파일의 실행 파일 설정은 받지 않습니다.
+
+**다른 CLI를 지정한 경우:** 실행 파일 설정은 프로그램 경로를 선택할 뿐 실행 엔진을 바꾸지 않습니다. 현재 실행기는 선택한 프로그램의 `--version` 응답을 위 Claude 버전 기준으로 확인한 뒤 Claude 전용 비대화형·권한·JSON 결과 옵션을 전달합니다. 다른 형식의 버전 응답이면 요청문을 보내기 전에 실패하고, 보고서에 실행 파일과 실제 응답을 남깁니다. 사내 CLI 등의 지원에는 해당 도구의 비대화형 실행, 권한 제한, 입력과 결과 형식에 맞는 실행기 연결이 필요합니다.
 
 1. 뷰의 **예약 추가**에서 작업 폴더를 고르면 요청문 작성 안내가 먼저 나타납니다. 요청문은 JSON 설정이 아닌 일반 문장이나 Markdown이며, **목표·대상 파일 또는 범위·지시·원하는 결과 형식**을 적습니다. 실행 주기는 요청문에 적지 않고 뒤 단계에서 지정합니다.
 2. **예제 요청문 만들기**는 작업 폴더 안에 `.md` 또는 `.txt` 파일을 만들고 코드 검토 예제를 편집기에서 엽니다. 내용을 원하는 작업으로 수정한 뒤 알림의 **저장하고 예약 계속**을 누르면 파일을 저장하고 등록을 이어갑니다. 이 버튼을 누르기 전에는 예약이 생기지 않습니다. 이미 작성한 파일이 있다면 **기존 요청문 파일 선택**을 고릅니다.
@@ -1514,10 +1516,14 @@ Prev/Next 또는 찾기 입력의 `Enter`·`Shift+Enter`로 결과를 순환합�
 | `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. 그 용도의 기억이 없으면 가장 최근에 사용한 다이얼로그 위치를 이어받는다. `false`면 TaskHub가 시작 위치를 **일절 지정하지 않고** VS Code의 기본 규칙과 `files.dialog.defaultPath` 설정에 맡긴다. 저장 다이얼로그는 제안 파일명도 함께 사라진다. 액션 JSON의 `options.defaultUri`는 어느 쪽이든 존중한다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
-| `taskhub.experimental.claudeScheduler.enabled` | `boolean` | `false` | **[실험적]** AI 예약 실행 활성화. 머신 범위. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
-| `taskhub.claudeScheduler.executable` | `string` | `"claude"` | CLI 실행 파일 이름/절대 경로. Windows는 네이티브 exe. 머신 범위. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
-| `taskhub.claudeScheduler.model` | `string` | `""` | 비우면 CLI 기본 모델. 머신 범위. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
-| `taskhub.claudeScheduler.timeoutSeconds` | `integer` | `600` (10–3600) | 실행 제한 시간(초). 머신 범위. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
+| `taskhub.experimental.aiScheduler.enabled` | `boolean` | `false` | **[실험적]** AI 예약 실행 활성화. 머신 범위. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
+| `taskhub.aiScheduler.executable` | `string` | `"claude"` | CLI 실행 파일 이름/절대 경로. Windows는 네이티브 exe. 머신 범위. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
+| `taskhub.aiScheduler.model` | `string` | `""` | 비우면 CLI 기본 모델. 머신 범위. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
+| `taskhub.aiScheduler.timeoutSeconds` | `integer` | `600` (10–3600) | 실행 제한 시간(초). 머신 범위. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
+| `taskhub.experimental.claudeScheduler.enabled` | `boolean` | `false` | 이전 활성화 설정. 설정 화면에서는 숨기며 새 설정을 지정하지 않았을 때 읽는다. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
+| `taskhub.claudeScheduler.executable` | `string` | `"claude"` | 이전 실행 파일 설정. 설정 화면에서는 숨기며 새 설정을 지정하지 않았을 때 읽는다. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
+| `taskhub.claudeScheduler.model` | `string` | `""` | 이전 모델 설정. 설정 화면에서는 숨기며 새 설정을 지정하지 않았을 때 읽는다. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
+| `taskhub.claudeScheduler.timeoutSeconds` | `integer` | `600` (10–3600) | 이전 제한 시간 설정. 설정 화면에서는 숨기며 새 설정을 지정하지 않았을 때 읽는다. | [§16.2 AI 예약 실행](#162-ai-예약-실행) |
 | `taskhub.preset.selected` | `string` | `"none"` | 목록에 병합할 프리셋 ID. `"none"`이면 프리셋 병합만 끈다. 확장 번들은 `example`, 워크스페이스 프리셋은 `폴더이름:integration` 형식이며, 번들 예제 표시 설정은 독립적이다. | [§17 Preset](#17-preset-기능) |
 
 ### 21.2. 설정 추가 체크리스트

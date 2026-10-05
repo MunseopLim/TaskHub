@@ -120,10 +120,6 @@
   "cmd.unpinAction": "Unpin",
   "cmd.showWhatsNew": "What's New",
   "cmd.showDeveloperCalculator": "Developer Calculator",
-  "setting.claudeSchedulerEnabled": "Enable experimental AI schedules while VS Code is open. Schedules are stored locally for this workspace. Current engine: Claude Code CLI.",
-  "setting.claudeSchedulerExecutable": "Claude Code 2.1.248+ executable name or absolute path. Uses the existing login in restricted mode. Windows requires native claude.exe.",
-  "setting.claudeSchedulerModel": "Model alias or ID. Leave empty for the restricted CLI default. User and project model settings are not loaded.",
-  "setting.claudeSchedulerTimeout": "Time limit in seconds for each scheduled run. Stops the process tree on timeout and pauses the schedule.",
   "view.claudeSchedules": "AI Schedules (Experimental)",
   "welcome.claudeSchedules": "Schedule recurring AI tasks while VS Code is open.\nAdd a schedule to create an editable prompt example or choose an existing .md / .txt file. Describe the goal, target files, instructions, and desired output; then choose the tools and cadence.\nCurrent engine: Claude Code CLI. Install and sign in before running.\n[Add schedule](command:taskhub.claudeScheduler.add)",
   "cmd.claudeScheduler.add": "AI: Add Schedule",
@@ -135,5 +131,9 @@
   "cmd.claudeScheduler.showSchedules": "AI: Show Schedules",
   "cmd.claudeScheduler.pause": "AI: Pause Schedule",
   "cmd.claudeScheduler.resume": "AI: Resume Schedule",
-  "cmd.claudeScheduler.reset": "AI: Reset Schedule Data"
+  "cmd.claudeScheduler.reset": "AI: Reset Schedule Data",
+  "setting.aiSchedulerEnabled": "Enable experimental AI schedules while VS Code is open. Schedules are stored locally for this workspace.",
+  "setting.aiSchedulerExecutable": "CLI executable name or absolute path. The current runner uses Claude Code 2.1.248+ options and JSON results; changing this path alone does not add support for another CLI. Uses the existing CLI login. Windows requires a native executable.",
+  "setting.aiSchedulerModel": "Model alias or ID. Leave empty for the restricted CLI default. User and project model settings are not loaded.",
+  "setting.aiSchedulerTimeout": "Time limit in seconds for each scheduled run. Stops the process tree on timeout and pauses the schedule."
 }
