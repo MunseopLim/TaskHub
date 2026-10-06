@@ -134,7 +134,7 @@
   "cmd.aiScheduler.reset": "AI: Reset Schedule Data",
   "setting.aiSchedulerEnabled": "Enable AI schedules while VS Code is open. Turning this off stops active runs and scheduled execution without deleting schedules. Schedules are stored locally for this workspace.",
   "setting.aiSchedulerShowPanel": "Show the AI Schedules panel in the TaskHub sidebar. Hiding the panel does not stop scheduled execution.",
-  "setting.aiSchedulerExecutable": "CLI executable name or absolute path. The current runner uses Claude Code 2.1.248+ options and JSON results; changing this path alone does not add support for another CLI. Uses the existing CLI login. Windows requires a native executable.",
+  "setting.aiSchedulerExecutable": "CLI executable name or absolute path. The current runner uses Claude Code options and JSON results; changing this path alone does not add support for another CLI. Uses the existing CLI login. Windows requires a native executable.",
   "setting.aiSchedulerModel": "Model alias or ID. Leave empty for the restricted CLI default. User and project model settings are not loaded.",
   "setting.aiSchedulerTimeout": "Time limit in seconds for each scheduled run. Stops the process tree on timeout and pauses the schedule."
 }

@@ -13,7 +13,6 @@ const outputLimit = 4 * 1024 * 1024;
 const errorLimit = 256 * 1024;
 // Include input snapshots and UTF-8 replacement characters in diagnostic reports.
 const reportLimit = 16 * 1024 * 1024;
-export const MIN_SUPPORTED_CLI_VERSION = '2.1.248';
 export interface AiCliOptions {
     executable: string;
     model?: string;
@@ -24,7 +23,7 @@ export interface AiCliOptions {
 export type KillCliProcess = (child: ChildProcess) => Promise<boolean>;
 
 interface CliInvocation {
-    phase: 'version' | 'prompt';
+    phase: 'prompt';
     executable: string;
     args: string[];
     cwd: string;
@@ -54,13 +53,13 @@ function invocationDetails(invocations: CliInvocation[]): string {
         written: t('stdin 파이프에 기록 완료', 'Written to the stdin pipe'), failed: t('전송 실패 — 일부만 전달됐을 수 있음', 'Delivery failed — may be partial'),
     };
     for (const invocation of invocations) {
-        lines.push('', invocation.phase === 'version' ? t('버전 확인', 'Version check') : t('요청문 실행', 'Prompt execution'),
+        lines.push('', t('요청문 실행', 'Prompt execution'),
             process.platform === 'win32' ? t('명령 (PowerShell 표기):', 'Command (PowerShell syntax):') : t('명령 (POSIX 셸 표기):', 'Command (POSIX shell syntax):'),
             formatCliCommand(invocation.executable, invocation.args),
             t(`작업 폴더: ${invocation.cwd}`, `Working directory: ${invocation.cwd}`),
             invocation.started ? t('CLI 시작됨', 'CLI started') : t('CLI 시작되지 않음', 'CLI not started'),
             t(`stdin: ${inputStates[invocation.stdinStatus]} (${invocation.stdinBytes}바이트)`, `stdin: ${inputStates[invocation.stdinStatus]} (${invocation.stdinBytes} bytes)`));
-        if (invocation.phase === 'prompt' && invocation.stdinText !== undefined) {
+        if (invocation.stdinText !== undefined) {
             lines.push(t('이 실행에서 stdin에 쓴 요청문 (UTF-8):', 'Prompt used for this stdin write (UTF-8):'), invocation.stdinText);
         }
     }
@@ -140,13 +139,13 @@ export function parseCliResult(stdout: string, exitCode: number | null): { succe
 }
 
 async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions, signal: AbortSignal, kill: KillCliProcess,
-    invocations: CliInvocation[], versionOnly = false): Promise<{ status: AiRunResult['status']; text: string }> {
+    invocations: CliInvocation[]): Promise<{ status: AiRunResult['status']; text: string }> {
     if (signal.aborted) { return { status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }; }
     if (!options.executable || /[\r\n\0]/.test(options.executable) || /\.(?:cmd|bat)$/i.test(options.executable)) {
         throw new Error(t('CLI 실행 파일 경로를 확인하세요. Windows에서는 네이티브 실행 파일을 사용하세요.', 'Check the CLI executable path. On Windows, use a native executable.'));
     }
-    const invocation: CliInvocation = { phase: versionOnly ? 'version' : 'prompt', executable: options.executable,
-        args: versionOnly ? [...(options.prefixArgs ?? []), '--version'] : aiCliArguments(job, options), cwd: job.workspacePath,
+    const invocation: CliInvocation = { phase: 'prompt', executable: options.executable,
+        args: aiCliArguments(job, options), cwd: job.workspacePath,
         started: false, stdinStatus: 'notSent', stdinBytes: 0 };
     invocations.push(invocation);
     return new Promise(resolve => {
@@ -166,7 +165,7 @@ async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions,
             signal.removeEventListener('abort', abort);
             await termination;
             const output = Buffer.concat(stdout).toString('utf8');
-            const parsed = versionOnly ? { success: exitCode === 0, text: output } : parseCliResult(output, exitCode);
+            const parsed = parseCliResult(output, exitCode);
             const errors = Buffer.concat(stderr).toString('utf8');
             if (/unknown option|unrecognized option|unsupported option/i.test(errors)) {
                 reason = t(`선택한 CLI '${options.executable}'가 현재 실행기에 필요한 옵션을 지원하지 않습니다. CLI의 비대화형 실행·권한·결과 형식 호환성을 확인하세요.`,
@@ -205,9 +204,9 @@ async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions,
                     '실행 파일 또는 작업 폴더를 찾을 수 없습니다. 사용자 설정의 taskhub.aiScheduler.executable에 설치된 CLI의 절대 경로를 지정하고 작업 폴더가 존재하는지 확인하세요. 실행 파일 이름만 지정하면 VS Code 확장 호스트의 PATH에서 찾습니다.',
                     'The executable or working folder could not be found. Set taskhub.aiScheduler.executable in User settings to the installed CLI\'s absolute path and check that the working folder exists. A bare executable name is resolved using the VS Code extension host\'s PATH.'
                 );
-                if (versionOnly) {
-                    reason += '\n' + t('버전 확인을 시작하지 못했으며 요청문은 아직 전달하지 않았습니다.', 'The version check could not start; the prompt has not been sent.');
-                }
+            }
+            if (!invocation.started) {
+                reason += '\n' + t('요청문은 아직 전달하지 않았습니다.', 'The prompt has not been sent.');
             }
         });
         child.once('close', code => { closed = true; exitCode = code; void finish(); });
@@ -227,20 +226,9 @@ async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions,
         });
         child.stdin?.once('finish', () => { if (invocation.stdinStatus === 'writing') { invocation.stdinStatus = 'written'; } });
         signal.addEventListener('abort', abort, { once: true });
-        timeout = setTimeout(() => terminate(t('CLI 실행 시간이 제한을 초과했습니다.', 'CLI run exceeded its time limit.')), (versionOnly ? 10 : options.timeoutSeconds) * 1000);
+        timeout = setTimeout(() => terminate(t('CLI 실행 시간이 제한을 초과했습니다.', 'CLI run exceeded its time limit.')), options.timeoutSeconds * 1000);
         if (signal.aborted) { abort(); }
     });
-}
-
-export function supportsCliVersion(text: string): boolean {
-    const version = text.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:\s|$)/);
-    if (!version) { return false; }
-    const actual = version.slice(1).map(Number);
-    const minimum = MIN_SUPPORTED_CLI_VERSION.split('.').map(Number);
-    for (let index = 0; index < 3; index++) {
-        if (actual[index] !== minimum[index]) { return actual[index] > minimum[index]; }
-    }
-    return true;
 }
 
 export function aiReportDirectory(storage: string, jobId: string): string {
@@ -331,15 +319,6 @@ export async function runScheduledAi(job: AiSchedule, signal: AbortSignal, sched
             throw error;
         }
         if (abort.signal.aborted) { return { status: 'stopped', startedAt, finishedAt: Date.now() }; }
-        const probe = await invokeCli({ ...job, workspacePath: root }, Buffer.alloc(0), options, abort.signal, kill, invocations, true);
-        if (probe.status !== 'success') { status = probe.status; throw new Error(probe.text); }
-        if (!supportsCliVersion(probe.text)) {
-            const observed = probe.text.trim().slice(0, 1000);
-            throw new Error(t(
-                `CLI '${options.executable}'의 --version 응답을 현재 실행기로 확인할 수 없습니다. 현재 실행기는 Claude Code ${MIN_SUPPORTED_CLI_VERSION} 이상을 기준으로 합니다. 실행 파일만 바꿔도 다른 CLI를 지원하는 것은 아니며, 해당 CLI의 실행 옵션과 결과 형식이 호환되어야 합니다. 요청문은 아직 전달하지 않았습니다.\n버전 응답: ${observed}`,
-                `The --version response from CLI '${options.executable}' did not pass this runner's check. The current runner targets Claude Code ${MIN_SUPPORTED_CLI_VERSION} or later. Changing the executable alone does not add another CLI's execution options and result format. The prompt has not been sent.\nVersion response: ${observed}`
-            ));
-        }
         if (scheduledAt !== undefined) {
             const marker = path.join(lockDirectory, `${job.id}.json`);
             let previous = 0;

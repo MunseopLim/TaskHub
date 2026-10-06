@@ -134,7 +134,7 @@
   "cmd.aiScheduler.reset": "AI: 예약 데이터 초기화",
   "setting.aiSchedulerEnabled": "VS Code가 열려 있는 동안 AI 예약 실행을 활성화합니다. 끄면 예약을 삭제하지 않고 진행 중인 실행과 예약 실행을 중단합니다. 예약은 이 워크스페이스의 로컬 상태로 저장됩니다.",
   "setting.aiSchedulerShowPanel": "TaskHub 사이드바에 AI 예약 실행 패널을 표시합니다. 패널을 숨겨도 예약 실행은 계속됩니다.",
-  "setting.aiSchedulerExecutable": "CLI 실행 파일 이름 또는 절대 경로입니다. 현재 실행기는 Claude Code 2.1.248 이상 옵션과 JSON 결과 형식을 사용하므로 경로만 바꿔도 다른 CLI를 지원하는 것은 아닙니다. 기존 CLI 로그인을 사용합니다. Windows는 네이티브 실행 파일이 필요합니다.",
+  "setting.aiSchedulerExecutable": "CLI 실행 파일 이름 또는 절대 경로입니다. 현재 실행기는 Claude Code 옵션과 JSON 결과 형식을 사용하므로 경로만 바꿔도 다른 CLI를 지원하는 것은 아닙니다. 기존 CLI 로그인을 사용합니다. Windows는 네이티브 실행 파일이 필요합니다.",
   "setting.aiSchedulerModel": "모델 별칭 또는 ID입니다. 비워 두면 제한 모드의 CLI 기본 모델을 사용합니다. 사용자·프로젝트 모델 설정은 로드하지 않습니다.",
   "setting.aiSchedulerTimeout": "예약 실행마다 적용할 제한 시간(초)입니다. 초과하면 프로세스 트리를 중지하고 예약을 일시 정지합니다."
 }

@@ -7,7 +7,7 @@ import { execFileSync } from 'child_process';
 import * as vscode from 'vscode';
 import { AI_SCHEDULES_KEY, AiRunResult, AiSchedule, AiScheduler, AiSchedulerState, nextAiRun, readSchedulerState } from '../aiScheduler/model';
 import { AiSchedulerController, registerAiScheduler } from '../aiScheduler/controller';
-import { AiCliOptions, aiCliArguments, aiReportDirectory, aiWorkspaceLeaseDirectory, formatCliCommand, parseCliResult, pruneAiReports, readAiReport, runScheduledAi, supportsCliVersion } from '../aiScheduler/runner';
+import { AiCliOptions, aiCliArguments, aiReportDirectory, aiWorkspaceLeaseDirectory, formatCliCommand, parseCliResult, pruneAiReports, readAiReport, runScheduledAi } from '../aiScheduler/runner';
 import { AiSchedulesProvider } from '../providers/aiSchedulesProvider';
 import { killProcessTree } from '../extension';
 import { buildFeatureLauncherItems } from '../featureLauncher';
@@ -356,13 +356,14 @@ suite('AI scheduler CLI execution and UI integration', function () {
         item = job({ workspacePath: directory, promptPath: path.join(directory, 'prompt.md') });
         await fs.writeFile(item.promptPath, '한글 요청 "quoted"\n$(touch injected) & | % ! `echo x`');
         await fs.writeFile(script, `const fs=require('fs'); const args=process.argv.slice(2); const scenario=args[0];
+            if(['old','company-version','no-version'].includes(scenario)){fs.appendFileSync(args[1],JSON.stringify({args})+'\\n');}
             if(args.includes('--version')){
-                let probePrompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>probePrompt+=c);process.stdin.on('end',()=>{
-                    if(scenario==='company-version'){fs.writeFileSync(args[1],JSON.stringify({args,prompt:probePrompt}));}
-                    console.log(scenario==='company-version'?'Company CLI 0.9.0':scenario==='old'?'2.1.247 (Claude Code)':'2.1.248 (Claude Code)');process.exit(0);
-                });
-            }else{
+                if(scenario==='no-version'){console.error('unknown option --version');process.exit(1);}
+                console.log(scenario==='company-version'?'Company CLI 0.9.0':'2.1.247 (Claude Code)');process.exit(0);
+            }
             let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>prompt+=c);process.stdin.on('end',()=>{
+                if(scenario==='unsupported-option'){console.error('unknown option --restricted');process.exitCode=1;return;}
+                if(scenario==='invalid-json'){console.log('plain text answer');return;}
                 if(scenario==='hang'){fs.writeFileSync(args[1],String(process.pid));setInterval(()=>{},1000);return;}
                 if(scenario==='large'){process.stdout.write('x'.repeat(5*1024*1024));setInterval(()=>{},1000);return;}
                 if(scenario==='edit'){fs.writeFileSync(args[1],'modified by fixture');}
@@ -370,7 +371,7 @@ suite('AI scheduler CLI execution and UI integration', function () {
                 const result={type:'result',subtype:scenario==='external-failure'?'error_external':'success',is_error:scenario==='fail',
                     total_cost_usd:scenario==='no-cost'?undefined:1000,result:scenario==='full-result'?'R'.repeat(4*1024*1024-4096):scenario==='expanding-result'?Array.from({length:900000},()=>[0]):scenario==='expanding-unicode-result'?Array.from({length:300000},()=>[[['한']]]):JSON.stringify({prompt,args,cwd:process.cwd()}),permission_denials:scenario==='denied'?[{tool_name:'Bash'}]:[]};
                 console.log(JSON.stringify(result));if(scenario==='fail'){process.exitCode=1;}
-            });}`);
+            });`);
         options = { executable: 'node', prefixArgs: [script, 'success'], timeoutSeconds: 5 };
     });
     teardown(async () => { await fs.rm(directory, { recursive: true, force: true }); });
@@ -400,18 +401,16 @@ suite('AI scheduler CLI execution and UI integration', function () {
         const original = await readAiReport(storage, item);
         const received = JSON.parse(original.split('\n\n')[1]);
         const recorded = reportInvocations(original);
-        assert.deepStrictEqual(recorded.map(entry => entry.phase), ['version', 'prompt']);
-        assert.deepStrictEqual(recorded[0].args, [script, 'success', '--version']);
-        assert.deepStrictEqual(recorded[1].args, [script, ...received.args]);
+        assert.deepStrictEqual(recorded.map(entry => entry.phase), ['prompt']);
+        assert.deepStrictEqual(recorded[0].args, [script, ...received.args]);
         for (const entry of recorded) {
             assert.strictEqual(entry.executable, 'node'); assert.strictEqual(entry.cwd, await fs.realpath(directory));
             assert.strictEqual(entry.shell, false); assert.strictEqual(entry.started, true); assert.strictEqual(entry.stdinStatus, 'written');
             assert.ok(original.includes(formatCliCommand(entry.executable, entry.args)));
         }
-        assert.strictEqual(recorded[0].stdinBytes, 0);
-        assert.strictEqual(recorded[1].stdinBytes, Buffer.byteLength(received.prompt, 'utf8'));
+        assert.strictEqual(recorded[0].stdinBytes, Buffer.byteLength(received.prompt, 'utf8'));
         assert.strictEqual(received.prompt, prompt);
-        assert.ok(!recorded[1].args.includes(prompt)); assert.ok(original.includes(`\n${prompt}\n`));
+        assert.ok(!recorded[0].args.includes(prompt)); assert.ok(original.includes(`\n${prompt}\n`));
         await fs.writeFile(item.promptPath, 'replacement prompt');
         options.model = 'replacement-model'; options.executable = 'replacement-cli';
         assert.strictEqual(await readAiReport(storage, item), original);
@@ -431,8 +430,8 @@ suite('AI scheduler CLI execution and UI integration', function () {
         const report = await readAiReport(storage, item);
         assert.ok(Buffer.byteLength(report, 'utf8') > 4 * 1024 * 1024 + 256 * 1024 + 65536);
         assert.ok(report.includes(`\n${prompt}\n`));
-        assert.strictEqual(reportInvocations(report)[1].stdinBytes, 256 * 1024);
-        assert.deepStrictEqual(reportInvocations(report)[1].args, [script, ...received.args]);
+        assert.strictEqual(reportInvocations(report)[0].stdinBytes, 256 * 1024);
+        assert.deepStrictEqual(reportInvocations(report)[0].args, [script, ...received.args]);
         await fs.appendFile(path.join(aiReportDirectory(storage, item.id), item.lastRun.report!), Buffer.alloc(16 * 1024 * 1024));
         await assert.rejects(readAiReport(storage, item), /too large|너무 크/);
     });
@@ -449,7 +448,7 @@ suite('AI scheduler CLI execution and UI integration', function () {
             assert.ok(report.includes('\n\n{\n  "type": "result"'));
             assert.match(report, /보고서 크기 한도|report size limit/);
             assert.ok(report.includes(`\n${await fs.readFile(item.promptPath, 'utf8')}\n`));
-            assert.deepStrictEqual(reportInvocations(report).map(entry => entry.phase), ['version', 'prompt']);
+            assert.deepStrictEqual(reportInvocations(report).map(entry => entry.phase), ['prompt']);
         });
     }
     test('existing reports remain readable, new reports take precedence and read limits still apply', async () => {
@@ -539,33 +538,44 @@ suite('AI scheduler CLI execution and UI integration', function () {
         delete options.model;
         assert.ok(!aiCliArguments(item, options).includes('--model'));
     });
-    test('CLI version preflight rejects unsupported versions before an edit', async () => {
-        const output = path.join(directory, 'not-edited.txt');
-        options.prefixArgs = [script, 'old', output];
-        const result = await run(item, options, storage); item.lastRun = result;
-        assert.strictEqual(result.status, 'failed');
-        assert.match(await readAiReport(storage, item), /2\.1\.248/);
-        await assert.rejects(fs.stat(output));
-        for (const version of ['2.1.248 (Claude Code)', '2.2.0 (Claude Code)', '3.0.0']) { assert.strictEqual(supportsCliVersion(version), true); }
-        for (const version of ['2.1.247 (Claude Code)', '2.0.999', '2.1.248-beta', 'invalid']) { assert.strictEqual(supportsCliVersion(version), false); }
-    });
-    test('another CLI version fails at preflight and reports its response before sending the prompt', async () => {
-        const probe = path.join(directory, 'version-probe.json');
-        options.prefixArgs = [script, 'company-version', probe];
-        item.lastRun = await run(item, options, storage);
-        assert.strictEqual(item.lastRun.status, 'failed');
-        const received = JSON.parse(await fs.readFile(probe, 'utf8'));
-        assert.ok(received.args.includes('--version'));
-        assert.strictEqual(received.prompt, '');
-        const report = await readAiReport(storage, item);
-        assert.ok(report.includes('Company CLI 0.9.0'));
-        assert.ok(report.includes(options.executable));
-        assert.match(report, /prompt has not been sent|요청문은 아직 전달하지 않았습니다/);
-        assert.ok(!report.includes('Update the CLI.'));
-        assert.ok(!report.includes(await fs.readFile(item.promptPath, 'utf8')));
-        assert.deepStrictEqual(reportInvocations(report).map(entry => entry.phase), ['version']);
-        assert.strictEqual(reportInvocations(report)[0].stdinBytes, 0);
-    });
+    for (const scenario of ['old', 'company-version', 'no-version']) {
+        test(`${scenario} CLI executes the prompt once without requiring a version response`, async () => {
+            const calls = path.join(directory, 'cli-calls.jsonl');
+            options.prefixArgs = [script, scenario, calls];
+            item.lastRun = await run(item, options, storage);
+            assert.strictEqual(item.lastRun.status, 'success');
+            const report = await readAiReport(storage, item);
+            const received = JSON.parse(report.split('\n\n')[1]);
+            assert.strictEqual(received.prompt, await fs.readFile(item.promptPath, 'utf8'));
+            const invocations = (await fs.readFile(calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+            assert.strictEqual(invocations.length, 1);
+            assert.ok(!invocations[0].args.includes('--version'));
+            assert.deepStrictEqual(invocations[0].args, received.args);
+            assert.deepStrictEqual(reportInvocations(report).map(entry => entry.phase), ['prompt']);
+            assert.strictEqual(reportInvocations(report)[0].stdinBytes, Buffer.byteLength(received.prompt, 'utf8'));
+        });
+    }
+    for (const scenario of ['unsupported-option', 'invalid-json']) {
+        test(`${scenario} CLI failure is reported after direct prompt execution and pauses the schedule`, async () => {
+            options.prefixArgs = [script, scenario];
+            const f = fixtureEngine([item]);
+            f.runner((current, signal, slot) => run(current, options, storage, signal, slot));
+            try {
+                await f.engine.initialize();
+                await f.engine.runNow(item.id);
+                const completed = f.engine.list()[0];
+                assert.strictEqual(completed.lastRun?.status, 'failed');
+                assert.strictEqual(completed.enabled, false);
+                const report = await readAiReport(storage, completed);
+                assert.match(report, scenario === 'unsupported-option' ? /unknown option --restricted/ : /plain text answer/);
+                assert.match(report, scenario === 'unsupported-option' ? /does not support options|옵션을 지원하지 않습니다/ : /valid JSON result|올바른 JSON 결과/);
+                const recorded = reportInvocations(report);
+                assert.deepStrictEqual(recorded.map(entry => entry.phase), ['prompt']);
+                assert.strictEqual(recorded[0].stdinStatus, 'written');
+                assert.strictEqual(recorded[0].stdinBytes, Buffer.byteLength(await fs.readFile(item.promptPath, 'utf8'), 'utf8'));
+            } finally { await f.engine.shutdown(); }
+        });
+    }
     test('a missing executable reports the selected path, User setting and failed stage without sending the prompt', async () => {
         const executable = path.join(directory, `missing-cli-${randomUUID()}`);
         item.lastRun = await run(item, { executable, timeoutSeconds: 5 }, storage);
@@ -576,11 +586,11 @@ suite('AI scheduler CLI execution and UI integration', function () {
         assert.match(report, /prompt has not been sent|요청문은 아직 전달하지 않았습니다/);
         assert.ok(!report.includes(await fs.readFile(item.promptPath, 'utf8')));
         const recorded = reportInvocations(report);
-        assert.deepStrictEqual(recorded.map(entry => entry.phase), ['version']);
+        assert.deepStrictEqual(recorded.map(entry => entry.phase), ['prompt']);
         assert.strictEqual(recorded[0].executable, executable); assert.strictEqual(recorded[0].started, false);
         assert.strictEqual(recorded[0].stdinBytes, 0); assert.strictEqual(recorded[0].stdinStatus, 'notSent');
     });
-    test('the controller reads the general executable setting and reports that executable\'s real preflight output', async () => {
+    test('the controller reads the general executable setting and reports actual execution errors without a version probe', async () => {
         const folder = vscode.workspace.workspaceFolders![0];
         const prompt = path.join(folder.uri.fsPath, `ai-cli-setting-${randomUUID()}.md`);
         const initial = job({ workspacePath: folder.uri.fsPath, promptPath: prompt, nextRunAt: Date.now() + 600000 });
@@ -591,7 +601,7 @@ suite('AI scheduler CLI execution and UI integration', function () {
         const original = vscode.workspace.getConfiguration;
         let controller: AiSchedulerController | undefined;
         try {
-            await fs.writeFile(prompt, 'Only the version probe should run.');
+            await fs.writeFile(prompt, 'Report the actual CLI execution error.');
             vscode.workspace.getConfiguration = ((section?: string, scope?: vscode.ConfigurationScope | null) => {
                 const configuration = original(section, scope);
                 return { ...configuration, inspect: (key: string) => section === 'taskhub' && key === 'aiScheduler.executable'
@@ -604,9 +614,11 @@ suite('AI scheduler CLI execution and UI integration', function () {
             assert.strictEqual(completed.lastRun?.status, 'failed');
             const report = await readAiReport(storage, completed);
             assert.ok(report.includes("'node'"));
-            assert.ok(report.includes(execFileSync('node', ['--version'], { encoding: 'utf8' }).trim()));
-            assert.match(report, /prompt has not been sent|요청문은 아직 전달하지 않았습니다/);
-            assert.ok(!report.includes(await fs.readFile(prompt, 'utf8')));
+            assert.match(report, /bad option: --restricted/);
+            const recorded = reportInvocations(report);
+            assert.deepStrictEqual(recorded.map(entry => entry.phase), ['prompt']);
+            assert.strictEqual(recorded[0].executable, 'node'); assert.strictEqual(recorded[0].started, true);
+            assert.ok(!recorded[0].args.includes('--version'));
         } finally {
             await controller?.shutdown(); vscode.workspace.getConfiguration = original;
             await fs.rm(prompt, { force: true });
@@ -916,8 +928,9 @@ suite('AI scheduler CLI execution and UI integration', function () {
             assert.ok(document?.getText().includes('modify this project'));
             const recorded = reportInvocations(document!.getText());
             assert.ok(document!.getText().includes('\nmodify this project\n'));
-            assert.ok(recorded[1].args.includes('Bash(npm test)'));
-            assert.strictEqual(recorded[1].stdinStatus, 'written');
+            assert.deepStrictEqual(recorded.map(entry => entry.phase), ['prompt']);
+            assert.ok(recorded[0].args.includes('Bash(npm test)'));
+            assert.strictEqual(recorded[0].stdinStatus, 'written');
             assert.strictEqual(document?.uri.scheme, 'taskhub-ai-report');
             assert.strictEqual(document?.isUntitled, false); assert.strictEqual(document?.isDirty, false);
             await vscode.commands.executeCommand('taskhub.aiScheduler.pause', completed);
