@@ -28,6 +28,10 @@ suite('열려 있는 파일 즐겨찾기 등록 방식', function () {
     let duringPick: (() => Promise<void>) | undefined;
     let picks: vscode.QuickPickItem[];
     let pickOptions: vscode.QuickPickOptions | undefined;
+    let groupChoice: ((items: vscode.QuickPickItem[]) => vscode.QuickPickItem | undefined) | undefined;
+    let groupPicks: vscode.QuickPickItem[] | undefined;
+    let inputValues: Array<string | undefined>;
+    let inputOptions: vscode.InputBoxOptions[];
     let messages: string[];
     let errors: string[];
     let refreshes: number;
@@ -50,28 +54,44 @@ suite('열려 있는 파일 즐겨찾기 등록 방식', function () {
         duringPick = undefined;
         picks = [];
         pickOptions = undefined;
+        groupChoice = undefined;
+        groupPicks = undefined;
+        inputValues = [];
+        inputOptions = [];
         messages = [];
         errors = [];
         refreshes = 0;
 
         const original = {
             pick: vscode.window.showQuickPick,
+            input: vscode.window.showInputBox,
             information: vscode.window.showInformationMessage,
             error: vscode.window.showErrorMessage,
             folder: vscode.workspace.getWorkspaceFolder
         };
         restore = () => {
             vscode.window.showQuickPick = original.pick;
+            vscode.window.showInputBox = original.input;
             vscode.window.showInformationMessage = original.information;
             vscode.window.showErrorMessage = original.error;
             vscode.workspace.getWorkspaceFolder = original.folder;
         };
         (vscode.workspace as any).getWorkspaceFolder = () => ({ uri: vscode.Uri.file(workspace), name: 'favorite-test', index: 0 });
         (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[], options?: vscode.QuickPickOptions) => {
+            // 두 번째 선택 창은 그룹 선택이다 (기존 그룹이 있을 때만 열린다).
+            if (options?.title === t('즐겨찾기 그룹 선택', 'Select Favorite Group')) {
+                groupPicks = items;
+                return groupChoice ? groupChoice(items) : items[0];
+            }
             picks = items;
             pickOptions = options;
             await duringPick?.();
             return choiceIndex === undefined ? undefined : items[choiceIndex];
+        };
+        (vscode.window as any).showInputBox = async (options: vscode.InputBoxOptions) => {
+            inputOptions.push(options);
+            // 기본값 ''은 그룹 없이 등록한다.
+            return inputValues.length > 0 ? inputValues.shift() : '';
         };
         (vscode.window as any).showInformationMessage = async (message: string) => { messages.push(message); return undefined; };
         (vscode.window as any).showErrorMessage = async (message: string) => { errors.push(message); return undefined; };
@@ -188,6 +208,233 @@ suite('열려 있는 파일 즐겨찾기 등록 방식', function () {
             { title: 'main.c', path: '${workspaceFolder}/main.c' }
         ]);
         assert.strictEqual(refreshes, 1);
+    });
+
+    test('IT-286: 기존 그룹이 없으면 선택 입력으로 새 그룹을 지정하거나 비워 둘 수 있다', async () => {
+        inputValues = ['  Boot  '];
+        await addOpenFileToFavorites(provider);
+        assert.strictEqual(groupPicks, undefined, '기존 그룹이 없으면 그룹 목록을 띄우지 않는다');
+        assert.strictEqual(inputOptions.length, 1);
+        assert.strictEqual(inputOptions[0].ignoreFocusOut, true);
+        assert.strictEqual(inputOptions[0].validateInput?.(''), undefined, '빈 값은 그룹 없음으로 허용해야 한다');
+        assert.deepStrictEqual(readSaved(), [{ title: 'main.c', path: '${workspaceFolder}/main.c', group: 'Boot' }]);
+
+        // 입력 취소는 등록 전체를 취소한다.
+        fs.writeFileSync(favoritesPath, '[]');
+        inputValues = [undefined];
+        await addOpenFileToFavorites(provider);
+        assert.strictEqual(fs.readFileSync(favoritesPath, 'utf8'), '[]');
+        assert.strictEqual(refreshes, 1);
+    });
+
+    test('IT-287: 기존 그룹이 있으면 그룹 없음·기존 그룹·새 그룹 중에서 고른다', async () => {
+        writeSaved([
+            { title: 'B', path: 'b.c', group: 'Drivers' },
+            { title: 'A', path: 'a.c', group: 'Boot' },
+            { title: 'C', path: 'c.c', group: 'Boot' },
+            { title: 'D', path: 'd.c' }
+        ]);
+        groupChoice = items => items.find(item => item.label.endsWith(' Drivers'));
+        await addOpenFileToFavorites(provider);
+        assert.deepStrictEqual(groupPicks?.map(item => item.label), [
+            t('그룹 없음', 'No group'),
+            '$(folder) Boot',
+            '$(folder) Drivers',
+            t('$(add) 새 그룹…', '$(add) New group…')
+        ]);
+        assert.strictEqual(inputOptions.length, 0, '기존 그룹을 고르면 입력 창을 띄우지 않는다');
+        assert.deepStrictEqual(readSaved().at(-1), { title: 'main.c', path: '${workspaceFolder}/main.c', group: 'Drivers' });
+
+        groupChoice = items => items[0];
+        await addOpenFileToFavorites(provider);
+        assert.deepStrictEqual(readSaved().at(-1), { title: 'main.c', path: '${workspaceFolder}/main.c' });
+
+        groupChoice = items => items.at(-1);
+        inputValues = ['Tests'];
+        await addOpenFileToFavorites(provider);
+        assert.notStrictEqual(inputOptions[0].validateInput?.('  '), undefined, '새 그룹은 이름이 필요하다');
+        assert.deepStrictEqual(readSaved().at(-1), { title: 'main.c', path: '${workspaceFolder}/main.c', group: 'Tests' });
+
+        const before = fs.readFileSync(favoritesPath, 'utf8');
+        groupChoice = () => undefined;
+        await addOpenFileToFavorites(provider);
+        assert.strictEqual(fs.readFileSync(favoritesPath, 'utf8'), before, '그룹 선택을 취소하면 저장하지 않는다');
+    });
+});
+
+suite('파일 선택으로 즐겨찾기 일괄 추가 시 그룹 선택', function () {
+    this.timeout(15000);
+
+    const groupTitle = t('즐겨찾기 그룹 선택', 'Select Favorite Group');
+    let root: string;
+    let workspaceA: string;
+    let workspaceB: string;
+    let outsideFile: string;
+    let dialogResult: vscode.Uri[] | undefined;
+    let groupChoice: (items: vscode.QuickPickItem[]) => vscode.QuickPickItem | undefined;
+    let groupPicks: vscode.QuickPickItem[] | undefined;
+    let inputValues: Array<string | undefined>;
+    let inputCount: number;
+    let errors: string[];
+    let warnings: string[];
+    let restore: () => void;
+    const favoritesOf = (workspace: string): string => path.join(workspace, '.vscode', 'favorites.json');
+    const readSaved = (workspace: string): Array<Record<string, unknown>> => JSON.parse(fs.readFileSync(favoritesOf(workspace), 'utf8'));
+    const writeRaw = (workspace: string, text: string): void => {
+        fs.mkdirSync(path.dirname(favoritesOf(workspace)), { recursive: true });
+        fs.writeFileSync(favoritesOf(workspace), text);
+    };
+    const fileIn = (workspace: string, name: string): vscode.Uri => {
+        const file = path.join(workspace, name);
+        fs.writeFileSync(file, `// ${name}`);
+        return vscode.Uri.file(file);
+    };
+    const runAdd = async (): Promise<void> => {
+        await vscode.commands.executeCommand('taskhub.addFavoriteFile');
+    };
+
+    setup(() => {
+        root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-favorite-batch-')));
+        workspaceA = path.join(root, 'a');
+        workspaceB = path.join(root, 'b');
+        fs.mkdirSync(workspaceA);
+        fs.mkdirSync(workspaceB);
+        outsideFile = path.join(root, 'outside.c');
+        fs.writeFileSync(outsideFile, '// outside');
+        dialogResult = undefined;
+        groupChoice = items => items[0];
+        groupPicks = undefined;
+        inputValues = [];
+        inputCount = 0;
+        errors = [];
+        warnings = [];
+
+        const original = {
+            dialog: vscode.window.showOpenDialog,
+            pick: vscode.window.showQuickPick,
+            input: vscode.window.showInputBox,
+            information: vscode.window.showInformationMessage,
+            warning: vscode.window.showWarningMessage,
+            error: vscode.window.showErrorMessage,
+            folder: vscode.workspace.getWorkspaceFolder
+        };
+        restore = () => {
+            vscode.window.showOpenDialog = original.dialog;
+            vscode.window.showQuickPick = original.pick;
+            vscode.window.showInputBox = original.input;
+            vscode.window.showInformationMessage = original.information;
+            vscode.window.showWarningMessage = original.warning;
+            vscode.window.showErrorMessage = original.error;
+            vscode.workspace.getWorkspaceFolder = original.folder;
+        };
+        // 멀티 루트처럼 두 워크스페이스 폴더를 경로로 구분한다. root 바로 아래 파일은 어느 폴더에도 속하지 않는다.
+        (vscode.workspace as any).getWorkspaceFolder = (uri: vscode.Uri) => {
+            const owner = [workspaceA, workspaceB].findIndex(folder => {
+                const relative = path.relative(folder, uri.fsPath);
+                return relative.length > 0 && !relative.startsWith('..') && !path.isAbsolute(relative);
+            });
+            return owner < 0 ? undefined : { uri: vscode.Uri.file([workspaceA, workspaceB][owner]), name: `ws-${owner}`, index: owner };
+        };
+        (vscode.window as any).showOpenDialog = async () => dialogResult;
+        (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[], options?: vscode.QuickPickOptions) => {
+            assert.strictEqual(options?.title, groupTitle, '일괄 추가에서는 그룹 선택 창만 열려야 한다');
+            groupPicks = items;
+            return groupChoice(items);
+        };
+        (vscode.window as any).showInputBox = async () => {
+            inputCount++;
+            return inputValues.length > 0 ? inputValues.shift() : '';
+        };
+        (vscode.window as any).showInformationMessage = async () => undefined;
+        (vscode.window as any).showWarningMessage = async (message: string) => { warnings.push(message); return undefined; };
+        (vscode.window as any).showErrorMessage = async (message: string) => { errors.push(message); return undefined; };
+    });
+
+    teardown(async () => {
+        restore?.();
+        await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    });
+
+    test('IT-288: 두 워크스페이스의 그룹을 합쳐 보여 주고 고른 그룹을 모든 대상 파일에 저장한다', async () => {
+        writeRaw(workspaceA, JSON.stringify([{ title: 'Keep', path: 'keep.c', group: 'Drivers', custom: 1 }]));
+        writeRaw(workspaceB, JSON.stringify([
+            { title: 'Boot', path: 'boot.c', group: 'Boot' },
+            { title: 'Dup', path: 'dup.c', group: 'Drivers' }
+        ]));
+        dialogResult = [fileIn(workspaceA, 'a1.c'), fileIn(workspaceA, 'a2.c'), fileIn(workspaceB, 'b1.c'), vscode.Uri.file(outsideFile)];
+        groupChoice = items => items.find(item => item.label.endsWith(' Drivers'));
+        await runAdd();
+
+        assert.deepStrictEqual(groupPicks?.map(item => item.label), [
+            t('그룹 없음', 'No group'),
+            '$(folder) Boot',
+            '$(folder) Drivers',
+            t('$(add) 새 그룹…', '$(add) New group…')
+        ], '두 파일의 그룹을 중복 없이 정렬해 한 번만 보여 준다');
+        assert.strictEqual(inputCount, 0);
+        assert.deepStrictEqual(readSaved(workspaceA), [
+            { title: 'Keep', path: 'keep.c', group: 'Drivers', custom: 1 },
+            { title: 'a1.c', path: '${workspaceFolder}/a1.c', group: 'Drivers' },
+            { title: 'a2.c', path: '${workspaceFolder}/a2.c', group: 'Drivers' }
+        ]);
+        assert.deepStrictEqual(readSaved(workspaceB).at(-1), { title: 'b1.c', path: '${workspaceFolder}/b1.c', group: 'Drivers' });
+        assert.strictEqual(readSaved(workspaceB).length, 3);
+        assert.strictEqual(warnings.length, 1, '워크스페이스 밖 파일은 경고 후 건너뛴다');
+        assert.deepStrictEqual(errors, []);
+    });
+
+    test('IT-289: 기존 그룹이 없으면 입력으로 그룹을 정하거나 비워 두고, 취소하면 어떤 파일도 바꾸지 않는다', async () => {
+        dialogResult = [fileIn(workspaceA, 'a1.c'), fileIn(workspaceB, 'b1.c')];
+        inputValues = ['  Shared  '];
+        await runAdd();
+        assert.strictEqual(groupPicks, undefined, '그룹이 없으면 목록 대신 입력 창을 띄운다');
+        assert.strictEqual(inputCount, 1, '여러 파일이어도 한 번만 묻는다');
+        assert.deepStrictEqual(readSaved(workspaceA), [{ title: 'a1.c', path: '${workspaceFolder}/a1.c', group: 'Shared' }]);
+        assert.deepStrictEqual(readSaved(workspaceB), [{ title: 'b1.c', path: '${workspaceFolder}/b1.c', group: 'Shared' }]);
+
+        // 이제 그룹이 있으므로 목록이 뜬다. 취소하면 두 파일 모두 바이트 그대로다.
+        const beforeA = fs.readFileSync(favoritesOf(workspaceA), 'utf8');
+        const beforeB = fs.readFileSync(favoritesOf(workspaceB), 'utf8');
+        dialogResult = [fileIn(workspaceA, 'a2.c'), fileIn(workspaceB, 'b2.c')];
+        groupChoice = () => undefined;
+        await runAdd();
+        assert.ok(groupPicks, '기존 그룹이 있으면 목록을 띄운다');
+        assert.strictEqual(fs.readFileSync(favoritesOf(workspaceA), 'utf8'), beforeA);
+        assert.strictEqual(fs.readFileSync(favoritesOf(workspaceB), 'utf8'), beforeB);
+
+        // 입력 창 취소도 저장하지 않으며 없던 설정 디렉터리도 만들지 않는다.
+        fs.rmSync(path.dirname(favoritesOf(workspaceA)), { recursive: true });
+        dialogResult = [fileIn(workspaceA, 'a3.c')];
+        inputValues = [undefined];
+        await runAdd();
+        assert.strictEqual(fs.existsSync(path.dirname(favoritesOf(workspaceA))), false);
+
+        // 빈 입력은 그룹 없이 저장한다.
+        await runAdd();
+        assert.deepStrictEqual(readSaved(workspaceA), [{ title: 'a3.c', path: '${workspaceFolder}/a3.c' }]);
+        assert.deepStrictEqual(errors, []);
+    });
+
+    test('IT-290: 저장할 수 있는 대상이 없으면 그룹을 묻지 않고 손상 파일을 보존한다', async () => {
+        writeRaw(workspaceA, '[broken');
+        dialogResult = [fileIn(workspaceA, 'a1.c'), vscode.Uri.file(outsideFile)];
+        await runAdd();
+        assert.strictEqual(groupPicks, undefined);
+        assert.strictEqual(inputCount, 0);
+        assert.strictEqual(fs.readFileSync(favoritesOf(workspaceA), 'utf8'), '[broken');
+        assert.strictEqual(errors.length, 1, '손상된 favorites.json은 기존처럼 오류로 알린다');
+        assert.strictEqual(warnings.length, 1);
+
+        // 손상 파일과 정상 파일이 섞이면 정상 쪽 그룹만 보여 주고 정상 쪽에만 저장한다.
+        writeRaw(workspaceB, JSON.stringify([{ title: 'Boot', path: 'boot.c', group: 'Boot' }]));
+        errors = [];
+        dialogResult = [fileIn(workspaceA, 'a2.c'), fileIn(workspaceB, 'b1.c')];
+        groupChoice = items => items.find(item => item.label.endsWith(' Boot'));
+        await runAdd();
+        assert.strictEqual((groupPicks as vscode.QuickPickItem[] | undefined)?.length, 3);
+        assert.strictEqual(fs.readFileSync(favoritesOf(workspaceA), 'utf8'), '[broken');
+        assert.deepStrictEqual(readSaved(workspaceB).at(-1), { title: 'b1.c', path: '${workspaceFolder}/b1.c', group: 'Boot' });
+        assert.strictEqual(errors.length, 1);
     });
 });
 

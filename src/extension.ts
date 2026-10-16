@@ -4461,6 +4461,7 @@ import {
     FavoriteEntry,
     Favorite,
     FavoriteViewProvider,
+    FavoritesLoadResult,
     loadFavoritesFromDisk,
     readFavoritesFromDisk,
     removeFavoriteByIdentity,
@@ -5192,6 +5193,69 @@ export function addFavoriteEntry(
     return { entries: [...entries, newEntry], added: true };
 }
 
+/** Distinct, non-empty group names in tree order (same `localeCompare` sort as the Favorites view). */
+export function collectFavoriteGroups(entries: readonly FavoriteEntry[]): string[] {
+    const groups = new Set<string>();
+    for (const entry of entries) {
+        const group = entry.group?.trim();
+        if (group) {
+            groups.add(group);
+        }
+    }
+    return Array.from(groups).sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Ask which group a new favorite goes into. With existing groups the user
+ * picks one (or *No group* / *New group…*); without any, an optional input
+ * box lets them name one or leave it empty. Returns `undefined` on cancel
+ * so callers can abort the add, and `{ group: undefined }` for no group.
+ */
+export async function promptFavoriteGroup(existingGroups: readonly string[]): Promise<{ group: string | undefined } | undefined> {
+    const title = t('즐겨찾기 그룹 선택', 'Select Favorite Group');
+    const askNewGroup = async (required: boolean): Promise<{ group: string | undefined } | undefined> => {
+        const value = await vscode.window.showInputBox({
+            title,
+            prompt: required
+                ? t('새 그룹 이름을 입력하세요.', 'Enter a new group name.')
+                : t('그룹 이름을 입력하세요. 비워 두면 그룹 없이 추가합니다.', 'Enter a group name. Leave empty to add without a group.'),
+            placeHolder: t('그룹 이름', 'Group name'),
+            ignoreFocusOut: true,
+            validateInput: input => required && input.trim().length === 0
+                ? t('그룹 이름을 입력하세요.', 'Enter a group name.')
+                : undefined
+        });
+        if (value === undefined) {
+            return undefined;
+        }
+        const group = value.trim();
+        return { group: group.length > 0 ? group : undefined };
+    };
+
+    if (existingGroups.length === 0) {
+        return askNewGroup(false);
+    }
+
+    type GroupPick = vscode.QuickPickItem & { choice: 'none' | 'new' | 'existing'; group?: string };
+    const items: GroupPick[] = [
+        { label: t('그룹 없음', 'No group'), description: t('그룹 없이 추가합니다.', 'Add without a group.'), choice: 'none' },
+        ...existingGroups.map((group): GroupPick => ({ label: `$(folder) ${group}`, choice: 'existing', group })),
+        { label: t('$(add) 새 그룹…', '$(add) New group…'), description: t('새 그룹 이름을 입력합니다.', 'Enter a new group name.'), choice: 'new' }
+    ];
+    const selected = await vscode.window.showQuickPick(items, {
+        title,
+        placeHolder: t('즐겨찾기를 넣을 그룹을 선택하세요', 'Choose a group for the favorite'),
+        ignoreFocusOut: true
+    });
+    if (!selected) {
+        return undefined;
+    }
+    if (selected.choice === 'new') {
+        return askNewGroup(true);
+    }
+    return { group: selected.choice === 'existing' ? selected.group : undefined };
+}
+
 /** Add the active file, optionally remembering its current cursor line. */
 export async function addOpenFileToFavorites(favoriteViewProvider: Pick<FavoriteViewProvider, 'refresh'>): Promise<void> {
     const editor = vscode.window.activeTextEditor;
@@ -5230,15 +5294,18 @@ export async function addOpenFileToFavorites(favoriteViewProvider: Pick<Favorite
         return;
     }
 
-    // Read after the choice so edits made while the picker was open are preserved.
+    // Read after each choice so edits made while a picker was open are preserved.
     const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
-    const loadResult = readFavoritesFromDisk(favoritesPath, workspaceFolder.uri.fsPath);
-    if (!loadResult.ok) {
+    const loadFavorites = async (): Promise<Extract<FavoritesLoadResult, { ok: true }> | undefined> => {
+        const result = readFavoritesFromDisk(favoritesPath, workspaceFolder.uri.fsPath);
+        if (result.ok) {
+            return result;
+        }
         const openLabel = t('favorites.json 열기', 'Open favorites.json');
         const choice = await vscode.window.showErrorMessage(
             t(
-                `favorites.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${loadResult.error}`,
-                `Cannot save — failed to parse favorites.json: ${loadResult.error}`
+                `favorites.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${result.error}`,
+                `Cannot save — failed to parse favorites.json: ${result.error}`
             ),
             openLabel
         );
@@ -5246,6 +5313,18 @@ export async function addOpenFileToFavorites(favoriteViewProvider: Pick<Favorite
             const document = await vscode.workspace.openTextDocument(favoritesPath);
             await vscode.window.showTextDocument(document, { preview: false });
         }
+        return undefined;
+    };
+    const beforeGroup = await loadFavorites();
+    if (!beforeGroup) {
+        return;
+    }
+    const groupChoice = await promptFavoriteGroup(collectFavoriteGroups(beforeGroup.entries));
+    if (!groupChoice) {
+        return;
+    }
+    const loadResult = await loadFavorites();
+    if (!loadResult) {
         return;
     }
 
@@ -5255,6 +5334,7 @@ export async function addOpenFileToFavorites(favoriteViewProvider: Pick<Favorite
         title,
         path: toWorkspaceRelativePath(filePath, workspaceFolder.uri.fsPath),
         line,
+        group: groupChoice.group,
         sourceFile: favoritesPath,
         workspaceFolder: workspaceFolder.uri.fsPath
     };
@@ -5289,8 +5369,8 @@ export async function addOpenFileToFavorites(favoriteViewProvider: Pick<Favorite
 
     const choice = await vscode.window.showInformationMessage(
         t(
-            `'${favoriteLabel}' 항목이 favorites.json에 추가되었습니다. 제목/그룹/태그 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
-            `'${favoriteLabel}' was added to favorites.json. Edit favorites.json to configure title, group, or tags.`
+            `'${favoriteLabel}' 항목이 favorites.json에 추가되었습니다. 제목/태그 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
+            `'${favoriteLabel}' was added to favorites.json. Edit favorites.json to configure title or tags.`
         ),
         openLabel
     );
@@ -12987,10 +13067,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await promptFavoriteSearch(favoriteViewProvider);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addFavoriteFile', async (uri?: vscode.Uri) => {
-        // Simplified flow (v0.4.32): pick files → save with basename as
-        // title and relative path. No per-file title / line / group / tag
-        // prompts — the post-creation toast points the user at
-        // *favorites.json 열기* if they want to add metadata afterwards.
+        // Simplified flow (v0.4.32): pick files → choose one group for the
+        // batch → save with basename as title and relative path. No per-file
+        // title / line / tag prompts — the post-creation toast points the
+        // user at *favorites.json 열기* if they want to add metadata afterwards.
         // The dialog opens at the folder the user last added favorites from;
         // on the first use it falls back to the active editor's workspace
         // folder (instead of always folder[0]) so multi-root users land in
@@ -13007,6 +13087,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
         if (!fileUris || fileUris.length === 0) {
             return;
+        }
+
+        // One group for the whole batch. Offer every group already used in the
+        // target favorites.json files. Skip the prompt when nothing can be saved
+        // (all outside the workspace or broken) — the loop below reports those.
+        const checkedPaths = new Set<string>();
+        const groupSources = new Map<string, string[]>();
+        for (const fileUri of fileUris) {
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+            if (!workspaceFolder) {
+                continue;
+            }
+            const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
+            if (!checkedPaths.has(favoritesPath)) {
+                checkedPaths.add(favoritesPath);
+                const loadResult = readFavoritesFromDisk(favoritesPath, workspaceFolder.uri.fsPath);
+                if (loadResult.ok) {
+                    groupSources.set(favoritesPath, collectFavoriteGroups(loadResult.entries));
+                }
+            }
+        }
+        let group: string | undefined;
+        if (groupSources.size > 0) {
+            const groupChoice = await promptFavoriteGroup(
+                Array.from(new Set(Array.from(groupSources.values()).flat())).sort((a, b) => a.localeCompare(b))
+            );
+            if (!groupChoice) {
+                return;
+            }
+            group = groupChoice.group;
         }
 
         const favoritesByPath = new Map<string, FavoriteEntry[]>();
@@ -13049,6 +13159,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             const { entries: updatedFavorites, added } = addFavoriteEntry(favorites, {
                 title: path.basename(fileUri.fsPath),
                 path: toWorkspaceRelativePath(fileUri.fsPath, workspaceFolder.uri.fsPath),
+                group,
                 sourceFile: favoritesPath,
                 workspaceFolder: workspaceFolder.uri.fsPath
             });
@@ -13120,8 +13231,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 ? t(` (${tailKo.join(', ')})`, ` (${tailEn.join(', ')})`)
                 : '';
             const summary = t(
-                `${addedCount}개의 즐겨찾기가 favorites.json에 추가되었습니다${tail}. 제목/그룹/태그/줄 번호 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
-                `Added ${addedCount} favorite(s) to favorites.json${tail}. Edit favorites.json to configure title, group, tags, or line number.`
+                `${addedCount}개의 즐겨찾기가 favorites.json에 추가되었습니다${tail}. 제목/태그/줄 번호 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
+                `Added ${addedCount} favorite(s) to favorites.json${tail}. Edit favorites.json to configure title, tags, or line number.`
             );
             const openLabel = t('favorites.json 열기', 'Open favorites.json');
             const choice = await vscode.window.showInformationMessage(summary, openLabel);
