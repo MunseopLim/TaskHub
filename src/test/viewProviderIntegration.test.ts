@@ -210,21 +210,28 @@ suite('열려 있는 파일 즐겨찾기 등록 방식', function () {
         assert.strictEqual(refreshes, 1);
     });
 
-    test('IT-286: 기존 그룹이 없으면 선택 입력으로 새 그룹을 지정하거나 비워 둘 수 있다', async () => {
+    test('IT-286: 기존 그룹이 없어도 그룹 목록을 띄우고 새 그룹을 만들거나 그룹 없이 등록한다', async () => {
+        groupChoice = items => items.at(-1);
         inputValues = ['  Boot  '];
         await addOpenFileToFavorites(provider);
-        assert.strictEqual(groupPicks, undefined, '기존 그룹이 없으면 그룹 목록을 띄우지 않는다');
+        assert.deepStrictEqual(groupPicks?.map(item => item.label), [
+            t('$(circle-slash) 그룹 없음', '$(circle-slash) No group'),
+            t('$(add) 새 그룹…', '$(add) New group…')
+        ], '그룹이 없어도 그룹 선택 단계로 보이도록 목록을 띄운다');
         assert.strictEqual(inputOptions.length, 1);
         assert.strictEqual(inputOptions[0].ignoreFocusOut, true);
-        assert.strictEqual(inputOptions[0].validateInput?.(''), undefined, '빈 값은 그룹 없음으로 허용해야 한다');
         assert.deepStrictEqual(readSaved(), [{ title: 'main.c', path: '${workspaceFolder}/main.c', group: 'Boot' }]);
 
-        // 입력 취소는 등록 전체를 취소한다.
+        // 새 그룹 입력을 취소하면 등록 전체를 취소한다.
         fs.writeFileSync(favoritesPath, '[]');
         inputValues = [undefined];
         await addOpenFileToFavorites(provider);
         assert.strictEqual(fs.readFileSync(favoritesPath, 'utf8'), '[]');
         assert.strictEqual(refreshes, 1);
+
+        groupChoice = items => items[0];
+        await addOpenFileToFavorites(provider);
+        assert.deepStrictEqual(readSaved(), [{ title: 'main.c', path: '${workspaceFolder}/main.c' }]);
     });
 
     test('IT-287: 기존 그룹이 있으면 그룹 없음·기존 그룹·새 그룹 중에서 고른다', async () => {
@@ -237,7 +244,7 @@ suite('열려 있는 파일 즐겨찾기 등록 방식', function () {
         groupChoice = items => items.find(item => item.label.endsWith(' Drivers'));
         await addOpenFileToFavorites(provider);
         assert.deepStrictEqual(groupPicks?.map(item => item.label), [
-            t('그룹 없음', 'No group'),
+            t('$(circle-slash) 그룹 없음', '$(circle-slash) No group'),
             '$(folder) Boot',
             '$(folder) Drivers',
             t('$(add) 새 그룹…', '$(add) New group…')
@@ -366,7 +373,7 @@ suite('파일 선택으로 즐겨찾기 일괄 추가 시 그룹 선택', functi
         await runAdd();
 
         assert.deepStrictEqual(groupPicks?.map(item => item.label), [
-            t('그룹 없음', 'No group'),
+            t('$(circle-slash) 그룹 없음', '$(circle-slash) No group'),
             '$(folder) Boot',
             '$(folder) Drivers',
             t('$(add) 새 그룹…', '$(add) New group…')
@@ -383,33 +390,38 @@ suite('파일 선택으로 즐겨찾기 일괄 추가 시 그룹 선택', functi
         assert.deepStrictEqual(errors, []);
     });
 
-    test('IT-289: 기존 그룹이 없으면 입력으로 그룹을 정하거나 비워 두고, 취소하면 어떤 파일도 바꾸지 않는다', async () => {
+    test('IT-289: 기존 그룹이 없어도 목록에서 그룹을 정하거나 비워 두고, 취소하면 어떤 파일도 바꾸지 않는다', async () => {
         dialogResult = [fileIn(workspaceA, 'a1.c'), fileIn(workspaceB, 'b1.c')];
+        groupChoice = items => items.at(-1);
         inputValues = ['  Shared  '];
         await runAdd();
-        assert.strictEqual(groupPicks, undefined, '그룹이 없으면 목록 대신 입력 창을 띄운다');
+        assert.deepStrictEqual(groupPicks?.map(item => item.label), [
+            t('$(circle-slash) 그룹 없음', '$(circle-slash) No group'),
+            t('$(add) 새 그룹…', '$(add) New group…')
+        ], '그룹이 없어도 목록을 띄운다');
         assert.strictEqual(inputCount, 1, '여러 파일이어도 한 번만 묻는다');
         assert.deepStrictEqual(readSaved(workspaceA), [{ title: 'a1.c', path: '${workspaceFolder}/a1.c', group: 'Shared' }]);
         assert.deepStrictEqual(readSaved(workspaceB), [{ title: 'b1.c', path: '${workspaceFolder}/b1.c', group: 'Shared' }]);
 
-        // 이제 그룹이 있으므로 목록이 뜬다. 취소하면 두 파일 모두 바이트 그대로다.
+        // 목록을 취소하면 두 파일 모두 바이트 그대로다.
         const beforeA = fs.readFileSync(favoritesOf(workspaceA), 'utf8');
         const beforeB = fs.readFileSync(favoritesOf(workspaceB), 'utf8');
         dialogResult = [fileIn(workspaceA, 'a2.c'), fileIn(workspaceB, 'b2.c')];
         groupChoice = () => undefined;
         await runAdd();
-        assert.ok(groupPicks, '기존 그룹이 있으면 목록을 띄운다');
         assert.strictEqual(fs.readFileSync(favoritesOf(workspaceA), 'utf8'), beforeA);
         assert.strictEqual(fs.readFileSync(favoritesOf(workspaceB), 'utf8'), beforeB);
 
-        // 입력 창 취소도 저장하지 않으며 없던 설정 디렉터리도 만들지 않는다.
+        // 새 그룹 입력 취소도 저장하지 않으며 없던 설정 디렉터리도 만들지 않는다.
         fs.rmSync(path.dirname(favoritesOf(workspaceA)), { recursive: true });
         dialogResult = [fileIn(workspaceA, 'a3.c')];
+        groupChoice = items => items.at(-1);
         inputValues = [undefined];
         await runAdd();
         assert.strictEqual(fs.existsSync(path.dirname(favoritesOf(workspaceA))), false);
 
-        // 빈 입력은 그룹 없이 저장한다.
+        // 그룹 없음을 고르면 그룹 없이 저장한다.
+        groupChoice = items => items[0];
         await runAdd();
         assert.deepStrictEqual(readSaved(workspaceA), [{ title: 'a3.c', path: '${workspaceFolder}/a3.c' }]);
         assert.deepStrictEqual(errors, []);
@@ -435,6 +447,254 @@ suite('파일 선택으로 즐겨찾기 일괄 추가 시 그룹 선택', functi
         assert.strictEqual(fs.readFileSync(favoritesOf(workspaceA), 'utf8'), '[broken');
         assert.deepStrictEqual(readSaved(workspaceB).at(-1), { title: 'b1.c', path: '${workspaceFolder}/b1.c', group: 'Boot' });
         assert.strictEqual(errors.length, 1);
+    });
+});
+
+suite('링크 추가 시 그룹 선택', function () {
+    this.timeout(15000);
+
+    const groupTitle = t('링크 그룹 선택', 'Select Link Group');
+    let linksPath: string;
+    let directoryExisted: boolean;
+    let previous: Buffer | undefined;
+    let url: string;
+    let title: string;
+    let groupChoice: (items: vscode.QuickPickItem[]) => vscode.QuickPickItem | undefined;
+    let groupPicks: vscode.QuickPickItem[] | undefined;
+    let groupPickOptions: vscode.QuickPickOptions | undefined;
+    let groupInputs: vscode.InputBoxOptions[];
+    let inputValues: Array<string | undefined>;
+    let duringGroup: (() => void) | undefined;
+    let messages: string[];
+    let errors: string[];
+    let restore: () => void;
+    const readSaved = (): Array<Record<string, unknown>> => JSON.parse(fs.readFileSync(linksPath, 'utf8'));
+    // 파일 감시자도 손상된 links.json을 알릴 수 있으므로 저장 거부 오류만 센다.
+    const saveErrors = (): string[] => errors.filter(message => message.includes(t('저장할 수 없습니다', 'Cannot save')));
+    const writeRaw = (text: string): void => {
+        fs.mkdirSync(path.dirname(linksPath), { recursive: true });
+        fs.writeFileSync(linksPath, text);
+    };
+    const runAdd = async (): Promise<void> => {
+        groupPicks = undefined;
+        groupInputs = [];
+        await vscode.commands.executeCommand('taskhub.addLink');
+    };
+
+    setup(async () => {
+        const extension = vscode.extensions.getExtension('Munseop.taskhub');
+        assert.ok(extension);
+        await extension.activate();
+        const folders = vscode.workspace.workspaceFolders;
+        assert.strictEqual(folders?.length, 1, 'test workspace must have one folder');
+        linksPath = path.join(folders![0].uri.fsPath, '.vscode', 'links.json');
+        directoryExisted = fs.existsSync(path.dirname(linksPath));
+        previous = fs.existsSync(linksPath) ? fs.readFileSync(linksPath) : undefined;
+        fs.rmSync(linksPath, { force: true });
+        url = 'https://example.com/docs';
+        title = 'Docs';
+        groupChoice = items => items[0];
+        groupPicks = undefined;
+        groupPickOptions = undefined;
+        groupInputs = [];
+        inputValues = [];
+        duringGroup = undefined;
+        messages = [];
+        errors = [];
+
+        const original = {
+            pick: vscode.window.showQuickPick,
+            input: vscode.window.showInputBox,
+            createInput: vscode.window.createInputBox,
+            information: vscode.window.showInformationMessage,
+            error: vscode.window.showErrorMessage,
+            clipboard: Object.getOwnPropertyDescriptor(vscode.env, 'clipboard')
+        };
+        assert.ok(original.clipboard);
+        restore = () => {
+            vscode.window.showQuickPick = original.pick;
+            vscode.window.showInputBox = original.input;
+            vscode.window.createInputBox = original.createInput;
+            vscode.window.showInformationMessage = original.information;
+            vscode.window.showErrorMessage = original.error;
+            Object.defineProperty(vscode.env, 'clipboard', original.clipboard!);
+        };
+        Object.defineProperty(vscode.env, 'clipboard', { configurable: true, value: { readText: async () => '' } });
+        (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[], options?: vscode.QuickPickOptions) => {
+            assert.strictEqual(options?.title, groupTitle, '링크 추가에서는 그룹 선택 창만 열려야 한다');
+            groupPicks = items;
+            groupPickOptions = options;
+            duringGroup?.();
+            return groupChoice(items);
+        };
+        // 그룹 입력 창에는 title이 있고, 앞선 URL 입력 창에는 없다.
+        (vscode.window as any).showInputBox = async (options: vscode.InputBoxOptions) => {
+            if (options.title !== groupTitle) {
+                return url;
+            }
+            groupInputs.push(options);
+            duringGroup?.();
+            return inputValues.length > 0 ? inputValues.shift() : '';
+        };
+        // 제목 입력은 제안값을 바꿔 바로 확정한다 — 제목 조회는 확정과 함께 중단된다.
+        (vscode.window as any).createInputBox = () => {
+            const accept = new vscode.EventEmitter<void>();
+            const noopEvent = () => new vscode.Disposable(() => {});
+            return {
+                value: '',
+                onDidChangeValue: noopEvent,
+                onDidAccept: accept.event,
+                onDidHide: noopEvent,
+                show() { this.value = title; accept.fire(); },
+                dispose() { accept.dispose(); }
+            };
+        };
+        (vscode.window as any).showInformationMessage = async (message: string) => { messages.push(message); return undefined; };
+        (vscode.window as any).showErrorMessage = async (message: string) => { errors.push(message); return undefined; };
+    });
+
+    teardown(() => {
+        restore?.();
+        if (previous !== undefined) {
+            fs.writeFileSync(linksPath, previous);
+        } else {
+            fs.rmSync(linksPath, { force: true });
+            if (!directoryExisted && fs.existsSync(path.dirname(linksPath))) {
+                fs.rmdirSync(path.dirname(linksPath));
+            }
+        }
+    });
+
+    test('IT-291: 기존 그룹이 없어도 그룹 목록을 띄우고, 새 그룹·그룹 없음·취소를 처리한다', async () => {
+        groupChoice = items => items.at(-1);
+        inputValues = [undefined];
+        await runAdd();
+        assert.deepStrictEqual(groupPicks?.map(item => item.label), [
+            t('$(circle-slash) 그룹 없음', '$(circle-slash) No group'),
+            t('$(add) 새 그룹…', '$(add) New group…')
+        ], '그룹이 없어도 그룹 선택 단계로 보이도록 목록을 띄운다');
+        assert.strictEqual(groupInputs.length, 1);
+        assert.strictEqual(fs.existsSync(linksPath), false, '새 그룹 입력을 취소하면 links.json을 만들지 않는다');
+
+        inputValues = ['  Team  '];
+        await runAdd();
+        assert.strictEqual(groupInputs[0].ignoreFocusOut, true);
+        assert.deepStrictEqual(readSaved(), [{ title: 'Docs', link: url, group: 'Team' }]);
+        assert.ok(messages.includes(t(
+            `'Docs' 링크를 'Team' 그룹에 추가했습니다. 태그 등 추가 설정이 필요하면 links.json을 편집하세요.`,
+            `Added link 'Docs' to group 'Team'. Edit links.json to configure tags or other metadata.`
+        )), '완료 알림에 들어간 그룹을 보여 준다');
+
+        writeRaw('[]');
+        url = 'https://example.com/other';
+        title = 'Other';
+        groupChoice = items => items[0];
+        await runAdd();
+        assert.deepStrictEqual(readSaved(), [{ title: 'Other', link: url }], '그룹 없음은 group 없이 저장한다');
+        assert.ok(messages.includes(t(
+            `'Other' 링크가 links.json에 추가되었습니다. 태그 등 추가 설정이 필요하면 links.json을 편집하세요.`,
+            `Link 'Other' was added to links.json. Edit it to configure tags or other metadata.`
+        )));
+        assert.deepStrictEqual(saveErrors(), []);
+    });
+
+    test('IT-292: 기존 그룹이 있으면 그룹 없음·기존 그룹·새 그룹 중에서 고른다', async () => {
+        const original = [
+            { title: 'Google', link: 'https://google.com', group: 'Search', extra: { keep: true } },
+            { title: 'Wiki', link: 'https://wiki.example.com', group: 'Docs' },
+            { title: 'Plain', link: 'https://plain.example.com' }
+        ];
+        writeRaw(JSON.stringify(original));
+        groupChoice = items => items.find(item => item.label.endsWith(' Search'));
+        await runAdd();
+        assert.deepStrictEqual(groupPicks?.map(item => item.label), [
+            t('$(circle-slash) 그룹 없음', '$(circle-slash) No group'),
+            '$(folder) Docs',
+            '$(folder) Search',
+            t('$(add) 새 그룹…', '$(add) New group…')
+        ]);
+        assert.strictEqual(groupPickOptions?.placeHolder, t('링크를 넣을 그룹을 선택하세요', 'Choose a group for the link'));
+        assert.strictEqual(groupPickOptions?.ignoreFocusOut, true);
+        assert.strictEqual(groupInputs.length, 0);
+        assert.deepStrictEqual(readSaved(), [...original, { title: 'Docs', link: url, group: 'Search' }],
+            '기존 항목과 알 수 없는 필드를 보존한다');
+
+        url = 'https://example.com/new';
+        title = 'New';
+        groupChoice = items => items[items.length - 1];
+        inputValues = ['  Fresh  '];
+        await runAdd();
+        assert.strictEqual(groupInputs.length, 1);
+        assert.strictEqual(groupInputs[0].validateInput?.('   '), t('그룹 이름을 입력하세요.', 'Enter a group name.'),
+            '새 그룹은 빈 이름을 받지 않는다');
+        assert.deepStrictEqual(readSaved().at(-1), { title: 'New', link: url, group: 'Fresh' });
+
+        url = 'https://example.com/none';
+        title = 'None';
+        groupChoice = items => items[0];
+        await runAdd();
+        assert.deepStrictEqual(readSaved().at(-1), { title: 'None', link: url });
+
+        const before = fs.readFileSync(linksPath, 'utf8');
+        url = 'https://example.com/cancel';
+        groupChoice = () => undefined;
+        await runAdd();
+        assert.strictEqual(fs.readFileSync(linksPath, 'utf8'), before, '목록을 취소하면 저장하지 않는다');
+        groupChoice = items => items[items.length - 1];
+        inputValues = [undefined];
+        await runAdd();
+        assert.strictEqual(fs.readFileSync(linksPath, 'utf8'), before, '새 그룹 입력을 취소해도 저장하지 않는다');
+        assert.deepStrictEqual(saveErrors(), []);
+    });
+
+    test('IT-293: 중복·손상된 links.json은 그룹을 묻지 않고, 선택 중 바뀐 내용을 보존한다', async () => {
+        // 그룹과 관계없이 제목·URL이 같으면 그룹을 묻기 전에 거절한다.
+        const grouped = JSON.stringify([{ title: 'Docs', link: url, group: 'Search' }]);
+        writeRaw(grouped);
+        await runAdd();
+        assert.strictEqual(groupPicks, undefined);
+        assert.strictEqual(groupInputs.length, 0);
+        assert.strictEqual(fs.readFileSync(linksPath, 'utf8'), grouped);
+        assert.ok(messages.includes(t('이 링크는 links.json에 이미 존재합니다.', 'This link already exists in links.json.')));
+
+        writeRaw('[broken');
+        await runAdd();
+        assert.strictEqual(groupPicks, undefined);
+        assert.strictEqual(groupInputs.length, 0);
+        assert.strictEqual(fs.readFileSync(linksPath, 'utf8'), '[broken');
+        assert.strictEqual(saveErrors().length, 1);
+
+        // 그룹을 고르는 동안 추가된 항목과 무효 항목은 저장 후에도 남는다.
+        writeRaw(JSON.stringify([{ title: 'Wiki', link: 'https://wiki.example.com', group: 'Docs' }]));
+        duringGroup = () => writeRaw(JSON.stringify([
+            { title: 'Wiki', link: 'https://wiki.example.com', group: 'Docs' },
+            42,
+            { title: 'Late', link: 'https://late.example.com' }
+        ]));
+        groupChoice = items => items.find(item => item.label.endsWith(' Docs'));
+        await runAdd();
+        assert.deepStrictEqual(readSaved(), [
+            { title: 'Wiki', link: 'https://wiki.example.com', group: 'Docs' },
+            42,
+            { title: 'Late', link: 'https://late.example.com' },
+            { title: 'Docs', link: url, group: 'Docs' }
+        ]);
+
+        // 선택 중 같은 링크가 추가되면 중복으로 거절하고, 파일이 손상되면 덮어쓰지 않는다.
+        messages = [];
+        url = 'https://example.com/race';
+        const raced = JSON.stringify([{ title: 'Docs', link: url }]);
+        duringGroup = () => writeRaw(raced);
+        await runAdd();
+        assert.strictEqual(fs.readFileSync(linksPath, 'utf8'), raced);
+        assert.ok(messages.includes(t('이 링크는 links.json에 이미 존재합니다.', 'This link already exists in links.json.')));
+
+        url = 'https://example.com/broken';
+        groupChoice = items => items[0];
+        duringGroup = () => writeRaw('[broken');
+        await runAdd();
+        assert.strictEqual(fs.readFileSync(linksPath, 'utf8'), '[broken');
+        assert.strictEqual(saveErrors().length, 2);
     });
 });
 

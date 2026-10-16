@@ -4451,6 +4451,7 @@ import {
     LinkEntry,
     Link,
     LinkViewProvider,
+    LinksLoadResult,
     loadLinksFromDisk,
     readLinksFromDisk,
     mergeInvalidJsonEntries,
@@ -4754,7 +4755,7 @@ export function serializeLinks(entries: LinkEntry[]): any[] {
 export function addLinkEntry(entries: LinkEntry[], newEntry: LinkEntry): { entries: LinkEntry[]; added: boolean } {
     const trimmedTitle = newEntry.title.trim();
     const trimmedLink = newEntry.link.trim();
-    // 추가 화면은 그룹·태그를 받지 않으므로 기존 링크의 그룹 없는 사본을 막는다.
+    // 추가 화면은 태그를 받지 않고 그룹도 새로 고를 수 있으므로, 그룹·태그만 다른 사본을 막는다.
     // 편집·삭제는 이미 구분된 항목을 선택하므로 아래의 전체 identity를 사용한다.
     const duplicate = entries.some(entry => entry.title === trimmedTitle && entry.link === trimmedLink);
     if (duplicate) {
@@ -5193,8 +5194,8 @@ export function addFavoriteEntry(
     return { entries: [...entries, newEntry], added: true };
 }
 
-/** Distinct, non-empty group names in tree order (same `localeCompare` sort as the Favorites view). */
-export function collectFavoriteGroups(entries: readonly FavoriteEntry[]): string[] {
+/** Distinct, non-empty group names in tree order (same `localeCompare` sort as the Favorites / Links views). */
+export function collectEntryGroups(entries: readonly { group?: string }[]): string[] {
     const groups = new Set<string>();
     for (const entry of entries) {
         const group = entry.group?.trim();
@@ -5206,52 +5207,47 @@ export function collectFavoriteGroups(entries: readonly FavoriteEntry[]): string
 }
 
 /**
- * Ask which group a new favorite goes into. With existing groups the user
- * picks one (or *No group* / *New group…*); without any, an optional input
- * box lets them name one or leave it empty. Returns `undefined` on cancel
- * so callers can abort the add, and `{ group: undefined }` for no group.
+ * Ask which group a new favorite or link goes into. The picker always opens —
+ * even with no existing groups — so the step reads as a group choice rather
+ * than another text box: *No group*, existing groups, or *New group…* (a
+ * required name). Returns `undefined` on cancel so callers can abort the
+ * add, and `{ group: undefined }` for no group.
  */
-export async function promptFavoriteGroup(existingGroups: readonly string[]): Promise<{ group: string | undefined } | undefined> {
-    const title = t('즐겨찾기 그룹 선택', 'Select Favorite Group');
-    const askNewGroup = async (required: boolean): Promise<{ group: string | undefined } | undefined> => {
-        const value = await vscode.window.showInputBox({
-            title,
-            prompt: required
-                ? t('새 그룹 이름을 입력하세요.', 'Enter a new group name.')
-                : t('그룹 이름을 입력하세요. 비워 두면 그룹 없이 추가합니다.', 'Enter a group name. Leave empty to add without a group.'),
-            placeHolder: t('그룹 이름', 'Group name'),
-            ignoreFocusOut: true,
-            validateInput: input => required && input.trim().length === 0
-                ? t('그룹 이름을 입력하세요.', 'Enter a group name.')
-                : undefined
-        });
-        if (value === undefined) {
-            return undefined;
-        }
-        const group = value.trim();
-        return { group: group.length > 0 ? group : undefined };
-    };
-
-    if (existingGroups.length === 0) {
-        return askNewGroup(false);
-    }
+export async function promptEntryGroup(
+    existingGroups: readonly string[],
+    kind: 'favorite' | 'link'
+): Promise<{ group: string | undefined } | undefined> {
+    const title = kind === 'favorite'
+        ? t('즐겨찾기 그룹 선택', 'Select Favorite Group')
+        : t('링크 그룹 선택', 'Select Link Group');
 
     type GroupPick = vscode.QuickPickItem & { choice: 'none' | 'new' | 'existing'; group?: string };
     const items: GroupPick[] = [
-        { label: t('그룹 없음', 'No group'), description: t('그룹 없이 추가합니다.', 'Add without a group.'), choice: 'none' },
+        { label: t('$(circle-slash) 그룹 없음', '$(circle-slash) No group'), description: t('그룹 없이 추가합니다.', 'Add without a group.'), choice: 'none' },
         ...existingGroups.map((group): GroupPick => ({ label: `$(folder) ${group}`, choice: 'existing', group })),
         { label: t('$(add) 새 그룹…', '$(add) New group…'), description: t('새 그룹 이름을 입력합니다.', 'Enter a new group name.'), choice: 'new' }
     ];
     const selected = await vscode.window.showQuickPick(items, {
         title,
-        placeHolder: t('즐겨찾기를 넣을 그룹을 선택하세요', 'Choose a group for the favorite'),
+        placeHolder: kind === 'favorite'
+            ? t('즐겨찾기를 넣을 그룹을 선택하세요', 'Choose a group for the favorite')
+            : t('링크를 넣을 그룹을 선택하세요', 'Choose a group for the link'),
         ignoreFocusOut: true
     });
     if (!selected) {
         return undefined;
     }
     if (selected.choice === 'new') {
-        return askNewGroup(true);
+        const value = await vscode.window.showInputBox({
+            title,
+            prompt: t('새 그룹 이름을 입력하세요.', 'Enter a new group name.'),
+            placeHolder: t('그룹 이름', 'Group name'),
+            ignoreFocusOut: true,
+            validateInput: input => input.trim().length === 0
+                ? t('그룹 이름을 입력하세요.', 'Enter a group name.')
+                : undefined
+        });
+        return value === undefined ? undefined : { group: value.trim() };
     }
     return { group: selected.choice === 'existing' ? selected.group : undefined };
 }
@@ -5319,7 +5315,7 @@ export async function addOpenFileToFavorites(favoriteViewProvider: Pick<Favorite
     if (!beforeGroup) {
         return;
     }
-    const groupChoice = await promptFavoriteGroup(collectFavoriteGroups(beforeGroup.entries));
+    const groupChoice = await promptEntryGroup(collectEntryGroups(beforeGroup.entries), 'favorite');
     if (!groupChoice) {
         return;
     }
@@ -12977,9 +12973,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await promptWorkspaceLinkEdit(workspaceLinkViewProvider, item);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addLink', async () => {
-        // URL → title suggestion (editable while loading) → save.
-        // Group / tags are no longer prompted — the post-creation toast
-        // points the user at *links.json 열기* if they want to add metadata.
+        // URL → title suggestion (editable while loading) → group → save.
+        // Tags are not prompted — the post-creation toast points the user
+        // at *links.json 열기* if they want to add more metadata.
         // Save-time scheme validation is wired in here so a typo (e.g.
         // `localhost:3000` without scheme) is caught immediately, not at
         // first click as before. Broken links.json refuses to save and
@@ -13007,14 +13003,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             return;
         }
 
+        // Read after each prompt so edits made while one was open are preserved.
         const linksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
-        const loadResult = readLinksFromDisk(linksPath);
-        if (!loadResult.ok) {
+        const loadLinks = async (): Promise<Extract<LinksLoadResult, { ok: true }> | undefined> => {
+            const result = readLinksFromDisk(linksPath);
+            if (result.ok) {
+                return result;
+            }
             const openLabel = t('links.json 열기', 'Open links.json');
             const choice = await vscode.window.showErrorMessage(
                 t(
-                    `links.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${loadResult.error}`,
-                    `Cannot save — failed to parse links.json: ${loadResult.error}`
+                    `links.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${result.error}`,
+                    `Cannot save — failed to parse links.json: ${result.error}`
                 ),
                 openLabel
             );
@@ -13022,15 +13022,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 const document = await vscode.workspace.openTextDocument(linksPath);
                 await vscode.window.showTextDocument(document, { preview: false });
             }
-            return;
-        }
-
-        const { entries: updatedLinks, added } = addLinkEntry(loadResult.entries, {
-            title,
-            link: url,
-            sourceFile: linksPath
-        });
-        if (!added) {
+            return undefined;
+        };
+        const newLink: LinkEntry = { title, link: url, sourceFile: linksPath };
+        const showDuplicate = async (): Promise<void> => {
             const openLabel = t('links.json 열기', 'Open links.json');
             const choice = await vscode.window.showInformationMessage(
                 t('이 링크는 links.json에 이미 존재합니다.', 'This link already exists in links.json.'),
@@ -13040,6 +13035,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 const document = await vscode.workspace.openTextDocument(linksPath);
                 await vscode.window.showTextDocument(document, { preview: false });
             }
+        };
+
+        const beforeGroup = await loadLinks();
+        if (!beforeGroup) {
+            return;
+        }
+        // Duplicates ignore the group, so reject before asking for one.
+        if (!addLinkEntry(beforeGroup.entries, newLink).added) {
+            await showDuplicate();
+            return;
+        }
+        const groupChoice = await promptEntryGroup(collectEntryGroups(beforeGroup.entries), 'link');
+        if (!groupChoice) {
+            return;
+        }
+        const loadResult = await loadLinks();
+        if (!loadResult) {
+            return;
+        }
+
+        const { entries: updatedLinks, added } = addLinkEntry(loadResult.entries, { ...newLink, group: groupChoice.group });
+        if (!added) {
+            await showDuplicate();
             return;
         }
 
@@ -13051,11 +13069,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         workspaceLinkViewProvider.refresh();
 
         const openLabel = t('links.json 열기', 'Open links.json');
+        const group = groupChoice.group;
         const choice = await vscode.window.showInformationMessage(
-            t(
-                `'${title}' 링크가 links.json에 추가되었습니다. 그룹/태그 등 추가 설정이 필요하면 links.json을 편집하세요.`,
-                `Link '${title}' was added to links.json. Edit it to configure group, tags, or other metadata.`
-            ),
+            group === undefined
+                ? t(
+                    `'${title}' 링크가 links.json에 추가되었습니다. 태그 등 추가 설정이 필요하면 links.json을 편집하세요.`,
+                    `Link '${title}' was added to links.json. Edit it to configure tags or other metadata.`
+                )
+                : t(
+                    `'${title}' 링크를 '${group}' 그룹에 추가했습니다. 태그 등 추가 설정이 필요하면 links.json을 편집하세요.`,
+                    `Added link '${title}' to group '${group}'. Edit links.json to configure tags or other metadata.`
+                ),
             openLabel
         );
         if (choice === openLabel) {
@@ -13104,14 +13128,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 checkedPaths.add(favoritesPath);
                 const loadResult = readFavoritesFromDisk(favoritesPath, workspaceFolder.uri.fsPath);
                 if (loadResult.ok) {
-                    groupSources.set(favoritesPath, collectFavoriteGroups(loadResult.entries));
+                    groupSources.set(favoritesPath, collectEntryGroups(loadResult.entries));
                 }
             }
         }
         let group: string | undefined;
         if (groupSources.size > 0) {
-            const groupChoice = await promptFavoriteGroup(
-                Array.from(new Set(Array.from(groupSources.values()).flat())).sort((a, b) => a.localeCompare(b))
+            const groupChoice = await promptEntryGroup(
+                Array.from(new Set(Array.from(groupSources.values()).flat())).sort((a, b) => a.localeCompare(b)),
+                'favorite'
             );
             if (!groupChoice) {
                 return;
