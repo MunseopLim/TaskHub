@@ -1272,6 +1272,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 }
                 lines.push(`  passTheResultToNextTask: ${task.passTheResultToNextTask ? 'true' : 'false'}`);
                 if (task.isOneShot) { lines.push(`  isOneShot: true`); }
+                if (task.interactiveTerminal === true) { lines.push(`  interactiveTerminal: true`); }
                 interpolated.push(command ?? '', ...args, cwd, ...Object.values(env));
                 break;
             }

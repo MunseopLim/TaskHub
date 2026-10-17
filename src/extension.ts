@@ -3378,8 +3378,9 @@ function notifySecretFileWrite(taskId: string, displayPath: string): void {
 }
 
 /**
- * 비밀 영속화 정책 위반. **메시지에 비밀이 없다** — 태스크 id 와 켜야 할 플래그
- * 이름뿐이라, 비밀 태스크의 실패를 가리는 래퍼를 통과시킨다.
+ * 비밀 취급 정책 위반(파일 영속화 opt-in, 대화형 터미널 거부). **메시지에 비밀이
+ * 없다** — 태스크 id 와 필드 이름뿐이라, 비밀 태스크의 실패를 가리는 래퍼를
+ * 통과시킨다.
  */
 export class SecretContentPolicyError extends Error {
     constructor(message: string) {
@@ -6086,6 +6087,9 @@ async function executeActionPipelineForRun(
         if (task.isOneShot === true) {
             throw new Error(t(`태스크 '${task.id}'에서 'forEach'와 'isOneShot'을 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`));
         }
+        if (task.interactiveTerminal === true) {
+            throw new Error(t(`태스크 '${task.id}'에서 'forEach'와 'interactiveTerminal'을 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'forEach' with 'interactiveTerminal'.`));
+        }
         const hasEachProducer = action.tasks.some(candidate => candidate !== task && candidate.id === 'each');
         if (typeof task.when?.var === 'string'
             && extractVariableHeads(task.when.var).includes('each')
@@ -7909,6 +7913,9 @@ async function executeForEachTask(
     if (task.isOneShot === true) {
         throw new Error(t(`태스크 '${task.id}'에서 'forEach'와 'isOneShot'을 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`));
     }
+    if (task.interactiveTerminal === true) {
+        throw new Error(t(`태스크 '${task.id}'에서 'forEach'와 'interactiveTerminal'을 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'forEach' with 'interactiveTerminal'.`));
+    }
 
     const baseContext = Object.assign(Object.create(null), builtinVariables, allResults);
     const items = resolveForEachItems(task.forEach, baseContext);
@@ -8345,6 +8352,26 @@ async function executeSingleTask(
         }
         case 'command':
         case 'shell':
+            // 대화형 터미널은 사용자가 입력하는 일반 터미널이어야 한다. 캡처
+            // 경로에는 입력이 없고, 민감한 값을 쓰는 태스크는 터미널에 띄우지
+            // 않는다(캡처 또는 터미널 없는 백그라운드 실행). 어느 쪽으로 보내도
+            // 이번 `nohup` 사례처럼 아무 신호 없이 끝나므로 실행 전에 거부한다.
+            // 안내에는 비밀이 없으므로 민감 태스크의 실패 가림을 통과하는
+            // 정책 오류로 던진다 — 가려지면 고치는 방법을 볼 수 없다.
+            if (task.interactiveTerminal === true) {
+                if (task.passTheResultToNextTask === true) {
+                    throw new SecretContentPolicyError(t(
+                        `태스크 '${task.id}'에서 'interactiveTerminal'과 'passTheResultToNextTask'를 함께 사용할 수 없습니다. 출력 캡처에는 터미널 입력이 연결되지 않습니다.`,
+                        `Task '${task.id}' cannot combine 'interactiveTerminal' with 'passTheResultToNextTask'. Captured execution has no terminal input.`
+                    ));
+                }
+                if (taskUsesSensitiveData) {
+                    throw new SecretContentPolicyError(t(
+                        `태스크 '${task.id}'는 password·환경변수·클립보드·선택 텍스트 값을 사용하므로 'interactiveTerminal'로 실행할 수 없습니다. 민감한 값은 터미널에 표시하지 않습니다.`,
+                        `Task '${task.id}' uses a password, environment variable, clipboard, or selected-text value, so it cannot run with 'interactiveTerminal'. Sensitive values are never shown in a terminal.`
+                    ));
+                }
+            }
             // `command`(argv) 는 **토큰 경계를 보존하며** 보간한다 — 보간값의
             // 공백이 새 인자를 만들지 못하게(옵션 주입·경로 분리 차단).
             // `shell`(raw) 은 문자열을 셸에 그대로 넘기는 계약이라 그대로 둔다.
@@ -8403,7 +8430,7 @@ async function executeSingleTask(
             const redactedCwd = buildRedactedDisplayValue(executionRun, interpolationContext, task.cwd, interpolatedCwd);
             const runLogOutputAvailability: TaskRunLogOutputAvailability = taskUsesSensitiveData
                 ? 'redacted'
-                : task.isOneShot
+                : task.isOneShot && task.interactiveTerminal !== true
                     ? 'background-one-shot'
                     : task.passTheResultToNextTask
                         ? 'captured'
@@ -8481,7 +8508,14 @@ async function executeSingleTask(
                     throw err;
                 }
             } else {
-                if (task.isOneShot) {
+                if (task.isOneShot && task.interactiveTerminal === true) {
+                    // 대화형 터미널에 띄운 뒤의 세션은 사용자 몫이라 그 종료 코드
+                    // (Ctrl+C 등)는 결과로 쓰지 않는다. 다만 **시작 요청이
+                    // 받아들여질 때까지는 기다린다** — 요청이 거절됐는데 성공으로
+                    // 마감하거나, 아직 터미널이 뜨지 않았는데 다음 태스크로
+                    // 넘어가면 안 된다.
+                    await executeStreamedTask(handlerTask, defaultWorkspace, { settleOnLaunch: true });
+                } else if (task.isOneShot) {
                     if (taskUsesSensitiveData) {
                         executeSensitiveBackgroundOneShot(handlerTask, defaultWorkspace);
                     } else {
@@ -8979,6 +9013,7 @@ function resolveTaskCwd(cwd: string | undefined, workspaceFolderPath?: string): 
 
 function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExecutionSetup {
     const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv, isOneShot } = task;
+    const interactiveTerminal = task.interactiveTerminal === true;
     if (typeof command !== 'string') {
         throw new Error(t(`태스크 '${id}'에는 문자열 'command' 속성이 필요합니다.`, `Task ${id} requires a string 'command' property.`));
     }
@@ -8997,7 +9032,10 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
     let shellExecution: vscode.ShellExecution | vscode.ProcessExecution;
     let displayCommand: string;
 
-    if (isOneShot) {
+    // 대화형 터미널은 one-shot 이어도 `nohup … &` 로 감싸지 않는다. 감싸면
+    // 터미널 입력이 끊겨 프로그램이 화면을 그리지 못하고 바로 끝난다. 기다리지
+    // 않는 처리는 호출자(`settleOnLaunch`)가 맡는다.
+    if (isOneShot && !interactiveTerminal) {
         // Effective env the one-shot child runs with (VS Code merges options.env
         // onto the parent env) — used so `task.env.PATH` extensions are honoured
         // when judging launchability.
@@ -9037,6 +9075,11 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
         revealTerminal,
         { taskId: task.id, isParallel: isParallelActionActive(actionKey) }
     );
+    if (interactiveTerminal) {
+        // 실행 직후 바로 입력할 수 있게 한다. 일반 태스크 터미널은 포커스를
+        // 가져가지 않아 사용자가 터미널을 클릭해야 했다.
+        vsCodeTask.presentationOptions.focus = true;
+    }
     if (task.redactOutput === true) {
         // VS Code normally echoes the exact ShellExecution command into the
         // terminal. The audit display above is redacted, but the execution
@@ -9052,7 +9095,16 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
     };
 }
 
-async function executeStreamedTask(task: any, workspaceFolderPath?: string): Promise<void> {
+/**
+ * @param options.settleOnLaunch 실행 요청이 받아들여지면 곧바로 완료한다.
+ *   대화형 터미널 one-shot 은 사용자가 세션을 끝낼 때까지 살아 있으므로 그
+ *   종료 코드를 태스크 결과로 보고하지 않는다.
+ */
+async function executeStreamedTask(
+    task: any,
+    workspaceFolderPath?: string,
+    options: { settleOnLaunch?: boolean } = {}
+): Promise<void> {
     return new Promise(async (resolve, reject) => {
         let setup: TaskExecutionSetup;
         try {
@@ -9092,7 +9144,9 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
             // returns its TaskExecution. Applying the stale-run fence here
             // would immediately kill the very background job one-shot asked
             // us to keep. Ordinary streamed tasks remain fenced below.
-            if (task.executionScope && task.isOneShot !== true) {
+            // `settleOnLaunch` 는 시작 요청까지 파이프라인이 기다리므로 실행이
+            // 아직 살아 있다. 그 사이 중지·시간 초과됐으면 늦게 뜬 터미널을 닫는다.
+            if (task.executionScope && (task.isOneShot !== true || options.settleOnLaunch)) {
                 try {
                     throwIfTaskInactive(task.executionScope as TaskExecutionScope);
                 } catch (error) {
@@ -9112,6 +9166,10 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
             // report process end. Ordinary streamed tasks remain stoppable.
             if (task.isOneShot !== true && task.actionId && task.id && taskExecution) {
                 setActiveTaskExecution(task.actionId, task.id, taskExecution, task.runGeneration);
+            }
+            if (options.settleOnLaunch) {
+                disposable.dispose();
+                resolve();
             }
         } catch (error) {
             disposable.dispose();

@@ -60,8 +60,8 @@ suite('JSON 스키마 편집 지원 (VS Code JSON language service)', function (
         'output', 'passTheResultToNextTask', 'allowSecretContent',
     ];
     const byType: Record<string, string[]> = {
-        command: ['command', 'args', 'cwd', 'env', 'revealTerminal', 'isOneShot', 'forEach'],
-        shell: ['command', 'args', 'cwd', 'env', 'revealTerminal', 'isOneShot', 'forEach'],
+        command: ['command', 'args', 'cwd', 'env', 'revealTerminal', 'isOneShot', 'interactiveTerminal', 'forEach'],
+        shell: ['command', 'args', 'cwd', 'env', 'revealTerminal', 'isOneShot', 'interactiveTerminal', 'forEach'],
         fileDialog: ['options'],
         folderDialog: ['options'],
         pathDialog: ['mode', 'options'],

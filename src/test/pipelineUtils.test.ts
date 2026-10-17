@@ -18,6 +18,7 @@ import {
     validateLinkUrlForSave,
     ALLOWED_LINK_SCHEMES,
     tokenizeCommandLine,
+    likelyInteractiveCommand,
     mergeCommandAndArgs,
     quotePosixArgument,
     quotePowerShellArgument,
@@ -1730,5 +1731,38 @@ suite('withInteractivePromptLock — serializes concurrent dialog runs', () => {
         assert.strictEqual(await second, 'B');
         assert.strictEqual(secondStarted, true);
         assert.strictEqual(await first, 'A');
+    });
+});
+
+suite('likelyInteractiveCommand', () => {
+    test('항상 대화형인 프로그램은 인자와 상관없이 이름을 돌려준다', () => {
+        assert.strictEqual(likelyInteractiveCommand('vim'), 'vim');
+        assert.strictEqual(likelyInteractiveCommand('vim', ['notes.txt']), 'vim');
+        assert.strictEqual(likelyInteractiveCommand('less README.md'), 'less');
+    });
+
+    test('인자 없이 실행할 때만 대화형인 프로그램은 인자가 하나라도 있으면 판단하지 않는다', () => {
+        assert.strictEqual(likelyInteractiveCommand('claude'), 'claude');
+        assert.strictEqual(likelyInteractiveCommand('  python3  '), 'python3');
+        assert.strictEqual(likelyInteractiveCommand('claude', ['-p', 'hi']), undefined);
+        assert.strictEqual(likelyInteractiveCommand('claude -p hi'), undefined);
+        assert.strictEqual(likelyInteractiveCommand('tmux', ['new', '-d']), undefined);
+        assert.strictEqual(likelyInteractiveCommand('python3 server.py'), undefined);
+    });
+
+    test('경로·대소문자·Windows 확장자를 정규화한다', () => {
+        assert.strictEqual(likelyInteractiveCommand('/opt/homebrew/bin/claude'), 'claude');
+        assert.strictEqual(likelyInteractiveCommand('C:\\Tools\\Claude.EXE'), 'claude');
+        assert.strictEqual(likelyInteractiveCommand('"C:\\Program Files\\nodejs\\node.exe"'), 'node');
+        assert.strictEqual(likelyInteractiveCommand('npm.cmd'), undefined);
+    });
+
+    test('셸 문법이 섞인 raw 본문과 목록 밖 명령은 판단하지 않는다', () => {
+        assert.strictEqual(likelyInteractiveCommand('vim; echo done', [], true), undefined);
+        assert.strictEqual(likelyInteractiveCommand('claude > log.txt', [], true), undefined);
+        assert.strictEqual(likelyInteractiveCommand('$EDITOR', [], true), undefined);
+        assert.strictEqual(likelyInteractiveCommand('claude', [], true), 'claude');
+        assert.strictEqual(likelyInteractiveCommand('npm run dev'), undefined);
+        assert.strictEqual(likelyInteractiveCommand(''), undefined);
     });
 });

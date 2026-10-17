@@ -1616,6 +1616,10 @@ HTML **우클릭 메뉴**는 빠르게 외부에서 확인하는 기존 동작�
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
 | `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |
 | `parallel.interactive` | warning | `inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog` / `pathDialog` 같은 interactive task에 `parallel: true`가 붙음. 런타임은 prompt mutex로 다이얼로그를 강제 직렬화하므로 병렬 표시는 *post-prompt* 처리에만 적용되며, 사실상 효과가 없는 경우가 대부분. |
+| `interactiveTerminal.sensitive` | error | `interactiveTerminal: true`인 태스크가 password·환경변수·클립보드·선택 텍스트에서 파생된 값을 사용함. 민감한 값은 터미널에 표시하지 않으므로 런타임이 실행 전에 거부합니다. 오염 판정은 `secret.file-optin`과 같은 규칙입니다. |
+| `interactiveTerminal.capture` | error | `switch` 상속으로 `interactiveTerminal`과 `passTheResultToNextTask`가 함께 적용됨(바깥 switch와 case에 나눠 적은 경우). 한 객체 안에 함께 적은 조합은 스키마가 보고합니다. 런타임은 해당 case를 실행 전에 거부합니다. |
+| `interactiveTerminal.hidden` | warning | `interactiveTerminal: true`와 `revealTerminal: "never"`가 함께 있어 입력을 기다리는 터미널이 화면에 나타나지 않음. |
+| `oneShot.interactiveCommand` | warning | `isOneShot: true`만 있는 태스크가 대화형으로 보이는 프로그램을 실행함. `vim`·`nano`·`less`처럼 항상 대화형인 프로그램과, `claude`·`python`·`bash`처럼 인자 없이 실행하면 대화형인 프로그램을 알려진 목록으로 판단합니다. one-shot은 입력 없이 백그라운드로 실행하므로 바로 종료되며, `interactiveTerminal: true`를 안내합니다. 셸 문법이 섞인 `shell` 본문은 판단하지 않습니다. |
 | `command.nested-interpreter` | warning | `command` 태스크가 `cmd /c`, `sh -c`, `powershell -Command`처럼 스크립트를 다시 해석하는 인터프리터를 호출하고 그 스크립트 자리에 `${…}` 값을 넣음. argv 인용은 중첩 인터프리터 앞에서 끝나므로 값을 직접 argv나 `env`로 전달해야 합니다. 안전한 고정 목록·엄격한 `validatePattern`·`--` 뒤 데이터 인자는 제한적으로 제외하지만, 명령·변수 대입·리다이렉션·스크립트 블록·옵션이 될 수 있는 자리는 보수적으로 경고합니다. |
 | `command.dynamic-interpreter` | warning | `command` 태스크가 **실행 파일(또는 스크립트 스위치)을 보간값으로 정해**, 무엇이 실행될지 정적으로 알 수 없음. 그것이 셸(`sh -c` · `cmd /c` · `powershell -Command`)로 풀리면 같은 argv 의 다른 보간값이 스크립트 텍스트가 되어 문법으로 다시 읽힙니다 — `command.nested-interpreter` 가 잡는 것과 같은 위험인데, 인터프리터 이름이 참조라서 그 검사에 닿지 못하는 경우입니다. 고정 `quickPick` 처럼 값 집합을 열거할 수 있으면 열거해 실제로 판정하므로 이 경고 대신 `command.nested-interpreter` 가 붙습니다. |
 | `doctor.analysis-failed` | error | 그 소스를 분석하는 도중 예외가 발생해 검사를 끝내지 못함. 소스마다 따로 분석하므로 **다른 소스의 진단은 그대로 게시**됩니다. 메시지에 예외 내용이 실립니다. |

@@ -249,6 +249,16 @@ export interface Task {
     // Execution behavior
     passTheResultToNextTask?: boolean;
     isOneShot?: boolean;
+    /**
+     * `command` / `shell` 프로그램이 터미널 입력을 사용한다(`claude`, `vim`,
+     * `npm init` 등). 일반 터미널에서 실행하고 터미널에 포커스를 준다.
+     *
+     * 기다릴지는 `isOneShot` 이 따로 정한다 — 함께 쓰면 `nohup` 백그라운드
+     * 대신 터미널에 띄운 뒤 곧바로 완료로 처리하고, 종료 코드를 보고하지 않는다.
+     * 출력 캡처(`passTheResultToNextTask`), `forEach`, 민감한 입력과는 함께
+     * 쓸 수 없다. 기본 false.
+     */
+    interactiveTerminal?: boolean;
 
     /**
      * Task-level timeout in seconds. If the task does not complete within

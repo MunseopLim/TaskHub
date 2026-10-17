@@ -2117,6 +2117,40 @@ export function interpolateCommandPreservingTokens(
  * Take a raw command string and extra args, and return the executable as a
  * separate token from the (combined) arg list.
  */
+/** 인자와 상관없이 터미널 화면·입력을 차지하는 프로그램. */
+const ALWAYS_INTERACTIVE_COMMANDS: ReadonlySet<string> = new Set([
+    'vim', 'vi', 'nvim', 'nano', 'less', 'more', 'htop', 'btop', 'man',
+]);
+
+/**
+ * 인자 없이 실행하면 대화형 세션(REPL·셸·AI CLI)이 되는 프로그램.
+ * `claude -p …`, `python script.py`, `tmux new -d …` 처럼 인자가 있으면 대화
+ * 없이 끝날 수 있으므로 인자가 하나도 없을 때만 대화형으로 본다.
+ */
+const BARE_INTERACTIVE_COMMANDS: ReadonlySet<string> = new Set([
+    'claude', 'codex', 'gemini', 'aider',
+    'python', 'python3', 'node', 'irb', 'sqlite3', 'psql', 'mysql',
+    'bash', 'zsh', 'sh', 'fish', 'pwsh', 'powershell', 'cmd',
+    'top', 'tmux', 'screen',
+]);
+
+/**
+ * 터미널 입력이 필요해 보이는 명령이면 그 프로그램 이름을 돌려준다.
+ *
+ * **Doctor 힌트 전용 추측이다.** 실행 전에 프로그램이 입력을 기다리는지 알 수
+ * 없으므로 런타임 동작을 이 결과로 바꾸지 않는다. 오탐을 줄이려고 셸 문법이
+ * 섞인 `shell` 본문과 알려진 목록 밖의 명령은 판단하지 않는다(`undefined`).
+ */
+export function likelyInteractiveCommand(command: string, args: readonly string[] = [], raw = false): string | undefined {
+    if (raw && /[;&|<>`$(){}\n]/.test(command)) { return undefined; }
+    const tokens = tokenizeCommandLine(command.trim());
+    if (tokens.length === 0) { return undefined; }
+    const name = tokens[0].split(/[\\/]/).pop()!.toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+    if (ALWAYS_INTERACTIVE_COMMANDS.has(name)) { return name; }
+    if (BARE_INTERACTIVE_COMMANDS.has(name) && tokens.length === 1 && args.length === 0) { return name; }
+    return undefined;
+}
+
 export function mergeCommandAndArgs(command: string, extraArgs: string[]): { executable: string; args: string[] } {
     const baseTokens = tokenizeCommandLine(command.trim());
     if (baseTokens.length === 0) {

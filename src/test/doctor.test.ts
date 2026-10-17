@@ -4233,6 +4233,12 @@ suite('actions.schema.json — 타입별 추천과 기존 검증 호환성', () 
         assert.strictEqual(validate(wrap({ ...base, default: ['a'], canPickMany: true })), true);
         assert.strictEqual(validate(wrap({ ...base, forEach: ['a'], isOneShot: true })), false);
         assert.strictEqual(validate(wrap({ ...base, forEach: ['a'], isOneShot: false })), true);
+        assert.strictEqual(validate(wrap({ ...base, forEach: ['a'], interactiveTerminal: true })), false);
+        assert.strictEqual(validate(wrap({ ...base, interactiveTerminal: true, passTheResultToNextTask: true })), false);
+        assert.strictEqual(validate(wrap({ id: 'run', type: 'shell', interactiveTerminal: true, passTheResultToNextTask: true })), false);
+        assert.strictEqual(validate(wrap({ ...base, interactiveTerminal: true, passTheResultToNextTask: false })), true);
+        assert.strictEqual(validate(wrap({ ...base, interactiveTerminal: true, isOneShot: true })), true);
+        assert.strictEqual(validate(wrap({ ...base, interactiveTerminal: 'yes' })), false);
     });
 
     test('switch 분기는 기존 실행 필드를 허용하되 제어·알 수 없는 필드는 거부한다', () => {
@@ -4697,5 +4703,128 @@ suite('Doctor BOM 입력', () => {
         const validator = ajv.compile({}) as unknown as DoctorValidator;
         const findings = runDoctor([{ filePath: '/ws/.vscode/actions.json', sourceLabel: 'ws', rawText: '\uFEFF[]', workspaceRoots: ['/ws'], extensionPath: '/ext' }], validator);
         assert.ok(!findings.some(finding => finding.code === 'json.parse'), JSON.stringify(findings));
+    });
+});
+
+suite('interactiveTerminal과 Doctor', () => {
+    const wrap = (...tasks: any[]) => [{
+        id: 'a.interactive', title: 'Interactive', action: { description: 'd', tasks },
+    }];
+    const run = (...tasks: any[]) => runDoctor([makeInput(wrap(...tasks))], compileValidator());
+
+    test('대화형으로 보이는 명령을 isOneShot만으로 실행하면 interactiveTerminal을 안내한다', () => {
+        for (const task of [
+            { id: 'chat', type: 'command', command: 'claude', isOneShot: true },
+            { id: 'edit', type: 'command', command: 'vim', args: ['notes.txt'], isOneShot: true },
+            { id: 'repl', type: 'shell', command: '/usr/local/bin/python3', isOneShot: true },
+            { id: 'win', type: 'command', command: { windows: 'claude.exe', macos: 'open', linux: 'xdg-open' }, isOneShot: true },
+        ]) {
+            const hit = run(task).find(f => f.code === 'oneShot.interactiveCommand');
+            assert.ok(hit, `${task.id}: ${codes(run(task)).join(',')}`);
+            assert.strictEqual(hit!.severity, 'warning');
+            assert.match(hit!.message, /interactiveTerminal/);
+        }
+    });
+
+    test('인자가 있어 대화 없이 끝날 수 있거나 판단할 수 없는 명령은 안내하지 않는다', () => {
+        for (const task of [
+            { id: 'print', type: 'command', command: 'claude', args: ['-p', 'summarize'], isOneShot: true },
+            { id: 'script', type: 'command', command: 'python3 server.py', isOneShot: true },
+            { id: 'detached', type: 'command', command: 'tmux', args: ['new', '-d'], isOneShot: true },
+            { id: 'piped', type: 'shell', command: 'vim; echo done', isOneShot: true },
+            { id: 'server', type: 'command', command: 'npm', args: ['run', 'dev'], isOneShot: true },
+            { id: 'waited', type: 'command', command: 'claude' },
+            { id: 'already', type: 'command', command: 'claude', isOneShot: true, interactiveTerminal: true },
+        ]) {
+            assert.ok(!codes(run(task)).includes('oneShot.interactiveCommand'), `${task.id}: ${codes(run(task)).join(',')}`);
+        }
+    });
+
+    test('민감한 값을 쓰는 대화형 터미널은 실행 전에 오류로 알린다', () => {
+        const password = run(
+            { id: 'pw', type: 'inputBox', password: true },
+            { id: 'login', type: 'command', command: 'tool', args: ['${pw}'], interactiveTerminal: true },
+        );
+        const hit = password.find(f => f.code === 'interactiveTerminal.sensitive');
+        assert.ok(hit, codes(password).join(','));
+        assert.strictEqual(hit!.severity, 'error');
+
+        const environment = run({ id: 'env', type: 'command', command: 'tool', args: ['${env:TOKEN}'], interactiveTerminal: true });
+        assert.ok(codes(environment).includes('interactiveTerminal.sensitive'), codes(environment).join(','));
+
+        const plain = run({ id: 'chat', type: 'command', command: 'claude', interactiveTerminal: true, isOneShot: true });
+        assert.ok(!codes(plain).includes('interactiveTerminal.sensitive'), codes(plain).join(','));
+    });
+
+    test('switch 분기에서도 대화형 터미널 검사를 적용한다', () => {
+        const findings = run(
+            { id: 'pw', type: 'inputBox', password: true },
+            {
+                id: 'pick', type: 'switch', on: 'a',
+                cases: { a: { type: 'command', command: 'tool', args: ['${pw}'], interactiveTerminal: true } },
+            },
+        );
+        assert.ok(codes(findings).includes('interactiveTerminal.sensitive'), codes(findings).join(','));
+    });
+
+    test('switch case 안과 상속 후의 캡처 충돌을 모두 보고한다', () => {
+        const v = compileValidator();
+        const switchTask = (outer: Record<string, unknown>, branch: Record<string, unknown>) => ({
+            id: 'pick', type: 'switch', on: 'a', ...outer,
+            cases: { a: { type: 'command', command: 'tool', ...branch } },
+        });
+        const captureCodes = (task: any) => run(task).filter(f => f.code === 'interactiveTerminal.capture');
+
+        // 한 case 안에 함께 적으면 스키마가 거부한다(Doctor가 같은 내용을 중복 보고하지 않는다).
+        const inBranch = switchTask({}, { interactiveTerminal: true, passTheResultToNextTask: true });
+        assert.strictEqual(v(wrap(inBranch)), false);
+        assert.deepStrictEqual(captureCodes(inBranch), []);
+
+        // 바깥과 case에 나눠 적으면 스키마는 통과하므로 Doctor가 보고한다.
+        for (const task of [
+            switchTask({ passTheResultToNextTask: true }, { interactiveTerminal: true }),
+            switchTask({ interactiveTerminal: true }, { passTheResultToNextTask: true }),
+        ]) {
+            assert.strictEqual(v(wrap(task)), true, JSON.stringify(v.errors));
+            const hits = captureCodes(task);
+            assert.strictEqual(hits.length, 1, codes(run(task)).join(','));
+            assert.strictEqual(hits[0].severity, 'error');
+        }
+
+        // case가 상속값을 끄면 충돌이 아니다.
+        assert.deepStrictEqual(captureCodes(switchTask({ passTheResultToNextTask: true }, {
+            interactiveTerminal: true, passTheResultToNextTask: false,
+        })), []);
+        // 바깥 switch의 두 옵션은 case 기본값이다. 모든 case가 하나씩 덮어쓰면
+        // 실제 실행 설정은 유효하므로 스키마도 Doctor도 거부하지 않는다.
+        const resolvedInCases = {
+            id: 'pick', type: 'switch', on: 'a', interactiveTerminal: true, passTheResultToNextTask: true,
+            cases: {
+                a: { type: 'command', command: 'claude', passTheResultToNextTask: false },
+                b: { type: 'command', command: 'tool', interactiveTerminal: false },
+            },
+        };
+        assert.strictEqual(v(wrap(resolvedInCases)), true, JSON.stringify(v.errors));
+        assert.deepStrictEqual(captureCodes(resolvedInCases), []);
+        // 덮어쓰지 않은 case가 하나라도 있으면 그 case만큼은 보고한다.
+        const unresolvedCase = {
+            ...resolvedInCases,
+            cases: { ...resolvedInCases.cases, c: { type: 'command', command: 'tool' } },
+        };
+        assert.strictEqual(v(wrap(unresolvedCase)), true, JSON.stringify(v.errors));
+        assert.strictEqual(captureCodes(unresolvedCase).length, 1, codes(run(unresolvedCase)).join(','));
+        // 최상위 태스크의 조합은 스키마 몫이다.
+        assert.deepStrictEqual(captureCodes({
+            id: 'run', type: 'command', command: 'tool', interactiveTerminal: true, passTheResultToNextTask: true,
+        }), []);
+    });
+
+    test('입력을 기다리는 터미널을 숨기는 설정을 경고한다', () => {
+        const hidden = run({ id: 'chat', type: 'command', command: 'claude', interactiveTerminal: true, revealTerminal: 'never' });
+        const hit = hidden.find(f => f.code === 'interactiveTerminal.hidden');
+        assert.ok(hit, codes(hidden).join(','));
+        assert.strictEqual(hit!.severity, 'warning');
+        const shown = run({ id: 'chat', type: 'command', command: 'claude', interactiveTerminal: true, revealTerminal: 'silent' });
+        assert.ok(!codes(shown).includes('interactiveTerminal.hidden'), codes(shown).join(','));
     });
 });

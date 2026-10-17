@@ -126,6 +126,16 @@
           "then": {"required": ["canPickMany"], "patternProperties": {"^canPickMany$": {"const": true}}}
         },
         {
+          "$comment": "switch의 두 옵션은 case의 기본값이라 case가 덮어쓸 수 있다. 상속 후의 조합은 Doctor가 case마다 검사한다.",
+          "if": {"properties": {"type": {"enum": ["command", "shell"]}}, "required": ["type"]},
+          "then": {
+            "not": {
+              "properties": {"interactiveTerminal": {"const": true}, "passTheResultToNextTask": {"const": true}},
+              "required": ["interactiveTerminal", "passTheResultToNextTask"]
+            }
+          }
+        },
+        {
           "if": {"properties": {"type": {"const": "pathDialog"}}, "required": ["type"]},
           "then": {"required": ["mode"]}
         },
@@ -156,7 +166,8 @@
                   ]
                 }
               },
-              "^isOneShot$": {"not": {"const": true}}
+              "^isOneShot$": {"not": {"const": true}},
+              "^interactiveTerminal$": {"not": {"const": true}}
             }
           }
         },
@@ -170,6 +181,7 @@
               "env": {"$ref": "#/definitions/TaskFields/properties/env"},
               "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
               "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+              "interactiveTerminal": {"$ref": "#/definitions/TaskFields/properties/interactiveTerminal"},
               "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
             }
           }
@@ -184,6 +196,7 @@
               "env": {"$ref": "#/definitions/TaskFields/properties/env"},
               "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
               "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+              "interactiveTerminal": {"$ref": "#/definitions/TaskFields/properties/interactiveTerminal"},
               "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
             }
           }
@@ -339,6 +352,7 @@
               "env": {"$ref": "#/definitions/TaskFields/properties/env"},
               "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
               "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+              "interactiveTerminal": {"$ref": "#/definitions/TaskFields/properties/interactiveTerminal"},
               "tool": {"$ref": "#/definitions/TaskFields/properties/tool"},
               "inputs": {"$ref": "#/definitions/TaskFields/properties/inputs"},
               "archive": {"$ref": "#/definitions/TaskFields/properties/archive"},
@@ -401,6 +415,7 @@
         "^function$": {"$ref": "#/definitions/TaskFields/properties/function"},
         "^input$": {"$ref": "#/definitions/TaskFields/properties/input"},
         "^isOneShot$": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+        "^interactiveTerminal$": {"$ref": "#/definitions/TaskFields/properties/interactiveTerminal"},
         "^path$": {"$ref": "#/definitions/TaskFields/properties/path"},
         "^content$": {"$ref": "#/definitions/TaskFields/properties/content"},
         "^encoding$": {"$ref": "#/definitions/TaskFields/properties/encoding"},
@@ -427,6 +442,12 @@
       "required": ["type"],
       "allOf": [
         {
+          "not": {
+            "properties": {"interactiveTerminal": {"const": true}, "passTheResultToNextTask": {"const": true}},
+            "required": ["interactiveTerminal", "passTheResultToNextTask"]
+          }
+        },
+        {
           "if": {"properties": {"type": {"const": "browser"}}, "required": ["type"]},
           "then": {"required": ["url"]}
         },
@@ -439,7 +460,8 @@
               "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
               "env": {"$ref": "#/definitions/TaskFields/properties/env"},
               "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
-              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"}
+              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+              "interactiveTerminal": {"$ref": "#/definitions/TaskFields/properties/interactiveTerminal"}
             }
           }
         },
@@ -452,7 +474,8 @@
               "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
               "env": {"$ref": "#/definitions/TaskFields/properties/env"},
               "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
-              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"}
+              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+              "interactiveTerminal": {"$ref": "#/definitions/TaskFields/properties/interactiveTerminal"}
             }
           }
         },
@@ -549,7 +572,8 @@
         "^eol$": {"$ref": "#/definitions/TaskFields/properties/eol"},
         "^overwrite$": {"$ref": "#/definitions/TaskFields/properties/overwrite"},
         "^mkdirs$": {"$ref": "#/definitions/TaskFields/properties/mkdirs"},
-        "^isOneShot$": {"$ref": "#/definitions/TaskFields/properties/isOneShot"}
+        "^isOneShot$": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+        "^interactiveTerminal$": {"$ref": "#/definitions/TaskFields/properties/interactiveTerminal"}
       },
       "description": "switch에서 선택될 실행 본문입니다. command/shell/zip/unzip/stringManipulation/writeFile/appendFile/browser만 지원합니다. 바깥 switch의 실행 설정을 상속하고 case 값으로 덮어씁니다. output도 객체 전체를 교체합니다. id·조건·스케줄링은 바깥에 둡니다.\nThe execution body selected by switch. Supports only command/shell/zip/unzip/stringManipulation/writeFile/appendFile/browser. Inherits the outer switch's execution settings and overrides them with case values. output also replaces the entire object. Keep id, conditions, and scheduling on the outer switch.\n예 / Example: {\"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}",
       "examples": [{"type": "command", "command": "node", "args": ["--version"]}]
@@ -1125,7 +1149,7 @@
             {"type": "string", "pattern": "^\\$\\{[^}]+\\}$"},
             {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 1000}
           ],
-          "description": "command/shell/zip/unzip/stringManipulation/writeFile/appendFile을 배열 항목마다 순차 실행합니다. 정적 배열 또는 정확한 배열 참조 하나를 쓰며 최대 1000개입니다. 현재 값은 ${each}, 순번은 ${each.number}(1부터)입니다. 입력·browser·switch 및 isOneShot과 함께 사용하지 않습니다.\nRuns command/shell/zip/unzip/stringManipulation/writeFile/appendFile sequentially for each array item. Use a static array or a single exact array reference, up to 1000 items. ${each} is the current value and ${each.number} is its 1-based position. Do not combine with input tasks, browser, switch, or isOneShot.\n예 / Example: {\"forEach\": \"${files.paths}\"}",
+          "description": "command/shell/zip/unzip/stringManipulation/writeFile/appendFile을 배열 항목마다 순차 실행합니다. 정적 배열 또는 정확한 배열 참조 하나를 쓰며 최대 1000개입니다. 현재 값은 ${each}, 순번은 ${each.number}(1부터)입니다. 입력·browser·switch 및 isOneShot·interactiveTerminal과 함께 사용하지 않습니다.\nRuns command/shell/zip/unzip/stringManipulation/writeFile/appendFile sequentially for each array item. Use a static array or a single exact array reference, up to 1000 items. ${each} is the current value and ${each.number} is its 1-based position. Do not combine with input tasks, browser, switch, isOneShot, or interactiveTerminal.\n예 / Example: {\"forEach\": \"${files.paths}\"}",
           "examples": ["${files.paths}"]
         },
         "message": {
@@ -1232,6 +1256,12 @@
         "isOneShot": {
           "type": "boolean",
           "description": "command/shell을 시작 요청한 뒤 완료를 기다리지 않고 다음 태스크로 진행합니다. 기본은 false이며 서버의 준비 완료나 최종 성공을 보장하지 않습니다. passTheResultToNextTask 또는 forEach와 함께 사용하지 마세요.\nRequests command/shell startup, then proceeds to the next task without waiting for completion. Defaults to false. Does not guarantee server readiness or eventual success. Do not combine with passTheResultToNextTask or forEach.\n예 / Example: {\"isOneShot\": true}",
+          "default": false,
+          "examples": [true]
+        },
+        "interactiveTerminal": {
+          "type": "boolean",
+          "description": "command/shell 프로그램이 터미널 입력을 사용할 때(claude, vim, npm init 등) true로 둡니다. 일반 터미널에서 실행하고 터미널에 포커스를 줍니다. 완료를 기다릴지는 isOneShot이 정합니다. 함께 쓰면 백그라운드 대신 터미널에 띄운 뒤 바로 다음 단계로 진행합니다. passTheResultToNextTask, forEach, password·환경변수·클립보드·선택 텍스트 참조와 함께 사용할 수 없습니다.\nSet to true when a command/shell program reads terminal input (claude, vim, npm init, etc.). Runs in a regular terminal and focuses it. isOneShot still decides whether to wait for completion; combined with it, the program starts in the terminal instead of the background and the action proceeds immediately. Cannot be combined with passTheResultToNextTask, forEach, or password, environment variable, clipboard, or selected-text references.\n예 / Example: {\"interactiveTerminal\": true, \"isOneShot\": true}",
           "default": false,
           "examples": [true]
         },

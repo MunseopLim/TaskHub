@@ -26,13 +26,14 @@
  * `vscodeTask` label matching against `.vscode/tasks.json`.
  */
 
-import type { ActionItem, Task, OutputCapture, DiagnosticPattern } from './schema';
+import type { ActionItem, Task, OutputCapture, DiagnosticPattern, SwitchTaskBranch } from './schema';
 import {
     interpolatePipelineVariables,
     expandArgTemplate,
     parseReferenceAlternatives,
     resolvePipelineReference,
     tokenizeCommandLine,
+    likelyInteractiveCommand,
     RESERVED_CAPTURE_NAMES,
     INTERACTIVE_TASK_TYPES,
     materializeSwitchBranchTask,
@@ -199,6 +200,7 @@ function analyzeFile(rawInput: DoctorInput, validator: DoctorValidator): DoctorF
     findings.push(...checkUnresolvedAndOutsideWrites(parsed, input));
     findings.push(...checkDependsOn(parsed, input));
     findings.push(...checkParallelInteractive(parsed, input));
+    findings.push(...checkInteractiveTerminal(parsed, input));
 
     const seen = new Set<string>();
     return findings.filter(finding => {
@@ -3532,9 +3534,103 @@ function checkParallelInteractive(actions: ActionItem[], input: DoctorInput): Do
     return findings;
 }
 
+/**
+ * `interactiveTerminal` 이 실제로 입력 가능한 터미널을 얻는지, 그리고 대화형으로
+ * 보이는 명령이 입력 없는 `nohup` one-shot 으로 실행되지 않는지 본다.
+ *
+ * 한 객체 안에 함께 적은 캡처(`passTheResultToNextTask`)·`forEach` 와의 충돌은
+ * Schema 가 보고한다. Schema 가 볼 수 없는 것은 `switch` 의 상속뿐이라(바깥에
+ * 캡처, case 에 대화형 터미널 또는 그 반대) 그 경우만 여기서 보고한다.
+ */
+function checkInteractiveTerminal(actions: ActionItem[], input: DoctorInput): DoctorFinding[] {
+    const findings: DoctorFinding[] = [];
+    const secretIdsByAction = new Map<ActionItem, Set<string>>();
+    const secretTaskIds = (item: ActionItem): Set<string> => {
+        let ids = secretIdsByAction.get(item);
+        if (!ids) {
+            ids = collectSecretTaskIds(item.action?.tasks ?? []);
+            secretIdsByAction.set(item, ids);
+        }
+        return ids;
+    };
+    forEachTask(actions, (item, task, branch) => {
+        if (task.type !== 'command' && task.type !== 'shell') { return; }
+        const label = `${item.id}.${task.id}`;
+        const push = (severity: DoctorFinding['severity'], code: string, message: string, messageKo: string) => {
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity,
+                code,
+                message,
+                messageKo,
+            });
+        };
+        if (task.interactiveTerminal === true) {
+            const inheritedCapture = branch !== undefined
+                && task.passTheResultToNextTask === true
+                && !(branch.interactiveTerminal === true && branch.passTheResultToNextTask === true);
+            if (inheritedCapture) {
+                push(
+                    'error',
+                    'interactiveTerminal.capture',
+                    `Task '${label}' combines 'interactiveTerminal' and 'passTheResultToNextTask' through switch inheritance. Captured execution has no terminal input, so the runtime refuses this case. Set the option on the case that needs it instead of the outer switch.`,
+                    `Task '${label}'에서 switch 상속으로 'interactiveTerminal'과 'passTheResultToNextTask'가 함께 적용됩니다. 출력 캡처에는 터미널 입력이 연결되지 않으므로 런타임이 이 case를 거부합니다. 바깥 switch 대신 필요한 case에만 옵션을 지정하세요.`
+                );
+            }
+            if (secretTaskIds(item).has(task.id)) {
+                push(
+                    'error',
+                    'interactiveTerminal.sensitive',
+                    `Task '${label}' sets 'interactiveTerminal': true but uses a password, environment variable, clipboard, or selected-text value. Sensitive values are never shown in a terminal, so the runtime refuses this task.`,
+                    `Task '${label}'에 'interactiveTerminal': true가 있지만 password·환경변수·클립보드·선택 텍스트 값을 사용합니다. 민감한 값은 터미널에 표시하지 않으므로 런타임이 이 태스크를 거부합니다.`
+                );
+            }
+            if (task.revealTerminal === 'never') {
+                push(
+                    'warning',
+                    'interactiveTerminal.hidden',
+                    `Task '${label}' sets 'interactiveTerminal': true with 'revealTerminal': 'never', so the terminal waiting for input is not shown. Remove 'revealTerminal' or use 'always'.`,
+                    `Task '${label}'에 'interactiveTerminal': true와 'revealTerminal': 'never'가 함께 있어 입력을 기다리는 터미널이 표시되지 않습니다. 'revealTerminal'을 지우거나 'always'로 바꾸세요.`
+                );
+            }
+            return;
+        }
+        if (task.isOneShot !== true) { return; }
+        const commands = typeof task.command === 'string'
+            ? [task.command]
+            : task.command && typeof task.command === 'object'
+                ? Object.values(task.command).filter((value): value is string => typeof value === 'string')
+                : [];
+        const args = Array.isArray(task.args) ? task.args : [];
+        for (const command of commands) {
+            let name: string | undefined;
+            try {
+                name = likelyInteractiveCommand(command, args, task.type === 'shell');
+            } catch {
+                continue;
+            }
+            if (!name) { continue; }
+            push(
+                'warning',
+                'oneShot.interactiveCommand',
+                `Task '${label}' runs '${name}' with 'isOneShot': true. One-shot starts it in the background with no terminal input, so an interactive program exits immediately. If it needs terminal input, add 'interactiveTerminal': true.`,
+                `Task '${label}'가 'isOneShot': true로 '${name}'을(를) 실행합니다. one-shot은 터미널 입력 없이 백그라운드로 시작하므로 대화형 프로그램은 바로 종료됩니다. 터미널 입력이 필요하면 'interactiveTerminal': true를 추가하세요.`
+            );
+            break;
+        }
+    });
+    return findings;
+}
+
+/**
+ * 모든 태스크를 방문한다. `switch` 는 바깥 정의 다음에 materialize 한 case
+ * 마다 한 번 더 방문하고, 그때 원본 case 본문을 세 번째 인자로 넘긴다.
+ */
 function forEachTask(
     actions: ActionItem[],
-    visitor: (item: ActionItem, task: Task) => void
+    visitor: (item: ActionItem, task: Task, branch?: SwitchTaskBranch) => void
 ): void {
     const walk = (items: ActionItem[]) => {
         for (const item of items) {
@@ -3549,7 +3645,7 @@ function forEachTask(
                             ];
                             for (const branch of branches) {
                                 try {
-                                    visitor(item, materializeSwitchBranchTask(task, branch));
+                                    visitor(item, materializeSwitchBranchTask(task, branch), branch);
                                 } catch {
                                     // Schema findings remain authoritative for malformed cases.
                                 }

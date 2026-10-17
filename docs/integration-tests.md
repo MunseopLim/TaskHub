@@ -52,6 +52,18 @@
 | IT-292 | 기존 그룹 선택 | 그룹 없음·정렬된 기존 그룹·새 그룹 순서와 각 선택의 저장 결과, 새 그룹 빈 이름 거부, 기존 항목·확장 속성 보존, 목록·입력 취소 시 저장 없음 |
 | IT-293 | 중복·손상·선택 중 변경 | 그룹만 다른 중복과 손상된 파일은 그룹을 묻지 않음, 선택 중 추가된 항목·무효 항목 보존, 선택 중 생긴 중복·손상은 덮어쓰지 않음 |
 
+### 대화형 CLI 터미널 실행
+파일: [src/test/interactiveTerminal.test.ts](../src/test/interactiveTerminal.test.ts) — VS Code 태스크 실행과 종료 이벤트를 모의한다.
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-294 | `interactiveTerminal` + `isOneShot` | 백그라운드 래퍼 없이 터미널 실행·포커스, 종료 이벤트 없이 액션 완료·실행 중 목록에서 제외, 세션 종료 코드를 실패로 알리지 않음 |
+| IT-295 | `interactiveTerminal`만 지정 | 포커스를 주고 종료까지 다음 단계로 넘어가지 않으며 종료 코드를 결과로 사용 |
+| IT-296 | `isOneShot`만 지정 | 기존 백그라운드 래퍼와 포커스 없는 터미널 유지 |
+| IT-297 | 함께 쓸 수 없는 설정 | 캡처(`switch` 상속 포함)·password·환경변수·`forEach` 조합을 터미널 실행 전에 거부하고 안내에 비밀 값을 싣지 않음 |
+| IT-298 | 대화형 one-shot 시작 요청 | 요청이 받아들여지기 전에는 완료·다음 태스크로 넘어가지 않고, 거절된 요청은 액션 실패로 History에 남음 |
+| IT-299 | `switch` case에서 충돌 해소 | 바깥 switch의 캡처·대화형 기본값을 case가 덮어쓰면 거부하지 않고 대화형 터미널로 실행 |
+
 ### Output Capture + Pipeline Chaining
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
 

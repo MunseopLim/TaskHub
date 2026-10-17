@@ -394,7 +394,7 @@ TaskHub가 작은따옴표로 감싼 `args` 값은 원문으로 전달됩니다.
 | macOS/Linux, `shell` 타입 터미널 실행 | VS Code의 작업용 셸 설정을 사용 |
 | macOS/Linux, `command` 타입 터미널 실행 | `/bin/sh -c` 사용. 인자를 sh 규칙으로 인용하므로 작업용 셸이 pwsh·nushell이어도 인자 경계가 같음. 태스크를 실행할 때 작업용 셸의 시작 파일(`.zshenv` 등)을 다시 읽지 않음(VS Code가 이미 가져온 PATH 등 환경은 상속할 수 있음). 추가 환경변수는 태스크 `env`로 지정하고, 셸 함수가 필요하면 별도 스크립트로 두거나 `shell` 타입에서 셸을 명시해 호출 |
 | macOS/Linux, 출력 캡처 | `/bin/sh` 사용. 사용자의 로그인 셸이 zsh여도 동일 |
-| macOS/Linux, `isOneShot: true` | 셸 본문을 `sh -c`로 감싸 백그라운드 실행 |
+| macOS/Linux, `isOneShot: true` | 셸 본문을 `sh -c`로 감싸 백그라운드 실행. `interactiveTerminal: true`이면 위 터미널 실행과 같음 |
 | Windows, 셸 본문 실행 | 기본 `powershell.exe`(Windows PowerShell 5.1), `-NoProfile` 사용 |
 | Windows, 본문에 인용되지 않은 `&&` 또는 `||` 사용 | PowerShell 7의 `pwsh.exe`를 PATH와 표준 설치 위치에서 탐색. 없으면 실행 전 오류 안내 |
 
@@ -437,6 +437,7 @@ PowerShell 7이 설치되어 있어도 `&&`·`||`가 없는 본문을 자동으�
 | `revealTerminal` | 일반 터미널 표시 방식. 기본 `always`, VS Code의 조건부 표시 `silent`, 자동으로 열지 않는 `never` |
 | `passTheResultToNextTask` | 기본 `false`. `true`이면 완료 후 stdout/stderr를 결과로 제공 |
 | `isOneShot` | 기본 `false`. `true`이면 실행 시작 후 다음 단계로 진행. 캡처와 함께 쓰지 않음 |
+| `interactiveTerminal` | 기본 `false`. 프로그램이 터미널 입력을 쓰면 `true`. 일반 터미널에서 실행하고 포커스를 줌. [대화형 CLI 실행](#대화형-cli-실행) 참조 |
 | `output` | 캡처 결과의 표시·저장·추출·Problems 진단. [출력 캡처와 표시](#8-출력-캡처와-표시) 참조 |
 
 `cwd`는 `command`, `shell`, 동적 `quickPick`, `browser`, 내장·외부 `zip`/`unzip`에서 같은
@@ -474,10 +475,35 @@ PowerShell 7이 설치되어 있어도 `&&`·`||`가 없는 본문을 자동으�
 | 다음 태스크에서 stdout 사용 | `passTheResultToNextTask: true`, `${taskId.output}` 참조 |
 | 캡처한 결과를 화면으로 보기 | 위 옵션 + `output: { "mode": "editor" }` 또는 `"terminal"` |
 | 오래 실행되는 프로그램을 시작하고 바로 계속하기 | `isOneShot: true`. 완료·준비 상태나 최종 성공을 기다리지 않음 |
+| 대화형 CLI(`claude`, `vim` 등)를 터미널에 띄우기 | `interactiveTerminal: true`. 띄운 뒤 바로 계속하려면 `isOneShot: true`도 함께 지정 |
 
 `isOneShot`은 서버가 요청을 받을 준비가 됐다는 뜻이 아닙니다. 바로 뒤의 테스트가 서버 준비를
-전제로 한다면 별도의 준비 상태 확인 단계가 필요합니다. 일반 캡처 모드는 입력을 주고받는 터미널이
-아니므로 비밀번호 프롬프트 등 대화형 CLI에는 기본 터미널 실행을 사용하세요.
+전제로 한다면 별도의 준비 상태 확인 단계가 필요합니다. 캡처 모드와 `isOneShot` 백그라운드 실행에는
+터미널 입력이 연결되지 않으므로, 비밀번호 프롬프트 등 대화형 CLI는 아래 `interactiveTerminal`을 사용하세요.
+
+#### 대화형 CLI 실행
+
+`interactiveTerminal: true`는 프로그램이 터미널 입력을 쓴다는 표시입니다. 일반 터미널에서 실행하고
+그 터미널에 포커스를 주므로 바로 입력할 수 있습니다. 끝날 때까지 기다릴지는 `isOneShot`이 따로 정합니다.
+
+| `interactiveTerminal` | `isOneShot` | 동작 | 예 |
+| --- | --- | --- | --- |
+| `false` | `false` | 터미널에서 실행하고 종료까지 기다림 | `npm run build` |
+| `false` | `true` | 입력·출력 없이 백그라운드로 시작하고 바로 계속 | 서버, GUI 앱 |
+| `true` | `false` | 터미널에서 실행·포커스, 종료까지 기다림 | `npm init` 다음 단계에서 `package.json` 사용 |
+| `true` | `true` | 터미널에서 실행·포커스, 시작 직후 액션 완료 | `claude` 세션 |
+
+```json
+{ "id": "chat", "type": "command", "command": "claude", "interactiveTerminal": true, "isOneShot": true }
+```
+
+`isOneShot`과 함께 쓰면 액션은 시작 직후 끝나고, 실행 중인 액션의 Stop 대상에서도 빠집니다. 세션은
+프로그램 안에서 종료하거나 터미널을 닫아 끝냅니다. 사용자가 세션을 끝낼 때의 종료 코드는 실패로 알리지 않습니다.
+
+`passTheResultToNextTask`, `forEach`, 그리고 password·환경변수·클립보드·선택 텍스트에서 파생된 값과는
+함께 쓸 수 없습니다. 런타임이 실행 전에 거부하며 Doctor도 미리 알립니다. `switch`에서는 바깥 값을 case가
+덮어쓴 최종 설정으로 판단하므로, 바깥에 두 옵션을 모두 두고 case마다 하나를 `false`로 꺼도 됩니다. `isOneShot: true`만 지정하고
+`claude`·`vim` 같은 대화형 프로그램을 실행하면 Doctor가 `interactiveTerminal`을 안내합니다.
 
 액션 우클릭 → **미리 실행 (Dry-run)**(영문: **Preview Run (Dry-run)**)에서 변수 치환·cwd·명령 형태를 확인하고,
 실행 후에는 **History → 실행된 명령 보기**와 터미널/캡처 결과를 비교하세요. Preview는 입력값과
@@ -1055,7 +1081,7 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
 - 어느 항목이든 처음 실패하면 남은 반복을 중단합니다. `continueOnError: true`도 다음 항목을 실행하는 옵션이
   아니라 **다음 태스크**로 진행하는 옵션이며, 실패한 반복 태스크의 결과는 `{}`가 됩니다. 이미 쓴
   파일이나 실행한 명령은 되돌리지 않습니다.
-- 대화형 태스크, `browser`, `switch`, `isOneShot` 태스크에는 사용할 수 없습니다.
+- 대화형 태스크, `browser`, `switch`, `isOneShot`·`interactiveTerminal` 태스크에는 사용할 수 없습니다.
 
 성공한 반복 태스크의 결과는 다음과 같습니다. `command`·`shell`의 출력 집계에는 캡처 옵션이 필요합니다.
 
