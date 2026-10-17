@@ -816,6 +816,26 @@ suite('AI scheduler CLI execution and UI integration', function () {
             readSchedulerState({ version: 1, jobs: [item] });
         }
     });
+    test('opening a reportless skipped schedule never exposes internal scheduler detail codes', async () => {
+        const missed = job({ nextRunAt: Date.now() + 600000, lastRun: { status: 'skipped', startedAt: 0, detail: 'scheduler-missed' } });
+        const queued = job({ nextRunAt: Date.now() + 600000, lastRun: { status: 'queued', startedAt: 0 } });
+        const values = new Map<string, unknown>([[AI_SCHEDULES_KEY, { version: 1, jobs: [missed, queued] }]]);
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const information = vscode.window.showInformationMessage;
+        const messages: string[] = [];
+        let controller: AiSchedulerController | undefined;
+        try {
+            vscode.window.showInformationMessage = (async (message: string) => { messages.push(message); }) as typeof information;
+            controller = new AiSchedulerController(context, killProcessTree, () => options);
+            await controller.ready;
+            assert.strictEqual(controller.engine.list()[1].lastRun?.detail, 'scheduler-queued-cancelled');
+            await vscode.commands.executeCommand('taskhub.aiScheduler.openReport', missed);
+            await vscode.commands.executeCommand('taskhub.aiScheduler.openReport', queued);
+            assert.deepStrictEqual(messages, Array(2).fill(t('아직 실행 보고서가 없습니다.', 'No run report yet.')));
+        } finally { await controller?.shutdown(); vscode.window.showInformationMessage = information; }
+    });
     test('the controller warns about report storage failures and keeps other schedules usable', async () => {
         const folder = vscode.workspace.workspaceFolders![0];
         const scriptPath = path.join(folder.uri.fsPath, `ai-report-storage-${randomUUID()}.py`);

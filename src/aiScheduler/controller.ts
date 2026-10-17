@@ -256,7 +256,8 @@ export class AiSchedulerController implements vscode.Disposable {
         }
         if (command === 'openReport') {
             if (!job.lastRun?.report) {
-                void vscode.window.showInformationMessage(job.lastRun?.detail ?? t('아직 실행 보고서가 없습니다.', 'No run report yet.'));
+                const detail = job.lastRun?.status === 'failed' || job.lastRun?.status === 'stopped' ? job.lastRun.detail : undefined;
+                void vscode.window.showInformationMessage(detail ?? t('아직 실행 보고서가 없습니다.', 'No run report yet.'));
                 return;
             }
             const document = await vscode.workspace.openTextDocument(this.reports.uri(job));
