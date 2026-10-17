@@ -17,13 +17,52 @@ export interface AiCliOptions {
     executable: string;
     model?: string;
     timeoutSeconds: number;
+    /** Interpreter for script schedules. Defaults to the platform's usual Python command. */
+    pythonExecutable?: string;
     /** Test fixtures can prepend a Node script without enabling arbitrary shell text. */
     prefixArgs?: readonly string[];
 }
 export type KillCliProcess = (child: ChildProcess) => Promise<boolean>;
 
+export function defaultPythonExecutable(platform: NodeJS.Platform = process.platform): string {
+    return platform === 'win32' ? 'python' : 'python3';
+}
+
+/**
+ * Finds the file a scheduled run starts. An explicit path is relative to the working folder, as spawn's cwd would make it;
+ * a bare name is searched only on PATH, never in the working folder that Windows would otherwise try first.
+ */
+export async function resolveExecutable(name: string, env: NodeJS.ProcessEnv = process.env,
+    platform: NodeJS.Platform = process.platform, base?: string): Promise<string | undefined> {
+    const runnable = async (file: string): Promise<boolean> => {
+        try {
+            if (!(await fs.stat(file)).isFile()) { return false; }
+            if (platform !== 'win32') { await fs.access(file, constants.X_OK); }
+            return true;
+        } catch { return false; }
+    };
+    const explicit = path.isAbsolute(name) || name.includes('/') || (platform === 'win32' && name.includes('\\'));
+    // Like libuv without a shell: on Windows a name with an extension is tried as is, then with .com and .exe.
+    const candidates = (file: string): string[] => platform !== 'win32' ? [file]
+        : [...(path.extname(file) ? [file] : []), `${file}.com`, `${file}.exe`];
+    const first = async (files: string[]): Promise<string | undefined> => {
+        for (const file of files) { if (await runnable(file)) { return file; } }
+        return undefined;
+    };
+    if (explicit) { return first(candidates(base === undefined ? path.resolve(name) : path.resolve(base, name))); }
+    const pathValue = (platform === 'win32' ? env.Path ?? env.PATH : env.PATH) ?? '';
+    for (const entry of pathValue.split(platform === 'win32' ? ';' : ':')) {
+        const directory = platform === 'win32' ? entry.replace(/^"(.*)"$/, '$1') : entry;
+        // A relative entry would depend on the extension host's cwd and differ from the spawn's working folder.
+        if (!path.isAbsolute(directory)) { continue; }
+        const found = await first(candidates(path.join(directory, name)));
+        if (found) { return found; }
+    }
+    return undefined;
+}
+
 interface CliInvocation {
-    phase: 'prompt';
+    phase: 'prompt' | 'script';
     executable: string;
     args: string[];
     cwd: string;
@@ -31,6 +70,7 @@ interface CliInvocation {
     stdinStatus: 'notSent' | 'writing' | 'written' | 'failed';
     stdinBytes: number;
     stdinText?: string;
+    exitCode?: number | null;
 }
 
 /** A display command for POSIX shells or PowerShell; the runner itself never uses a shell. */
@@ -40,21 +80,35 @@ export function formatCliCommand(executable: string, args: readonly string[], pl
     return (platform === 'win32' ? '& ' : '') + [executable, ...args].map(quote).join(' ');
 }
 
-function invocationDetails(invocations: CliInvocation[]): string {
+function invocationDetails(invocations: CliInvocation[], kind: 'prompt' | 'script'): string {
     if (!invocations.length) {
-        return t('CLI는 시작되지 않았고 요청문도 전송되지 않았습니다.', 'The CLI was not started and the prompt was not sent.');
+        return kind === 'script' ? t('스크립트는 시작되지 않았습니다.', 'The script was not started.')
+            : t('CLI는 시작되지 않았고 요청문도 전송되지 않았습니다.', 'The CLI was not started and the prompt was not sent.');
     }
-    const lines = [t('실행 상세', 'Execution details'), t(
+    const lines = [t('실행 상세', 'Execution details'), kind === 'script' ? t(
+        '스크립트에는 stdin을 연결하지 않습니다. 아래 명령은 표시용이며 실제 실행은 shell: false입니다.',
+        'The script receives no stdin. Commands below are for display; actual execution uses shell: false.'
+    ) : t(
         '요청문은 명령 인자가 아니라 stdin 파이프에 UTF-8로 씁니다. 아래 명령은 표시용이며 실제 실행은 shell: false입니다.',
         'The prompt is written to the stdin pipe as UTF-8, rather than passed as an argument. Commands below are for display; actual execution uses shell: false.'
     )];
+    const commandLabel = process.platform === 'win32' ? t('명령 (PowerShell 표기):', 'Command (PowerShell syntax):') : t('명령 (POSIX 셸 표기):', 'Command (POSIX shell syntax):');
     const inputStates = {
         notSent: t('전송하지 않음', 'Not sent'), writing: t('기록 중 종료됨 — 일부만 전달됐을 수 있음', 'Closed during writing — delivery may be partial'),
         written: t('stdin 파이프에 기록 완료', 'Written to the stdin pipe'), failed: t('전송 실패 — 일부만 전달됐을 수 있음', 'Delivery failed — may be partial'),
     };
     for (const invocation of invocations) {
-        lines.push('', t('요청문 실행', 'Prompt execution'),
-            process.platform === 'win32' ? t('명령 (PowerShell 표기):', 'Command (PowerShell syntax):') : t('명령 (POSIX 셸 표기):', 'Command (POSIX shell syntax):'),
+        if (invocation.phase === 'script') {
+            lines.push('', t('스크립트 실행', 'Script execution'), commandLabel, formatCliCommand(invocation.executable, invocation.args),
+                t(`작업 폴더: ${invocation.cwd}`, `Working directory: ${invocation.cwd}`),
+                invocation.started ? t('스크립트 시작됨', 'Script started') : t('스크립트 시작되지 않음', 'Script not started'));
+            if (invocation.started && invocation.exitCode !== undefined) {
+                lines.push(invocation.exitCode === null ? t('종료 코드 없음 (신호로 종료됨)', 'No exit code (terminated by a signal)')
+                    : t(`종료 코드: ${invocation.exitCode}`, `Exit code: ${invocation.exitCode}`));
+            }
+            continue;
+        }
+        lines.push('', t('요청문 실행', 'Prompt execution'), commandLabel,
             formatCliCommand(invocation.executable, invocation.args),
             t(`작업 폴더: ${invocation.cwd}`, `Working directory: ${invocation.cwd}`),
             invocation.started ? t('CLI 시작됨', 'CLI started') : t('CLI 시작되지 않음', 'CLI not started'),
@@ -66,7 +120,8 @@ function invocationDetails(invocations: CliInvocation[]): string {
     lines.push('', t('실행 인자와 전송 상태 (JSON)', 'Invocation arguments and delivery status (JSON)'), '',
         JSON.stringify(invocations.map(invocation => ({ phase: invocation.phase, executable: invocation.executable,
             args: invocation.args, cwd: invocation.cwd, shell: false, started: invocation.started,
-            stdinStatus: invocation.stdinStatus, stdinBytes: invocation.stdinBytes })), null, 4));
+            ...(invocation.phase === 'script' ? { exitCode: invocation.exitCode ?? null }
+                : { stdinStatus: invocation.stdinStatus, stdinBytes: invocation.stdinBytes }) })), null, 4));
     return lines.join('\n');
 }
 
@@ -138,15 +193,39 @@ export function parseCliResult(stdout: string, exitCode: number | null): { succe
     return { success, text: denied ? t('허용되지 않은 도구 요청이 있어 작업을 완료로 처리하지 않았습니다.', 'The run requested tools without permission and was not marked complete.') + '\n' + text : text };
 }
 
-async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions, signal: AbortSignal, kill: KillCliProcess,
+/** A script succeeds by exiting with code 0; stdout is its result and stderr stays separately labelled. */
+export function parseScriptResult(stdout: string, stderr: string, exitCode: number | null, started = true): { success: boolean; text: string } {
+    const success = started && exitCode === 0;
+    // A spawn failure also closes with a negative errno; that is not the script's exit code.
+    const exit = success || !started ? undefined : exitCode === null
+        ? t('스크립트가 종료 코드 없이 끝났습니다 (신호로 종료됨).', 'The script ended without an exit code (terminated by a signal).')
+        : t(`스크립트가 실패했습니다 (종료 코드: ${exitCode}).`, `The script exited with code ${exitCode}.`);
+    const output = `${t('표준 출력 (stdout):', 'Standard output (stdout):')}\n${stdout || t('(출력 없음)', '(no output)')}`;
+    const errors = stderr ? `${t('표준 오류 (stderr):', 'Standard error (stderr):')}\n${stderr}` : undefined;
+    return { success, text: [exit, started ? output : undefined, errors].filter(Boolean).join('\n\n') };
+}
+
+interface ProcessSpec {
+    invocation: CliInvocation;
+    /** Written to the stdin pipe; without it the child gets no stdin. */
+    stdin?: Buffer;
+    env?: NodeJS.ProcessEnv;
+    /** Program name used in messages, e.g. CLI or Python. */
+    label: string;
+    setting: string;
+    /** Explains an incompatible program before the generic parse result. */
+    diagnose?(stderr: string): string | undefined;
+    parse(stdout: string, stderr: string, exitCode: number | null): { success: boolean; text: string };
+}
+
+function assertNativeExecutable(executable: string, message: string): void {
+    if (!executable || /[\r\n\0]/.test(executable) || /\.(?:cmd|bat)$/i.test(executable)) { throw new Error(message); }
+}
+
+function invokeProcess(spec: ProcessSpec, options: AiCliOptions, signal: AbortSignal, kill: KillCliProcess,
     invocations: CliInvocation[]): Promise<{ status: AiRunResult['status']; text: string }> {
-    if (signal.aborted) { return { status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }; }
-    if (!options.executable || /[\r\n\0]/.test(options.executable) || /\.(?:cmd|bat)$/i.test(options.executable)) {
-        throw new Error(t('CLI 실행 파일 경로를 확인하세요. Windows에서는 네이티브 실행 파일을 사용하세요.', 'Check the CLI executable path. On Windows, use a native executable.'));
-    }
-    const invocation: CliInvocation = { phase: 'prompt', executable: options.executable,
-        args: aiCliArguments(job, options), cwd: job.workspacePath,
-        started: false, stdinStatus: 'notSent', stdinBytes: 0 };
+    if (signal.aborted) { return Promise.resolve({ status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }); }
+    const { invocation, label } = spec;
     invocations.push(invocation);
     return new Promise(resolve => {
         let child: ChildProcess;
@@ -164,15 +243,11 @@ async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions,
             if (timeout) { clearTimeout(timeout); }
             signal.removeEventListener('abort', abort);
             await termination;
-            const output = Buffer.concat(stdout).toString('utf8');
-            const parsed = parseCliResult(output, exitCode);
             const errors = Buffer.concat(stderr).toString('utf8');
-            if (/unknown option|unrecognized option|unsupported option/i.test(errors)) {
-                reason = t(`선택한 CLI '${options.executable}'가 현재 실행기에 필요한 옵션을 지원하지 않습니다. CLI의 비대화형 실행·권한·결과 형식 호환성을 확인하세요.`,
-                    `The selected CLI '${options.executable}' does not support options required by this runner. Check its non-interactive execution, permissions, and result format compatibility.`);
-            }
+            const parsed = spec.parse(Buffer.concat(stdout).toString('utf8'), errors, exitCode);
+            reason = spec.diagnose?.(errors) ?? reason;
             resolve({ status: signal.aborted ? 'stopped' : reason || !parsed.success ? 'failed' : 'success',
-                text: [reason, parsed.text, errors].filter(Boolean).join('\n\n') });
+                text: [reason, parsed.text].filter(Boolean).join('\n\n') });
         };
         const terminate = (message: string): void => {
             reason ??= message;
@@ -185,39 +260,43 @@ async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions,
         const abort = (): void => terminate(t('실행을 중지했습니다.', 'Run stopped.'));
         try {
             child = spawn(invocation.executable, invocation.args, {
-                cwd: invocation.cwd, shell: false, detached: process.platform !== 'win32',
-                windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+                cwd: invocation.cwd, shell: false, detached: process.platform !== 'win32', env: spec.env,
+                windowsHide: true, stdio: [spec.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
             });
         } catch (error) { resolve({ status: 'failed', text: String(error) }); return; }
         child.once('spawn', () => {
             invocation.started = true;
-            if (!signal.aborted && child.stdin) {
-                invocation.stdinStatus = 'writing'; invocation.stdinBytes = prompt.length;
-                invocation.stdinText = prompt.toString('utf8');
-                child.stdin.end(prompt);
+            if (!signal.aborted && child.stdin && spec.stdin) {
+                invocation.stdinStatus = 'writing'; invocation.stdinBytes = spec.stdin.length;
+                invocation.stdinText = spec.stdin.toString('utf8');
+                child.stdin.end(spec.stdin);
             }
         });
         child.once('error', error => {
-            reason = t(`CLI '${options.executable}'를 시작하지 못했습니다: ${error.message}`, `Could not start CLI '${options.executable}': ${error.message}`);
+            reason = t(`${label} '${invocation.executable}'를 시작하지 못했습니다: ${error.message}`, `Could not start ${label} '${invocation.executable}': ${error.message}`);
             if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
                 reason += '\n' + t(
-                    '실행 파일 또는 작업 폴더를 찾을 수 없습니다. 사용자 설정의 taskhub.aiScheduler.executable에 설치된 CLI의 절대 경로를 지정하고 작업 폴더가 존재하는지 확인하세요. 실행 파일 이름만 지정하면 VS Code 확장 호스트의 PATH에서 찾습니다.',
-                    'The executable or working folder could not be found. Set taskhub.aiScheduler.executable in User settings to the installed CLI\'s absolute path and check that the working folder exists. A bare executable name is resolved using the VS Code extension host\'s PATH.'
+                    `실행 파일 또는 작업 폴더를 찾을 수 없습니다. 사용자 설정의 ${spec.setting}에 설치된 ${label}의 절대 경로를 지정하고 작업 폴더가 존재하는지 확인하세요. 실행 파일 이름만 지정하면 VS Code 확장 호스트의 PATH에서 찾습니다.`,
+                    `The executable or working folder could not be found. Set ${spec.setting} in User settings to the installed ${label}'s absolute path and check that the working folder exists. A bare executable name is resolved using the VS Code extension host's PATH.`
                 );
             }
-            if (!invocation.started) {
+            if (!invocation.started && spec.stdin) {
                 reason += '\n' + t('요청문은 아직 전달하지 않았습니다.', 'The prompt has not been sent.');
             }
         });
-        child.once('close', code => { closed = true; exitCode = code; void finish(); });
+        child.once('close', code => {
+            closed = true; exitCode = code;
+            if (invocation.started) { invocation.exitCode = code; }
+            void finish();
+        });
         child.stdout?.on('data', (chunk: Buffer) => {
             stdoutBytes += chunk.length;
-            if (stdoutBytes > outputLimit) { terminate(t('CLI 출력이 4MiB 한도를 초과했습니다.', 'CLI output exceeds the 4 MiB limit.')); }
+            if (stdoutBytes > outputLimit) { terminate(t(`${label} 출력이 4MiB 한도를 초과했습니다.`, `${label} output exceeds the 4 MiB limit.`)); }
             else { stdout.push(chunk); }
         });
         child.stderr?.on('data', (chunk: Buffer) => {
             stderrBytes += chunk.length;
-            if (stderrBytes > errorLimit) { terminate(t('CLI 오류 출력이 256KiB 한도를 초과했습니다.', 'CLI error output exceeds the 256 KiB limit.')); }
+            if (stderrBytes > errorLimit) { terminate(t(`${label} 오류 출력이 256KiB 한도를 초과했습니다.`, `${label} error output exceeds the 256 KiB limit.`)); }
             else { stderr.push(chunk); }
         });
         child.stdin?.on('error', error => {
@@ -226,9 +305,69 @@ async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions,
         });
         child.stdin?.once('finish', () => { if (invocation.stdinStatus === 'writing') { invocation.stdinStatus = 'written'; } });
         signal.addEventListener('abort', abort, { once: true });
-        timeout = setTimeout(() => terminate(t('CLI 실행 시간이 제한을 초과했습니다.', 'CLI run exceeded its time limit.')), options.timeoutSeconds * 1000);
+        timeout = setTimeout(() => terminate(t(`${label} 실행 시간이 제한을 초과했습니다.`, `${label} run exceeded its time limit.`)), options.timeoutSeconds * 1000);
         if (signal.aborted) { abort(); }
     });
+}
+
+async function invokeCli(job: AiSchedule, prompt: Buffer, options: AiCliOptions, signal: AbortSignal, kill: KillCliProcess,
+    invocations: CliInvocation[]): Promise<{ status: AiRunResult['status']; text: string }> {
+    if (signal.aborted) { return { status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }; }
+    const nativeMessage = t('CLI 실행 파일 경로를 확인하세요. Windows에서는 네이티브 실행 파일을 사용하세요.', 'Check the CLI executable path. On Windows, use a native executable.');
+    assertNativeExecutable(options.executable, nativeMessage);
+    const executable = await resolveExecutable(options.executable, process.env, process.platform, job.workspacePath);
+    if (executable) { assertNativeExecutable(executable, nativeMessage); }
+    const invocation: CliInvocation = { phase: 'prompt', executable: executable ?? options.executable,
+        args: aiCliArguments(job, options), cwd: job.workspacePath, started: false, stdinStatus: 'notSent', stdinBytes: 0 };
+    if (!executable) {
+        invocations.push(invocation);
+        return { status: 'failed', text: t(
+            `CLI '${options.executable}'를 찾을 수 없습니다 (ENOENT). 사용자 설정의 taskhub.aiScheduler.executable에 설치된 CLI의 절대 경로를 지정하세요. 실행 파일 이름만 지정하면 VS Code 확장 호스트의 PATH에서 찾고, 상대 경로는 작업 폴더 기준입니다. 요청문은 아직 전달하지 않았습니다.`,
+            `CLI '${options.executable}' could not be found (ENOENT). Set taskhub.aiScheduler.executable in User settings to the installed CLI's absolute path. A bare name is searched on the VS Code extension host's PATH; a relative path is resolved from the working folder. The prompt has not been sent.`) };
+    }
+    return invokeProcess({
+        invocation,
+        stdin: prompt, label: 'CLI', setting: 'taskhub.aiScheduler.executable',
+        diagnose: errors => /unknown option|unrecognized option|unsupported option/i.test(errors)
+            ? t(`선택한 CLI '${options.executable}'가 현재 실행기에 필요한 옵션을 지원하지 않습니다. CLI의 비대화형 실행·권한·결과 형식 호환성을 확인하세요.`,
+                `The selected CLI '${options.executable}' does not support options required by this runner. Check its non-interactive execution, permissions, and result format compatibility.`)
+            : undefined,
+        parse: (stdout, errors, exitCode) => {
+            const parsed = parseCliResult(stdout, exitCode);
+            return { success: parsed.success, text: [parsed.text, errors].filter(Boolean).join('\n\n') };
+        },
+    }, options, signal, kill, invocations);
+}
+
+/** Environment passed to script schedules, so a script can tell scheduled slots from manual runs. */
+export function aiScriptEnvironment(job: AiSchedule, scheduledAt: number | undefined, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+    // Unbuffered output keeps what a script printed before a timeout or stop.
+    return { ...base, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1', TASKHUB_SCHEDULE_ID: job.id, TASKHUB_SCHEDULE_NAME: job.name,
+        TASKHUB_WORKSPACE: job.workspacePath, TASKHUB_SCHEDULED_AT: scheduledAt === undefined ? '' : new Date(scheduledAt).toISOString() };
+}
+
+async function invokeScript(job: AiSchedule, script: string, scheduledAt: number | undefined, options: AiCliOptions, signal: AbortSignal,
+    kill: KillCliProcess, invocations: CliInvocation[]): Promise<{ status: AiRunResult['status']; text: string }> {
+    if (signal.aborted) { return { status: 'stopped', text: t('실행을 중지했습니다.', 'Run stopped.') }; }
+    const name = options.pythonExecutable || defaultPythonExecutable();
+    const shimMessage = t('Python 실행 파일 경로를 확인하세요. Windows에서는 python.exe 경로를 지정하세요 (.bat·.cmd shim은 지원하지 않음).',
+        'Check the Python executable path. On Windows, set the path to python.exe (.bat and .cmd shims are unsupported).');
+    assertNativeExecutable(name, shimMessage);
+    // Spawn the resolved file so the run matches the interpreter shown in the UI and cannot pick one up from the workspace.
+    const resolved = await resolveExecutable(name, process.env, process.platform, job.workspacePath);
+    if (resolved) { assertNativeExecutable(resolved, shimMessage); }
+    const invocation: CliInvocation = { phase: 'script', executable: resolved ?? name, args: [script], cwd: job.workspacePath,
+        started: false, stdinStatus: 'notSent', stdinBytes: 0 };
+    if (!resolved) {
+        invocations.push(invocation);
+        return { status: 'failed', text: t(
+            `Python '${name}'를 찾을 수 없습니다 (ENOENT). 사용자 설정의 taskhub.aiScheduler.pythonExecutable에 설치된 Python의 절대 경로를 지정하세요. 실행 파일 이름만 지정하면 VS Code 확장 호스트의 PATH에서 찾고, 상대 경로는 작업 폴더 기준입니다.`,
+            `Python '${name}' could not be found (ENOENT). Set taskhub.aiScheduler.pythonExecutable in User settings to the installed Python's absolute path. A bare name is searched on the VS Code extension host's PATH; a relative path is resolved from the working folder.`) };
+    }
+    return invokeProcess({
+        invocation, env: aiScriptEnvironment(job, scheduledAt), label: 'Python', setting: 'taskhub.aiScheduler.pythonExecutable',
+        parse: (stdout, stderr, exitCode) => parseScriptResult(stdout, stderr, exitCode, invocation.started),
+    }, options, signal, kill, invocations);
 }
 
 export function aiReportDirectory(storage: string, jobId: string): string {
@@ -297,16 +436,24 @@ export async function runScheduledAi(job: AiSchedule, signal: AbortSignal, sched
     if (signal.aborted) { abort.abort(); }
     let text = ''; let status: AiRunResult['status'] = 'failed';
     const invocations: CliInvocation[] = [];
+    const kind = job.kind ?? 'prompt';
     try {
         const root = await fs.realpath(job.workspacePath);
         const openRoots = await Promise.all(workspacePaths.map(folder => fs.realpath(folder).catch(() => '')));
         if (!openRoots.some(folder => pathKey(folder) === pathKey(root))) {
             throw new Error(t('예약의 워크스페이스 폴더가 열려 있지 않습니다.', 'The schedule workspace folder is not open.'));
         }
-        const promptPath = await fs.realpath(job.promptPath);
-        if (!inside(root, promptPath)) { throw new Error(t('요청문 파일은 선택한 워크스페이스 안에 있어야 합니다.', 'The prompt file must be inside the selected workspace.')); }
-        const prompt = await boundedRead(promptPath, promptLimit);
-        if (!prompt.toString('utf8').replace(/^\uFEFF/, '').trim()) { throw new Error(t('요청문 파일이 비어 있습니다.', 'The prompt file is empty.')); }
+        const target = await fs.realpath(job.promptPath);
+        let prompt: Buffer | undefined;
+        if (kind === 'script') {
+            if (!inside(root, target)) { throw new Error(t('스크립트 파일은 선택한 워크스페이스 안에 있어야 합니다.', 'The script file must be inside the selected workspace.')); }
+            if (!/\.py$/i.test(target)) { throw new Error(t('Python 스크립트(.py) 파일만 실행할 수 있습니다.', 'Only Python script (.py) files can be run.')); }
+            if (!(await fs.stat(target)).isFile()) { throw new Error(t('스크립트가 일반 파일이 아닙니다.', 'The script is not a regular file.')); }
+        } else {
+            if (!inside(root, target)) { throw new Error(t('요청문 파일은 선택한 워크스페이스 안에 있어야 합니다.', 'The prompt file must be inside the selected workspace.')); }
+            prompt = await boundedRead(target, promptLimit);
+            if (!prompt.toString('utf8').replace(/^\uFEFF/, '').trim()) { throw new Error(t('요청문 파일이 비어 있습니다.', 'The prompt file is empty.')); }
+        }
         const lockDirectory = aiWorkspaceLeaseDirectory(storage, root);
         await fs.mkdir(lockDirectory, { recursive: true });
         try {
@@ -329,7 +476,8 @@ export async function runScheduledAi(job: AiSchedule, signal: AbortSignal, sched
             if (previous >= scheduledAt) { return { status: 'skipped', startedAt, finishedAt: Date.now(), detail: t('이 예약 시각은 다른 창에서 처리했습니다.', 'This scheduled slot was handled by another window.') }; }
             await fs.writeFile(marker, JSON.stringify(scheduledAt), { mode: 0o600 });
         }
-        const result = await invokeCli({ ...job, workspacePath: root }, prompt, options, abort.signal, kill, invocations);
+        const result = prompt ? await invokeCli({ ...job, workspacePath: root }, prompt, options, abort.signal, kill, invocations)
+            : await invokeScript({ ...job, workspacePath: root }, target, scheduledAt, options, abort.signal, kill, invocations);
         status = result.status; text = result.text;
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -342,13 +490,30 @@ export async function runScheduledAi(job: AiSchedule, signal: AbortSignal, sched
     const finishedAt = Date.now();
     const directory = aiReportDirectory(storage, job.id);
     const report = `${randomUUID()}.txt`;
-    await fs.mkdir(directory, { recursive: true });
     const statusLabel = status === 'success' ? t('완료', 'Completed') : status === 'stopped' ? t('중지', 'Stopped')
         : status === 'skipped' ? t('건너뜀', 'Skipped') : t('실패', 'Failed');
     const header = [job.name, `${new Date(startedAt).toISOString()} → ${new Date(finishedAt).toISOString()}`, statusLabel, ''].join('\n');
-    const details = invocationDetails(invocations);
+    if (kind === 'script' && status === 'failed') {
+        text = [t('예약을 일시 정지했습니다. 원인을 해결한 뒤 예약을 재개하세요.', 'The schedule was paused. Fix the cause, then resume the schedule.'), text].filter(Boolean).join('\n\n');
+    }
+    const details = invocationDetails(invocations, kind);
     const budget = reportLimit - Buffer.byteLength(header, 'utf8') - Buffer.byteLength(details, 'utf8') - 3;
-    await fs.writeFile(path.join(directory, report), [header, boundReportText(text, budget), '', details].join('\n'), { flag: 'wx', mode: 0o600 });
-    await pruneAiReports(storage, job.id, report);
+    try {
+        await fs.mkdir(directory, { recursive: true });
+        await fs.writeFile(path.join(directory, report), [header, boundReportText(text, budget), '', details].join('\n'), { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+        // Report storage is separate from scheduler state: do not stop unrelated jobs or retry work that already ran.
+        const reason = (error instanceof Error ? error.message : String(error)).slice(0, 1500);
+        return { status: status === 'stopped' ? 'stopped' : 'failed', startedAt, finishedAt, detail: t(
+            `작업 실행 결과: ${statusLabel}. 실행 보고서 저장 실패: ${reason}. 이 예약만 일시 정지합니다. 재실행 전에 작업 반영 여부를 확인하세요.`,
+            `Execution result: ${statusLabel}. Could not save the run report: ${reason}. Only this schedule is paused. Check the effects of the run before running it again.`) };
+    }
+    try { await pruneAiReports(storage, job.id, report); }
+    catch (error) {
+        const reason = (error instanceof Error ? error.message : String(error)).slice(0, 1500);
+        return { status, startedAt, finishedAt, report, detail: t(
+            `실행 보고서는 저장했지만 오래된 보고서를 정리하지 못했습니다: ${reason}`,
+            `The run report was saved, but old reports could not be cleaned up: ${reason}`) };
+    }
     return { status, startedAt, finishedAt, report };
 }

@@ -41,14 +41,15 @@ export class AiSchedulesProvider implements vscode.TreeDataProvider<AiSchedule>,
             : pausedAt !== undefined ? t(`정지: ${new Date(pausedAt).toLocaleString()}`, `Paused: ${new Date(pausedAt).toLocaleString()}`)
                 : t('일시 정지', 'Paused');
         if (!running && !queued && job.lastRun) { item.description += ` · ${aiStatusLabel(job.lastRun.status)}`; }
-        item.description = `${cadenceLabel(job.cadence)} · ${item.description}`;
+        item.description = `${job.kind === 'script' ? 'Python · ' : ''}${cadenceLabel(job.cadence)} · ${item.description}`;
         const detail = job.lastRun?.detail === 'scheduler-busy' ? t('다른 예약 실행과 겹쳐 건너뛰었습니다.', 'Skipped because another schedule was running.')
             : job.lastRun?.detail === 'scheduler-missed' ? t('놓친 예약 시각을 건너뛰었습니다.', 'Skipped a missed scheduled time.')
             : job.lastRun?.detail === 'scheduler-queued-cancelled' ? t('실행 대기 중 종료되어 건너뛰었습니다. 다음 예약은 유지합니다.', 'Skipped because the scheduler closed while queued. Future runs remain scheduled.')
             // Older releases saved a cost-limit reason; omit it from the current UI.
             : job.lastRun?.detail === 'scheduler-budget' ? undefined : job.lastRun?.detail;
         item.tooltip = [item.description, job.workspacePath, job.promptPath,
-            job.mode === 'edit' ? t('코드 수정 허용', 'Code editing allowed') : t('분석 도구만 허용', 'Analysis tools only'),
+            job.kind === 'script' ? t('Python 스크립트 실행', 'Runs a Python script')
+                : job.mode === 'edit' ? t('코드 수정 허용', 'Code editing allowed') : t('분석 도구만 허용', 'Analysis tools only'),
             job.lastRun ? aiStatusLabel(job.lastRun.status) : t('아직 실행하지 않음', 'No runs yet'), detail].filter(Boolean).join('\n');
         if (job.lastRun?.report) {
             item.command = { command: 'taskhub.aiScheduler.openReport', title: t('실행 보고서 열기', 'Open run report'), arguments: [job] };

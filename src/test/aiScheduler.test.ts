@@ -6,14 +6,15 @@ import { createHash, randomUUID } from 'crypto';
 import { execFileSync } from 'child_process';
 import * as vscode from 'vscode';
 import { AI_SCHEDULES_KEY, AiRunResult, AiSchedule, AiScheduler, AiSchedulerState, nextAiRun, readSchedulerState } from '../aiScheduler/model';
-import { AiSchedulerController, registerAiScheduler } from '../aiScheduler/controller';
-import { AiCliOptions, aiCliArguments, aiReportDirectory, aiWorkspaceLeaseDirectory, formatCliCommand, parseCliResult, pruneAiReports, readAiReport, runScheduledAi } from '../aiScheduler/runner';
+import { AiSchedulerController, cliOptions, pythonInterpreter, registerAiScheduler } from '../aiScheduler/controller';
+import { AiCliOptions, aiCliArguments, aiReportDirectory, aiWorkspaceLeaseDirectory, defaultPythonExecutable, formatCliCommand, parseCliResult, parseScriptResult, pruneAiReports, readAiReport, resolveExecutable, runScheduledAi } from '../aiScheduler/runner';
 import { AiSchedulesProvider } from '../providers/aiSchedulesProvider';
 import { killProcessTree } from '../extension';
 import { buildFeatureLauncherItems } from '../featureLauncher';
 import { aiScheduleSetting, aiSchedulesEnabled } from '../aiScheduler/settings';
 import { legacyAiScheduler } from '../aiScheduler/compatibility';
 import lockfile from 'proper-lockfile';
+import { t } from '../i18n';
 
 function job(overrides: Partial<AiSchedule> = {}): AiSchedule {
     return { id: randomUUID(), name: '정기 점검', workspacePath: path.resolve('/workspace'), promptPath: path.resolve('/workspace/prompt.md'),
@@ -26,7 +27,7 @@ function flagValues(args: string[], flag: string): string[] {
     return args.slice(start, end < 0 ? args.length : end);
 }
 function reportInvocations(report: string): Array<{ phase: string; executable: string; args: string[]; cwd: string;
-    shell: boolean; started: boolean; stdinStatus: string; stdinBytes: number }> {
+    shell: boolean; started: boolean; stdinStatus: string; stdinBytes: number; exitCode?: number | null }> {
     return JSON.parse(report.slice(report.lastIndexOf('\n\n') + 2));
 }
 async function until(condition: () => boolean | Promise<boolean>): Promise<void> {
@@ -79,6 +80,7 @@ suite('AI scheduler clock, persistence and lifecycle', () => {
         const item = job();
         for (const raw of [null, {}, { version: 2, jobs: [] }, { version: 1, jobs: [item, item] },
             { version: 1, jobs: [job({ mode: 'bypass' as 'edit' })] }, { version: 1, jobs: [job({ id: '../escape' })] },
+            { version: 1, jobs: [job({ kind: 'shell' as 'script' })] },
             { version: 1, jobs: [job({ lastRun: { ...success(), report: '../token.txt' } })] },
             { version: 1, jobs: Array.from({ length: 51 }, () => job()) }]) {
             assert.throws(() => readSchedulerState(raw));
@@ -88,6 +90,9 @@ suite('AI scheduler clock, persistence and lifecycle', () => {
         }
         const bashRules = ['Bash(git diff *)', 'Bash(git diff:*)', 'Bash(npm test)'];
         assert.deepStrictEqual(readSchedulerState({ version: 1, jobs: [job({ bashRules })] }).jobs[0].bashRules, bashRules);
+        for (const kind of [undefined, 'prompt', 'script'] as const) {
+            assert.strictEqual(readSchedulerState({ version: 1, jobs: [job({ kind })] }).jobs[0].kind, kind);
+        }
         const state = { version: 1 as const, jobs: [item] };
         const copy = readSchedulerState(state); copy.jobs[0].name = 'changed';
         assert.strictEqual(state.jobs[0].name, item.name);
@@ -404,7 +409,7 @@ suite('AI scheduler CLI execution and UI integration', function () {
         assert.deepStrictEqual(recorded.map(entry => entry.phase), ['prompt']);
         assert.deepStrictEqual(recorded[0].args, [script, ...received.args]);
         for (const entry of recorded) {
-            assert.strictEqual(entry.executable, 'node'); assert.strictEqual(entry.cwd, await fs.realpath(directory));
+            assert.strictEqual(entry.executable, await resolveExecutable('node')); assert.strictEqual(entry.cwd, await fs.realpath(directory));
             assert.strictEqual(entry.shell, false); assert.strictEqual(entry.started, true); assert.strictEqual(entry.stdinStatus, 'written');
             assert.ok(original.includes(formatCliCommand(entry.executable, entry.args)));
         }
@@ -613,11 +618,11 @@ suite('AI scheduler CLI execution and UI integration', function () {
             const completed = controller.engine.list()[0];
             assert.strictEqual(completed.lastRun?.status, 'failed');
             const report = await readAiReport(storage, completed);
-            assert.ok(report.includes("'node'"));
+            assert.ok(report.includes(formatCliCommand((await resolveExecutable('node'))!, aiCliArguments(initial, cliOptions()))));
             assert.match(report, /bad option: --restricted/);
             const recorded = reportInvocations(report);
             assert.deepStrictEqual(recorded.map(entry => entry.phase), ['prompt']);
-            assert.strictEqual(recorded[0].executable, 'node'); assert.strictEqual(recorded[0].started, true);
+            assert.strictEqual(recorded[0].executable, await resolveExecutable('node')); assert.strictEqual(recorded[0].started, true);
             assert.ok(!recorded[0].args.includes('--version'));
         } finally {
             await controller?.shutdown(); vscode.workspace.getConfiguration = original;
@@ -702,6 +707,278 @@ suite('AI scheduler CLI execution and UI integration', function () {
         const report = await readAiReport(storage, item);
         assert.ok(report.includes('regular file') || report.includes('일반 파일'));
     });
+    // Node runs this .py file as CommonJS, standing in for a Python interpreter.
+    const scriptFixture = `const fs=require('fs');
+        const mode=fs.readFileSync(process.argv[1]+'.mode','utf8');
+        if(mode==='hang'){fs.writeFileSync(process.argv[1]+'.pid',String(process.pid));setInterval(()=>{},1000);}
+        else if(mode==='stdin'){console.log('stdin bytes', fs.readFileSync(0).length);}
+        else if(mode==='exit3'){console.log('partial output');console.error('Traceback: boom');process.exitCode=3;}
+        else{const env=process.env;console.log(JSON.stringify({argv:process.argv.slice(1),cwd:process.cwd(),
+            env:{id:env.TASKHUB_SCHEDULE_ID,name:env.TASKHUB_SCHEDULE_NAME,workspace:env.TASKHUB_WORKSPACE,slot:env.TASKHUB_SCHEDULED_AT,io:env.PYTHONIOENCODING,unbuffered:env.PYTHONUNBUFFERED}}));
+            console.error('한글 경고');}`;
+    const scriptStdout = (report: string): string => /\((?:stdout)\):\n(.*)\n/.exec(report)![1];
+    async function scriptJob(mode: string, name = 'job.py'): Promise<AiSchedule> {
+        const scriptPath = path.join(directory, name);
+        await fs.writeFile(scriptPath, scriptFixture); await fs.writeFile(`${scriptPath}.mode`, mode);
+        return { ...item, kind: 'script', promptPath: scriptPath };
+    }
+    async function createNodeExecutable(target: string): Promise<void> {
+        const source = await resolveExecutable('node');
+        assert.ok(source, 'The Node executable used by the test fixtures must be on PATH');
+        // Windows needs a real .exe without symlink privileges. Unix package-manager binaries may use relative library paths.
+        if (process.platform === 'win32') { await fs.copyFile(source, target); }
+        else { await fs.symlink(source, target); }
+    }
+    test('prompt and script runs start the PATH executable even when the workspace contains its own copy', async () => {
+        const node = (await resolveExecutable('node'))!;
+        const shadow = path.join(directory, process.platform === 'win32' ? 'node.exe' : 'node');
+        await createNodeExecutable(shadow);
+        const probe = path.join(directory, 'executable-probe.cjs');
+        await fs.writeFile(probe, 'console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,result:process.execPath}))');
+        item.lastRun = await run(item, { ...options, prefixArgs: [probe] }, storage);
+        assert.strictEqual(item.lastRun.status, 'success');
+        const promptReport = await readAiReport(storage, item);
+        assert.strictEqual(await fs.realpath(promptReport.split('\n\n')[1]), await fs.realpath(node));
+        assert.strictEqual(reportInvocations(promptReport)[0].executable, node);
+        const scripted = await scriptJob('success');
+        await fs.writeFile(scripted.promptPath, 'console.log(process.execPath)');
+        scripted.lastRun = await run(scripted, { ...options, pythonExecutable: 'node' }, storage);
+        assert.strictEqual(scripted.lastRun.status, 'success');
+        const scriptReport = await readAiReport(storage, scripted);
+        assert.strictEqual(await fs.realpath(scriptStdout(scriptReport)), await fs.realpath(node));
+        assert.strictEqual(reportInvocations(scriptReport)[0].executable, node);
+    });
+    test('a bare CLI or interpreter name found only in the workspace is never started', async () => {
+        const name = `taskhub-shadow-${randomUUID()}`;
+        await createNodeExecutable(path.join(directory, name + (process.platform === 'win32' ? '.exe' : '')));
+        const marker = path.join(directory, 'workspace-executable-started');
+        const probe = path.join(directory, 'shadow-probe.cjs');
+        await fs.writeFile(probe, `require('fs').writeFileSync(${JSON.stringify(marker)}, 'started')`);
+        const scripted = await scriptJob('success');
+        await fs.writeFile(scripted.promptPath, await fs.readFile(probe));
+        for (const [target, opts] of [
+            [item, { ...options, executable: name, prefixArgs: [probe] }],
+            [scripted, { ...options, pythonExecutable: name }],
+        ] as const) {
+            target.lastRun = await run(target, opts, storage);
+            assert.strictEqual(target.lastRun.status, 'failed');
+            const report = await readAiReport(storage, target);
+            assert.match(report, /ENOENT/);
+            assert.strictEqual(reportInvocations(report)[0].started, false);
+        }
+        await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
+    });
+    test('report write failures pause only the affected schedule and preserve the execution outcome in its detail', async () => {
+        const fsModule = require('fs/promises') as typeof fs;
+        const writeFile = fsModule.writeFile;
+        try {
+            for (const kind of ['prompt', 'script'] as const) {
+                const first = kind === 'script' ? await scriptJob('success') : item;
+                const second = { ...first, id: randomUUID(), name: 'Unaffected schedule' };
+                const failedDirectory = aiReportDirectory(storage, first.id);
+                fsModule.writeFile = (async (...args: Parameters<typeof fs.writeFile>) => {
+                    if (path.dirname(String(args[0])) === failedDirectory) {
+                        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+                    }
+                    return writeFile(...args);
+                }) as typeof fs.writeFile;
+                const f = fixtureEngine([first, second]);
+                f.runner((target, signal, slot) => run(target, { ...options, pythonExecutable: 'node' }, storage, signal, slot));
+                try {
+                    await f.engine.initialize();
+                    await f.engine.runNow(first.id);
+                    const [failed, unaffected] = f.engine.list();
+                    assert.strictEqual(failed.lastRun?.status, 'failed'); assert.strictEqual(failed.enabled, false);
+                    assert.strictEqual(failed.lastRun.report, undefined);
+                    assert.match(failed.lastRun.detail!, /Execution result: Completed|작업 실행 결과: 완료/);
+                    assert.match(failed.lastRun.detail!, /ENOSPC/);
+                    assert.strictEqual(unaffected.enabled, true);
+                    await f.engine.runNow(second.id);
+                    const completed = f.engine.list()[1];
+                    assert.strictEqual(completed.lastRun?.status, 'success'); assert.strictEqual(completed.enabled, true);
+                    assert.ok((await readAiReport(storage, completed)).length > 0);
+                    assert.strictEqual(f.calls.filter(call => call.job.id === first.id).length, 1, 'Completed work is not retried after a report failure');
+                    assert.deepStrictEqual(readSchedulerState(f.saved()).jobs, f.engine.list());
+                } finally { await f.engine.shutdown(); }
+            }
+        } finally { fsModule.writeFile = writeFile; }
+    });
+    test('failed report retention keeps the saved report and the actual run status', async () => {
+        const legacyReports = path.join(storage, legacyAiScheduler.storageDirectory, 'reports');
+        await fs.mkdir(path.dirname(legacyReports), { recursive: true });
+        await fs.writeFile(legacyReports, 'blocks report directory enumeration');
+        for (const scenario of ['success', 'fail']) {
+            item.lastRun = await run(item, { ...options, prefixArgs: [script, scenario] }, storage);
+            assert.strictEqual(item.lastRun.status, scenario === 'success' ? 'success' : 'failed');
+            assert.ok(item.lastRun.report);
+            assert.match(item.lastRun.detail!, /old reports could not be cleaned up|오래된 보고서를 정리하지 못했습니다/);
+            assert.match(await readAiReport(storage, item), /Execution details|실행 상세/);
+            readSchedulerState({ version: 1, jobs: [item] });
+        }
+    });
+    test('the controller warns about report storage failures and keeps other schedules usable', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const scriptPath = path.join(folder.uri.fsPath, `ai-report-storage-${randomUUID()}.py`);
+        const first = job({ kind: 'script', workspacePath: folder.uri.fsPath, promptPath: scriptPath, nextRunAt: Date.now() + 600000 });
+        const second = { ...first, id: randomUUID(), name: 'Unaffected schedule' };
+        const values = new Map<string, unknown>([[AI_SCHEDULES_KEY, { version: 1, jobs: [first, second] }]]);
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const warning = vscode.window.showWarningMessage; const information = vscode.window.showInformationMessage;
+        const warnings: string[] = []; const messages: string[] = [];
+        let controller: AiSchedulerController | undefined;
+        try {
+            await fs.writeFile(scriptPath, 'console.log("work completed")');
+            const blocked = aiReportDirectory(storage, first.id);
+            await fs.mkdir(path.dirname(blocked), { recursive: true }); await fs.writeFile(blocked, 'not a directory');
+            vscode.window.showWarningMessage = (async (message: string) => { warnings.push(message); }) as typeof warning;
+            vscode.window.showInformationMessage = (async (message: string) => { messages.push(message); }) as typeof information;
+            controller = new AiSchedulerController(context, killProcessTree, () => ({ ...options, pythonExecutable: 'node' }));
+            await controller.ready;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.runNow', first);
+            const failed = controller.engine.list()[0];
+            assert.strictEqual(failed.enabled, false); assert.strictEqual(failed.lastRun?.status, 'failed');
+            assert.strictEqual(failed.lastRun.report, undefined);
+            assert.strictEqual(warnings.length, 1);
+            assert.ok(warnings[0].includes(first.name));
+            assert.match(warnings[0], /Could not save the run report|실행 보고서 저장 실패/);
+            await vscode.commands.executeCommand('taskhub.aiScheduler.openReport', first);
+            assert.deepStrictEqual(messages, [failed.lastRun.detail]);
+            await vscode.commands.executeCommand('taskhub.aiScheduler.runNow', second);
+            assert.strictEqual(controller.engine.list()[1].enabled, true);
+            assert.strictEqual(controller.engine.list()[1].lastRun?.status, 'success');
+        } finally {
+            await controller?.shutdown(); vscode.window.showWarningMessage = warning; vscode.window.showInformationMessage = information;
+            await fs.rm(scriptPath, { force: true });
+        }
+    });
+    test('script schedules run the Python interpreter directly with schedule context and record its output', async () => {
+        const scripted = await scriptJob('success');
+        const scriptOptions = { ...options, pythonExecutable: 'node' };
+        scripted.lastRun = await run(scripted, scriptOptions, storage, undefined, 60000);
+        assert.strictEqual(scripted.lastRun.status, 'success');
+        const report = await readAiReport(storage, scripted);
+        const payload = JSON.parse(scriptStdout(report));
+        const root = await fs.realpath(directory); const target = await fs.realpath(scripted.promptPath);
+        assert.deepStrictEqual(payload.argv, [target], 'Only the script path is passed, never AI CLI flags');
+        assert.strictEqual(await fs.realpath(payload.cwd), root);
+        assert.deepStrictEqual(payload.env, { id: scripted.id, name: scripted.name, workspace: root, slot: new Date(60000).toISOString(), io: 'utf-8', unbuffered: '1' });
+        assert.match(report, /Standard error \(stderr\):\n한글 경고|표준 오류 \(stderr\):\n한글 경고/);
+        assert.ok(!report.includes('--restricted'));
+        const recorded = reportInvocations(report);
+        assert.deepStrictEqual(recorded.map(entry => entry.phase), ['script']);
+        const node = (await resolveExecutable('node'))!;
+        assert.strictEqual(recorded[0].executable, node, 'The resolved interpreter path is spawned and recorded');
+        assert.ok(path.isAbsolute(node)); assert.deepStrictEqual(recorded[0].args, [target]);
+        assert.strictEqual(recorded[0].shell, false); assert.strictEqual(recorded[0].started, true);
+        assert.strictEqual(recorded[0].stdinStatus, undefined, 'Script details omit the unused stdin fields');
+        assert.strictEqual(recorded[0].stdinBytes, undefined); assert.strictEqual(recorded[0].exitCode, 0);
+        assert.doesNotMatch(report, /paused|일시 정지/);
+        assert.ok(report.includes(formatCliCommand(node, [target])));
+        assert.match(report, /Exit code: 0|종료 코드: 0/);
+        // A manual run has no scheduled slot.
+        scripted.lastRun = await run(scripted, scriptOptions, storage);
+        assert.strictEqual(JSON.parse(scriptStdout(await readAiReport(storage, scripted))).env.slot, '');
+    });
+    test('script exit codes, missing interpreters, timeouts and stops fail with readable reports', async () => {
+        const scripted = await scriptJob('exit3');
+        const scriptOptions = { ...options, pythonExecutable: 'node' };
+        scripted.lastRun = await run(scripted, scriptOptions, storage);
+        assert.strictEqual(scripted.lastRun.status, 'failed');
+        let report = await readAiReport(storage, scripted);
+        assert.match(report, /exited with code 3|실패했습니다 \(종료 코드: 3\)/);
+        assert.match(report, /schedule was paused|예약을 일시 정지했습니다/);
+        assert.ok(report.includes('partial output')); assert.ok(report.includes('Traceback: boom'));
+        assert.strictEqual(reportInvocations(report)[0].exitCode, 3);
+
+        const missing = path.join(directory, `missing-python-${randomUUID()}`);
+        scripted.lastRun = await run(scripted, { ...options, pythonExecutable: missing }, storage);
+        assert.strictEqual(scripted.lastRun.status, 'failed');
+        report = await readAiReport(storage, scripted);
+        assert.ok(report.includes(missing)); assert.match(report, /ENOENT/);
+        assert.ok(report.includes('taskhub.aiScheduler.pythonExecutable'));
+        assert.doesNotMatch(report, /prompt has not been sent|요청문은 아직 전달하지 않았습니다/);
+        assert.doesNotMatch(report, /exited with code|종료 코드: -?\d+\)|\(stdout\)/, 'A spawn failure is not reported as a script exit');
+        assert.strictEqual(reportInvocations(report)[0].started, false);
+        assert.strictEqual(reportInvocations(report)[0].exitCode, null);
+        // An existing shim must be refused before spawning, not merely fail to start.
+        for (const shim of ['python.bat', 'python.cmd']) {
+            const shimPath = path.join(directory, shim); await fs.writeFile(shimPath, '@echo off');
+            scripted.lastRun = await run(scripted, { ...options, pythonExecutable: shimPath }, storage);
+            assert.strictEqual(scripted.lastRun.status, 'failed');
+            report = await readAiReport(storage, scripted);
+            assert.match(report, /Check the Python executable path|Python 실행 파일 경로를 확인하세요/);
+            assert.match(report, /The script was not started\.|스크립트는 시작되지 않았습니다\./);
+        }
+
+        const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+        const pidFile = (job: AiSchedule): Promise<number> => fs.readFile(`${job.promptPath}.pid`, 'utf8').then(Number);
+        const hanging = await scriptJob('hang', 'hang.py');
+        hanging.lastRun = await run(hanging, { ...scriptOptions, timeoutSeconds: 0.5 }, storage);
+        assert.strictEqual(hanging.lastRun.status, 'failed');
+        assert.match(await readAiReport(storage, hanging), /Python run exceeded its time limit|Python 실행 시간이 제한을 초과했습니다/);
+        const timedOut = await pidFile(hanging);
+        await until(() => !alive(timedOut));
+        await fs.rm(`${hanging.promptPath}.pid`, { force: true });
+        const abort = new AbortController();
+        const pending = run(hanging, scriptOptions, storage, abort.signal);
+        await until(async () => fs.stat(`${hanging.promptPath}.pid`).then(() => true, () => false)); abort.abort();
+        hanging.lastRun = await pending;
+        assert.strictEqual(hanging.lastRun.status, 'stopped');
+        assert.match(await readAiReport(storage, hanging), /Run stopped\.|실행을 중지했습니다\./);
+        const stopped = await pidFile(hanging);
+        await until(() => !alive(stopped));
+    });
+    test('a script that reads stdin gets end-of-file immediately instead of waiting for the timeout', async () => {
+        const scripted = await scriptJob('stdin');
+        const started = Date.now();
+        scripted.lastRun = await run(scripted, { ...options, pythonExecutable: 'node', timeoutSeconds: 5 }, storage);
+        assert.strictEqual(scripted.lastRun.status, 'success');
+        assert.ok(Date.now() - started < 4000);
+        assert.strictEqual(scriptStdout(await readAiReport(storage, scripted)), 'stdin bytes 0');
+    });
+    test('script schedules refuse outside-workspace, non-Python and non-file targets before spawning', async () => {
+        const outside = path.join(os.tmpdir(), `taskhub-outside-${randomUUID()}.py`);
+        const marker = path.join(directory, 'spawned');
+        const scriptOptions = { ...options, pythonExecutable: 'node' };
+        try {
+            await fs.writeFile(outside, `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`);
+            const notPython = path.join(directory, 'job.js'); await fs.writeFile(notPython, `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`);
+            const folder = path.join(directory, 'folder.py'); await fs.mkdir(folder);
+            for (const target of [outside, notPython, folder, path.join(directory, 'missing.py')]) {
+                const scripted: AiSchedule = { ...item, kind: 'script', promptPath: target };
+                scripted.lastRun = await run(scripted, scriptOptions, storage);
+                assert.strictEqual(scripted.lastRun.status, 'failed', target);
+                assert.match(await readAiReport(storage, scripted), /The script was not started\.|스크립트는 시작되지 않았습니다\./);
+            }
+            await assert.rejects(fs.stat(marker));
+        } finally { await fs.rm(outside, { force: true }); }
+    });
+    test('a real Python interpreter runs a scheduled script and its UTF-8 output reaches the report', async function () {
+        const python = defaultPythonExecutable();
+        try { execFileSync(python, ['--version'], { stdio: 'ignore' }); } catch { this.skip(); }
+        const scriptPath = path.join(directory, 'real.py');
+        await fs.writeFile(scriptPath, 'import os\nprint("결과", os.environ["TASKHUB_SCHEDULE_NAME"])\n');
+        const scripted: AiSchedule = { ...item, kind: 'script', promptPath: scriptPath };
+        scripted.lastRun = await run(scripted, { ...options, pythonExecutable: python }, storage);
+        assert.strictEqual(scripted.lastRun.status, 'success');
+        assert.ok((await readAiReport(storage, scripted)).includes(`결과 ${item.name}`));
+    });
+    test('script results succeed only on exit code 0 and keep stdout and stderr apart', () => {
+        assert.deepStrictEqual(parseScriptResult('ok\n', '', 0), { success: true, text: `${t('표준 출력 (stdout):', 'Standard output (stdout):')}\nok\n` });
+        assert.ok(parseScriptResult('', '', 0).text.includes(t('(출력 없음)', '(no output)')));
+        assert.deepStrictEqual(parseScriptResult('', 'spawn failed', -2, false), { success: false, text: `${t('표준 오류 (stderr):', 'Standard error (stderr):')}\nspawn failed` });
+        assert.strictEqual(parseScriptResult('', '', 0, false).success, false);
+        assert.strictEqual(parseScriptResult('', '', 1).success, false);
+        assert.strictEqual(parseScriptResult('', '', null).success, false);
+        assert.match(parseScriptResult('', '', null).text, /signal|신호/);
+        assert.match(parseScriptResult('', '', 1).text, /exited with code 1\.|실패했습니다 \(종료 코드: 1\)\./);
+        assert.match(parseScriptResult('out', 'err', 2).text, /out\n\n(Standard error|표준 오류) \(stderr\):\nerr$/);
+        assert.strictEqual(defaultPythonExecutable('win32'), 'python');
+        assert.strictEqual(defaultPythonExecutable('darwin'), 'python3');
+        assert.strictEqual(defaultPythonExecutable('linux'), 'python3');
+    });
     test('timeout, cancellation and excessive output terminate the CLI and leave readable failure reports', async () => {
         const marker = path.join(directory, 'pid');
         options.prefixArgs = [script, 'hang', marker]; options.timeoutSeconds = 0.2;
@@ -745,6 +1022,11 @@ suite('AI scheduler CLI execution and UI integration', function () {
                     assert.match(String(skipped.description), /Skipped|건너뜀/);
                     assert.ok(!String(skipped.description).includes('Paused'));
                 }
+                const scripted = idle.getTreeItem({ ...item, kind: 'script', promptPath: path.join(directory, 'job.py') });
+                assert.match(String(scripted.tooltip), /Runs a Python script|Python 스크립트 실행/);
+                assert.match(String(scripted.description), /^Python · /);
+                assert.doesNotMatch(String(idle.getTreeItem(item).description), /Python/);
+                assert.doesNotMatch(String(scripted.tooltip), /Analysis tools only|분석 도구만 허용/);
             } finally { idle.dispose(); }
         } finally { provider.dispose(); }
     });
@@ -943,6 +1225,345 @@ suite('AI scheduler CLI execution and UI integration', function () {
             await fs.rm(prompt, { force: true });
         }
     });
+    test('UI adds a Python script schedule without AI tool steps, runs it, and edits keep the script type', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const first = path.join(folder.uri.fsPath, `ai-script-${randomUUID()}.py`);
+        const second = path.join(folder.uri.fsPath, `ai-script-${randomUUID()}.py`);
+        const values = new Map<string, unknown>();
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox; const open = vscode.window.showOpenDialog;
+        const information = vscode.window.showInformationMessage; const execute = vscode.commands.executeCommand;
+        let controller: AiSchedulerController | undefined;
+        const pickLists: any[][] = []; const dialogs: Array<vscode.OpenDialogOptions | undefined> = [];
+        const notices: string[] = []; const settingsOpened: unknown[] = [];
+        let dialogResult = first; let sourceChoice = 'script'; let editField = 'promptFile';
+        try {
+            await fs.writeFile(first, 'console.log("scheduled script output")');
+            await fs.writeFile(second, 'console.log("second script")');
+            vscode.window.showQuickPick = (async (items: unknown) => {
+                const choices = await items as any[]; pickLists.push(choices);
+                if (choices[0].field) { return choices.find(choice => choice.field === editField); }
+                return choices.find(choice => choice.promptSource === sourceChoice) ?? choices[0];
+            }) as unknown as typeof pick;
+            // Accept the trial-run offer shown after registration.
+            vscode.window.showInformationMessage = (async (message: string, ...buttons: string[]) => {
+                notices.push(message); return /added\. Next scheduled run|예약을 추가했습니다/.test(message) ? buttons[0] : undefined;
+            }) as unknown as typeof information;
+            vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+                if (command === 'workbench.action.openSettings') { settingsOpened.push(args[0]); return; }
+                return execute(command, ...args);
+            }) as typeof execute;
+            let count = 0; vscode.window.showInputBox = async () => ['Script UI integration', '60'][count++];
+            vscode.window.showOpenDialog = async dialog => { dialogs.push(dialog); return [vscode.Uri.file(dialogResult)]; };
+            controller = new AiSchedulerController(context, killProcessTree, () => ({ ...options, pythonExecutable: 'node' }));
+            await controller.ready;
+            // Cancelling the script file dialog registers nothing and asks nothing further.
+            vscode.window.showOpenDialog = async dialog => { dialogs.push(dialog); return undefined; };
+            await vscode.commands.executeCommand('taskhub.aiScheduler.add');
+            assert.strictEqual((values.get(AI_SCHEDULES_KEY) as AiSchedulerState).jobs.length, 0); assert.strictEqual(count, 0);
+            vscode.window.showOpenDialog = async dialog => { dialogs.push(dialog); return [vscode.Uri.file(dialogResult)]; };
+            pickLists.length = 0; dialogs.length = 0;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.add');
+            const saved = (values.get(AI_SCHEDULES_KEY) as AiSchedulerState).jobs;
+            assert.strictEqual(saved.length, 1);
+            assert.strictEqual(saved[0].kind, 'script'); assert.strictEqual(saved[0].promptPath, await fs.realpath(first));
+            assert.strictEqual(saved[0].name, 'Script UI integration'); assert.deepStrictEqual(saved[0].cadence, { kind: 'interval', minutes: 60 });
+            assert.ok(!pickLists.flat().some(choice => choice.mode), 'Script schedules must not ask for AI tool permissions');
+            assert.deepStrictEqual(Object.values(dialogs[0]?.filters ?? {}), [['py']]);
+            const scriptChoice = pickLists[0].find(choice => choice.promptSource === 'script');
+            assert.match(scriptChoice.detail, /^(Exit 0 = success · Failure pauses the schedule|종료 코드 0이면 완료 · 실패 시 일시 정지)/);
+            assert.match(scriptChoice.detail, /full user permissions|사용자 권한으로 제한 없이/);
+            const interpreterChoice = pickLists[0].find(choice => choice.promptSource === 'interpreter');
+            assert.ok(interpreterChoice.description.includes(defaultPythonExecutable()), 'The add step shows the interpreter that will run');
+            assert.strictEqual(scriptChoice.description.includes('$(warning)'), interpreterChoice.description.includes('$(warning)'));
+            assert.ok(pickLists[0].some(choice => choice.kind === vscode.QuickPickItemKind.Separator && choice.label === 'Python'));
+            // The next run waits for its slot; accepting the offer runs it right away and reports the outcome.
+            assert.match(notices.join('\n'), /catch interpreter or package errors early|인터프리터·패키지 오류를 미리 확인/);
+            await until(() => notices.some(message => /Trial run of .* completed|시험 실행을 완료했습니다/.test(message)));
+            const completed = controller.engine.list()[0];
+            assert.strictEqual(completed.lastRun?.status, 'success'); assert.strictEqual(completed.enabled, true);
+            assert.ok((await readAiReport(storage, completed)).includes('scheduled script output'));
+            assert.strictEqual(reportInvocations(await readAiReport(storage, completed))[0].phase, 'script');
+
+            pickLists.length = 0; dialogs.length = 0; dialogResult = second;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.edit', completed);
+            const fields = pickLists[0].map(choice => choice.field);
+            assert.ok(!fields.includes('mode') && !fields.includes('bashRules'));
+            assert.deepStrictEqual(Object.values(dialogs[0]?.filters ?? {}), [['py']]);
+            assert.deepStrictEqual(controller.engine.list()[0], { ...completed, promptPath: await fs.realpath(second) });
+
+            // A non-Python file is refused and the schedule keeps its script.
+            const prompt = path.join(folder.uri.fsPath, `ai-script-${randomUUID()}.md`);
+            await fs.writeFile(prompt, 'not a script'); dialogResult = prompt;
+            const error = vscode.window.showErrorMessage; const errors: string[] = [];
+            vscode.window.showErrorMessage = (async (message: string) => { errors.push(message); }) as typeof error;
+            try { await vscode.commands.executeCommand('taskhub.aiScheduler.edit', completed); }
+            finally { vscode.window.showErrorMessage = error; await fs.rm(prompt, { force: true }); }
+            assert.match(errors.join('\n'), /\.py/);
+            assert.strictEqual(controller.engine.list()[0].promptPath, await fs.realpath(second));
+
+            // Both the add list and the edit menu open the interpreter setting without changing schedules.
+            const before = controller.engine.list();
+            sourceChoice = 'interpreter'; await vscode.commands.executeCommand('taskhub.aiScheduler.add');
+            editField = 'interpreter'; pickLists.length = 0;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.edit', completed);
+            assert.ok(pickLists[0].find(choice => choice.field === 'interpreter').description.includes(defaultPythonExecutable()));
+            assert.deepStrictEqual(settingsOpened, ['@id:taskhub.aiScheduler.pythonExecutable', '@id:taskhub.aiScheduler.pythonExecutable']);
+            assert.deepStrictEqual(controller.engine.list(), before);
+        } finally {
+            await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
+            vscode.window.showOpenDialog = open; vscode.window.showInformationMessage = information; vscode.commands.executeCommand = execute;
+            await fs.rm(first, { force: true }); await fs.rm(second, { force: true });
+        }
+    });
+    test('a failed trial run after Add explains the pause and can resume the schedule', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const scriptPath = path.join(folder.uri.fsPath, `ai-trial-${randomUUID()}.py`);
+        const values = new Map<string, unknown>();
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox; const open = vscode.window.showOpenDialog;
+        const information = vscode.window.showInformationMessage; const warning = vscode.window.showWarningMessage;
+        let controller: AiSchedulerController | undefined;
+        const warnings: Array<{ message: string; buttons: string[] }> = [];
+        try {
+            await fs.writeFile(scriptPath, 'console.error("ModuleNotFoundError: openai"); process.exitCode = 1;');
+            vscode.window.showQuickPick = (async (items: unknown) => {
+                const choices = await items as any[];
+                return choices.find(choice => choice.promptSource === 'script') ?? choices[0];
+            }) as unknown as typeof pick;
+            let count = 0; vscode.window.showInputBox = async () => ['Trial failure', '60'][count++];
+            vscode.window.showOpenDialog = async () => [vscode.Uri.file(scriptPath)];
+            vscode.window.showInformationMessage = (async (_message: string, ...buttons: string[]) => buttons[0]) as unknown as typeof information;
+            vscode.window.showWarningMessage = (async (message: string, ...buttons: string[]) => {
+                warnings.push({ message, buttons }); return buttons[buttons.length - 1];
+            }) as unknown as typeof warning;
+            controller = new AiSchedulerController(context, killProcessTree, () => ({ ...options, pythonExecutable: 'node' }));
+            await controller.ready;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.add');
+            await until(() => warnings.length === 1 && controller!.engine.list()[0]?.enabled === true);
+            assert.match(warnings[0].message, /failed and the schedule was paused|실패해 예약을 일시 정지했습니다/);
+            assert.deepStrictEqual(warnings[0].buttons, [t('보고서 열기', 'Open Report'), t('예약 재개', 'Resume Schedule')]);
+            const resumed = controller.engine.list()[0];
+            assert.strictEqual(resumed.lastRun?.status, 'failed');
+            assert.ok((await readAiReport(storage, resumed)).includes('ModuleNotFoundError: openai'));
+        } finally {
+            await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
+            vscode.window.showOpenDialog = open; vscode.window.showInformationMessage = information; vscode.window.showWarningMessage = warning;
+            await fs.rm(scriptPath, { force: true });
+        }
+    });
+    test('relative CLI and interpreter paths run from the working folder on every platform', async () => {
+        const bin = path.join(directory, 'venv-bin'); await fs.mkdir(bin);
+        const executable = path.join(bin, process.platform === 'win32' ? 'python.exe' : 'python');
+        await createNodeExecutable(executable);
+        const scripted = await scriptJob('success');
+        const root = await fs.realpath(directory);
+        // Both native separators and forward slashes work in Windows user settings; no extension is required.
+        for (const relative of new Set([path.join('venv-bin', 'python'), 'venv-bin/python'])) {
+            for (const target of [item, scripted]) {
+                target.lastRun = await run(target, { ...options, executable: relative, pythonExecutable: relative }, storage);
+                assert.strictEqual(target.lastRun.status, 'success');
+                const recorded = reportInvocations(await readAiReport(storage, target))[0];
+                assert.strictEqual(recorded.executable, path.join(root, 'venv-bin', path.basename(executable)));
+                assert.strictEqual(recorded.started, true);
+                if (target.kind === 'script') { assert.strictEqual(recorded.exitCode, 0); }
+            }
+        }
+    });
+    test('the interpreter label shows the resolved path and warns about missing or unsupported interpreters', async () => {
+        const original = vscode.workspace.getConfiguration;
+        let value: unknown = '';
+        const bin = path.join(directory, 'label-bin'); await fs.mkdir(bin);
+        const exe = path.join(bin, 'fakepy.exe'); await fs.writeFile(exe, ''); await fs.chmod(exe, 0o755);
+        const shim = path.join(bin, 'fakepy.cmd'); await fs.writeFile(shim, ''); await fs.chmod(shim, 0o755);
+        try {
+            vscode.workspace.getConfiguration = ((section?: string, scope?: vscode.ConfigurationScope | null) => {
+                const configuration = original(section, scope);
+                return { ...configuration, inspect: (key: string) => section === 'taskhub' && key === 'aiScheduler.pythonExecutable'
+                    ? { key, globalValue: value } : configuration.inspect(key) };
+            }) as typeof original;
+            value = exe; assert.deepStrictEqual(await pythonInterpreter(), { label: exe, found: true });
+            value = 'label-bin/fakepy.exe'; assert.deepStrictEqual(await pythonInterpreter(directory), { label: `label-bin/fakepy.exe → ${exe}`, found: true });
+            value = path.join(bin, 'missing.exe');
+            const missing = await pythonInterpreter();
+            assert.strictEqual(missing.found, false); assert.match(missing.label, /^\$\(warning\) .*(not found|찾을 수 없음)$/);
+            value = shim;
+            const unsupported = await pythonInterpreter();
+            assert.strictEqual(unsupported.found, false); assert.match(unsupported.label, /\.bat and \.cmd are unsupported|\.bat·\.cmd는 지원하지 않음/);
+        } finally { vscode.workspace.getConfiguration = original; }
+    });
+    test('dismissing the trial-run offer, or answering after shutdown, never starts a run', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const scriptPath = path.join(folder.uri.fsPath, `ai-dismiss-${randomUUID()}.py`);
+        const values = new Map<string, unknown>();
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox; const open = vscode.window.showOpenDialog;
+        const information = vscode.window.showInformationMessage;
+        let controller: AiSchedulerController | undefined;
+        const answers: Array<(value: string | undefined) => void> = []; const offers: string[][] = [];
+        try {
+            await fs.writeFile(scriptPath, `require('fs').writeFileSync(${JSON.stringify(path.join(directory, 'trial-ran'))}, 'x')`);
+            vscode.window.showQuickPick = (async (items: unknown) => {
+                const choices = await items as any[];
+                return choices.find(choice => choice.promptSource === 'script') ?? choices[0];
+            }) as unknown as typeof pick;
+            let count = 0; vscode.window.showInputBox = async () => ['Dismissed trial', '60', 'Late trial', '60'][count++];
+            vscode.window.showOpenDialog = async () => [vscode.Uri.file(scriptPath)];
+            vscode.window.showInformationMessage = ((_message: string, ...buttons: string[]) => {
+                offers.push(buttons); return new Promise(resolve => answers.push(resolve));
+            }) as unknown as typeof information;
+            controller = new AiSchedulerController(context, killProcessTree, () => ({ ...options, pythonExecutable: 'node' }));
+            await controller.ready;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.add');
+            await vscode.commands.executeCommand('taskhub.aiScheduler.add');
+            assert.strictEqual(answers.length, 2); assert.deepStrictEqual(offers, [[t('지금 실행', 'Run Now')], [t('지금 실행', 'Run Now')]]);
+            answers[0](undefined);
+            await new Promise(resolve => setTimeout(resolve, 200));
+            assert.ok(controller.engine.list().every(job => job.lastRun === undefined));
+            await controller.shutdown();
+            answers[1](t('지금 실행', 'Run Now'));
+            await new Promise(resolve => setTimeout(resolve, 200));
+            assert.ok((values.get(AI_SCHEDULES_KEY) as AiSchedulerState).jobs.every(job => job.lastRun === undefined));
+            await assert.rejects(fs.stat(path.join(directory, 'trial-ran')));
+        } finally {
+            for (const answer of answers) { answer(undefined); }
+            await controller?.shutdown(); vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
+            vscode.window.showOpenDialog = open; vscode.window.showInformationMessage = information;
+            await fs.rm(scriptPath, { force: true });
+        }
+    });
+    test('a malformed AI CLI setting neither blocks script runs nor pauses other schedules', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const scriptPath = path.join(folder.uri.fsPath, `ai-malformed-${randomUUID()}.py`);
+        const promptPath = path.join(folder.uri.fsPath, `ai-malformed-${randomUUID()}.md`);
+        const workspacePath = await fs.realpath(folder.uri.fsPath);
+        const scripted = job({ kind: 'script', workspacePath, promptPath: scriptPath, nextRunAt: Date.now() + 600000 });
+        const prompted = job({ workspacePath, promptPath, nextRunAt: Date.now() + 600000 });
+        const values = new Map<string, unknown>([[AI_SCHEDULES_KEY, { version: 1, jobs: [scripted, prompted] }]]);
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const original = vscode.workspace.getConfiguration;
+        const user: Record<string, unknown> = { 'aiScheduler.model': 123, 'aiScheduler.executable': 'node', 'aiScheduler.pythonExecutable': 'node' };
+        let controller: AiSchedulerController | undefined;
+        try {
+            await fs.writeFile(scriptPath, 'console.log("script despite malformed model")');
+            await fs.writeFile(promptPath, 'prompt despite malformed model');
+            vscode.workspace.getConfiguration = ((section?: string, scope?: vscode.ConfigurationScope | null) => {
+                const configuration = original(section, scope);
+                return { ...configuration, inspect: (key: string) => section === 'taskhub' && key in user
+                    ? { key, globalValue: user[key] } : configuration.inspect(key) };
+            }) as typeof original;
+            controller = new AiSchedulerController(context, killProcessTree);
+            await controller.ready;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.runNow', scripted);
+            let [script, prompt] = controller.engine.list();
+            assert.strictEqual(script.lastRun?.status, 'success');
+            assert.ok((await readAiReport(storage, script)).includes('script despite malformed model'));
+            assert.strictEqual(prompt.enabled, true, 'Other schedules stay enabled');
+            // The prompt run ignores the malformed model and still reaches the CLI with a report.
+            await vscode.commands.executeCommand('taskhub.aiScheduler.runNow', prompted);
+            [script, prompt] = controller.engine.list();
+            const recorded = reportInvocations(await readAiReport(storage, prompt));
+            assert.strictEqual(recorded[0].started, true); assert.ok(!recorded[0].args.includes('--model'));
+            assert.strictEqual(script.enabled, true);
+            // Malformed values fall back instead of throwing, and script runs never read the AI CLI settings.
+            user['aiScheduler.executable'] = 42; user['aiScheduler.model'] = { bad: true }; user['aiScheduler.timeoutSeconds'] = 'slow';
+            assert.deepStrictEqual(cliOptions('prompt'), { executable: 'claude', model: undefined, timeoutSeconds: 600 });
+            const read: string[] = [];
+            const inspect = vscode.workspace.getConfiguration;
+            vscode.workspace.getConfiguration = ((section?: string, scope?: vscode.ConfigurationScope | null) => {
+                const configuration = inspect(section, scope);
+                return { ...configuration, inspect: (key: string) => { read.push(key); return configuration.inspect(key); } };
+            }) as typeof original;
+            try { assert.deepStrictEqual(cliOptions('script'), { executable: '', timeoutSeconds: 600, pythonExecutable: 'node' }); }
+            finally { vscode.workspace.getConfiguration = inspect; }
+            assert.ok(!read.some(key => /executable$|model$/i.test(key) && !key.includes('python')), read.join());
+            await vscode.commands.executeCommand('taskhub.aiScheduler.runNow', scripted);
+            assert.strictEqual(controller.engine.list()[0].lastRun?.status, 'success');
+            assert.strictEqual(controller.engine.list()[0].enabled, true);
+        } finally {
+            await controller?.shutdown(); vscode.workspace.getConfiguration = original;
+            await fs.rm(scriptPath, { force: true }); await fs.rm(promptPath, { force: true });
+        }
+    });
+    test('interpreter lookup follows spawn rules for explicit paths, PATH and Windows extensions', async () => {
+        const bin = path.join(directory, 'bin'); await fs.mkdir(bin);
+        const posix = path.join(bin, 'fakepy'); await fs.writeFile(posix, '#!/bin/sh\n'); await fs.chmod(posix, 0o755);
+        const plain = path.join(bin, 'notexec'); await fs.writeFile(plain, '');
+        await fs.writeFile(path.join(bin, 'winpy.exe'), ''); await fs.writeFile(path.join(bin, 'shim.cmd'), '');
+        if (process.platform !== 'win32') {
+            assert.strictEqual(await resolveExecutable('fakepy', { PATH: `/missing:${bin}` }, 'linux'), posix);
+            assert.strictEqual(await resolveExecutable(posix, {}, 'linux'), posix);
+            assert.strictEqual(await resolveExecutable('notexec', { PATH: bin }, 'linux'), undefined, 'Non-executable files are skipped');
+        }
+        assert.strictEqual(await resolveExecutable('missing-python', { PATH: bin }, process.platform), undefined);
+        assert.strictEqual(await resolveExecutable(path.join(bin, 'missing'), {}, process.platform), undefined);
+        assert.strictEqual(await resolveExecutable('winpy', { Path: bin }, 'win32'), path.join(bin, 'winpy.exe'));
+        assert.strictEqual(await resolveExecutable('winpy.exe', { Path: bin }, 'win32'), path.join(bin, 'winpy.exe'));
+        assert.strictEqual(await resolveExecutable('winpy', { PATH: bin }, 'win32'), path.join(bin, 'winpy.exe'), 'PATH is used when Path is absent');
+        await fs.writeFile(path.join(bin, 'both.com'), ''); await fs.writeFile(path.join(bin, 'both.exe'), '');
+        assert.strictEqual(await resolveExecutable('both', { Path: bin }, 'win32'), path.join(bin, 'both.com'), '.com precedes .exe as in libuv');
+        await fs.writeFile(path.join(bin, 'python3.12'), '');
+        assert.strictEqual(await resolveExecutable('python3.12', { Path: bin }, 'win32'), path.join(bin, 'python3.12'), 'A name with an extension is tried as is');
+        assert.strictEqual(await resolveExecutable('shim', { Path: bin }, 'win32'), undefined, 'A bare name never resolves to a .cmd shim');
+        assert.strictEqual(await resolveExecutable(bin, {}, process.platform), undefined, 'Directories are not executables');
+        // A bare name is never taken from the working folder; an explicit relative path is resolved from it.
+        assert.strictEqual(await resolveExecutable('winpy', { Path: '' }, 'win32', bin), undefined);
+        assert.strictEqual(await resolveExecutable('winpy', { Path: `.;relative-bin;${bin}` }, 'win32', bin), path.join(bin, 'winpy.exe'),
+            'Relative PATH entries are skipped, so the result is always absolute');
+        assert.strictEqual(await resolveExecutable('winpy', { Path: `"${bin}"` }, 'win32'), path.join(bin, 'winpy.exe'), 'Quoted Windows PATH entries are unquoted');
+        assert.strictEqual(await resolveExecutable(path.join(bin, 'winpy'), {}, 'win32'), path.join(bin, 'winpy.exe'),
+            'An explicit Windows path without an extension also tries .com and .exe');
+        if (process.platform !== 'win32') {
+            assert.strictEqual(await resolveExecutable('bin/fakepy', {}, 'linux', directory), posix);
+            assert.strictEqual(await resolveExecutable('./fakepy', {}, 'linux', bin), posix);
+            assert.strictEqual(await resolveExecutable('fakepy', { PATH: path.relative(process.cwd(), bin) }, 'linux'), undefined);
+            assert.strictEqual(await resolveExecutable('fakepy', { PATH: `::${bin}` }, 'linux'), posix, 'Empty PATH entries are ignored');
+        }
+    });
+    test('the controller passes the Python interpreter user setting to script runs', async () => {
+        const folder = vscode.workspace.workspaceFolders![0];
+        const scriptPath = path.join(folder.uri.fsPath, `ai-python-setting-${randomUUID()}.py`);
+        const initial = job({ kind: 'script', workspacePath: folder.uri.fsPath, promptPath: scriptPath, nextRunAt: Date.now() + 600000 });
+        const values = new Map<string, unknown>([[AI_SCHEDULES_KEY, { version: 1, jobs: [initial] }]]);
+        const context = { globalStorageUri: vscode.Uri.file(storage), workspaceState: {
+            get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
+        } } as unknown as vscode.ExtensionContext;
+        const original = vscode.workspace.getConfiguration;
+        let controller: AiSchedulerController | undefined;
+        let pythonSetting: unknown = '  node  ';
+        try {
+            await fs.writeFile(scriptPath, 'console.log("interpreter from settings")');
+            vscode.workspace.getConfiguration = ((section?: string, scope?: vscode.ConfigurationScope | null) => {
+                const configuration = original(section, scope);
+                return { ...configuration, inspect: (key: string) => section === 'taskhub' && key === 'aiScheduler.pythonExecutable'
+                    ? { key, globalValue: pythonSetting } : configuration.inspect(key) };
+            }) as typeof original;
+            controller = new AiSchedulerController(context, killProcessTree);
+            await controller.ready;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.runNow', initial);
+            const completed = controller.engine.list()[0];
+            assert.strictEqual(completed.lastRun?.status, 'success');
+            const report = await readAiReport(storage, completed);
+            assert.ok(report.includes('interpreter from settings'));
+            assert.strictEqual(reportInvocations(report)[0].executable, await resolveExecutable('node'));
+            // A malformed value falls back to the platform default instead of breaking every schedule.
+            pythonSetting = 42;
+            await vscode.commands.executeCommand('taskhub.aiScheduler.runNow', completed);
+            const fallback = controller.engine.list()[0];
+            assert.ok(path.basename(reportInvocations(await readAiReport(storage, fallback))[0].executable).startsWith(defaultPythonExecutable()));
+        } finally {
+            await controller?.shutdown(); vscode.workspace.getConfiguration = original;
+            await fs.rm(scriptPath, { force: true });
+        }
+    });
     test('default registration runs jobs while the panel is hidden and routes Show Schedules to visibility settings', async () => {
         const folder = vscode.workspace.workspaceFolders![0];
         const prompt = path.join(folder.uri.fsPath, `ai-visibility-${randomUUID()}.md`);
@@ -1019,7 +1640,7 @@ suite('AI scheduler CLI execution and UI integration', function () {
                 const choices = await items;
                 if (choices.some((choice: any) => choice.promptSource)) {
                     assert.match(options.title ?? '', /AI/);
-                    assert.ok(choices.every((choice: any) => choice.detail));
+                    assert.ok(choices.every((choice: any) => choice.kind === vscode.QuickPickItemKind.Separator || choice.detail));
                 }
                 return chooseExisting ? choices.find((choice: any) => choice.promptSource === 'file') ?? choices[0] : choices[0];
             }) as typeof pick;
@@ -1064,7 +1685,8 @@ suite('AI scheduler CLI execution and UI integration', function () {
             await vscode.commands.executeCommand('taskhub.aiScheduler.add');
             assert.strictEqual(controller.engine.list().length, 1, 'An unanswered example notification must not block Add.');
             await preparing;
-            assert.strictEqual(messages.length, 1, 'Add must not produce an already-in-progress notification.');
+            assert.ok(!messages.some(message => /already in progress|이미 처리 중/.test(message)), 'Add must not produce an already-in-progress notification.');
+            assert.strictEqual(messages.filter(message => /added\. Next scheduled run|예약을 추가했습니다/.test(message)).length, 1);
             assert.strictEqual(document.isDirty, false);
             assert.strictEqual(await fs.readFile(prompt, 'utf8'), customPrompt);
             const scheduled = controller.engine.list()[0];
@@ -1377,7 +1999,7 @@ suite('AI schedule settings and feature visibility', () => {
         for (const key of ['experimental.aiScheduler.enabled', legacyAiScheduler.enabledSetting, legacyAiScheduler.executableSetting, legacyAiScheduler.modelSetting, legacyAiScheduler.timeoutSetting]) {
             assert.strictEqual(properties[`taskhub.${key}`].included, false);
         }
-        for (const current of ['aiScheduler.enabled', 'aiScheduler.executable', 'aiScheduler.model', 'aiScheduler.timeoutSeconds']) {
+        for (const current of ['aiScheduler.enabled', 'aiScheduler.executable', 'aiScheduler.model', 'aiScheduler.timeoutSeconds', 'aiScheduler.pythonExecutable']) {
             assert.notStrictEqual(properties[`taskhub.${current}`].included, false);
             assert.strictEqual(properties[`taskhub.${current}`].scope, 'machine');
         }
@@ -1439,11 +2061,12 @@ suite('AI schedule settings and feature visibility', () => {
             assert.strictEqual(aiSchedulesEnabled(), true);
         } finally { vscode.workspace.getConfiguration = original; }
     });
-    test('workspace and folder settings cannot choose the executable through new or legacy keys', () => {
+    test('workspace and folder settings cannot choose the CLI or Python executable through new or legacy keys', () => {
         const original = vscode.workspace.getConfiguration;
         try {
             vscode.workspace.getConfiguration = (() => ({ inspect: () => ({ workspaceValue: 'unsafe', workspaceFolderValue: 'unsafe' }) })) as unknown as typeof original;
             assert.strictEqual(aiScheduleSetting('executable', 'claude'), 'claude');
+            assert.strictEqual(aiScheduleSetting('pythonExecutable', ''), '');
             assert.strictEqual(aiSchedulesEnabled(), true);
         } finally { vscode.workspace.getConfiguration = original; }
     });

@@ -15,8 +15,12 @@ export interface AiRunResult {
 export interface AiSchedule {
     id: string;
     name: string;
+    /** Absent in earlier releases: those schedules send a prompt file to the AI CLI. */
+    kind?: 'prompt' | 'script';
     workspacePath: string;
+    /** The prompt file, or the Python script for a script schedule. */
     promptPath: string;
+    /** Tool permissions for the AI CLI; script schedules ignore them. */
     mode: 'analysis' | 'edit';
     bashRules?: string[];
     cadence: AiCadence;
@@ -72,6 +76,7 @@ export function readSchedulerState(raw: unknown): AiSchedulerState {
         || Buffer.byteLength(JSON.stringify(raw), 'utf8') > 1024 * 1024
         || !state.jobs.every(job => job && /^[a-f0-9-]{36}$/.test(job.id)
             && isText(job.name, 200) && isText(job.workspacePath, 4096) && isText(job.promptPath, 4096)
+            && (job.kind === undefined || job.kind === 'prompt' || job.kind === 'script')
             && (job.mode === 'analysis' || job.mode === 'edit') && validCadence(job.cadence)
             && (job.bashRules === undefined || validBashRules(job.bashRules))
             && typeof job.enabled === 'boolean' && isInteger(job.nextRunAt, 0, 8_000_000_000_000_000)

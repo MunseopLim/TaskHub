@@ -121,7 +121,7 @@
   "cmd.showWhatsNew": "What's New",
   "cmd.showDeveloperCalculator": "Developer Calculator",
   "view.aiSchedules": "AI Schedules",
-  "welcome.aiSchedules": "Schedule recurring AI tasks while VS Code is open.\nAdd a schedule to create an editable prompt example or choose an existing .md / .txt file. Describe the goal, target files, instructions, and desired output; then choose the tools and cadence.\nCurrent engine: Claude Code CLI. Install and sign in before running.\n[Add schedule](command:taskhub.aiScheduler.add)",
+  "welcome.aiSchedules": "Run AI prompts or Python scripts on a schedule while VS Code is open.\nAdd a schedule to create an editable prompt example or choose an existing .md / .txt file. Describe the goal, target files, instructions, and desired output; then choose the tools and cadence.\nPrompts run with the Claude Code CLI; install and sign in before running. You can also choose a .py script to run on a cadence.\n[Add schedule](command:taskhub.aiScheduler.add)",
   "cmd.aiScheduler.add": "AI: Add Schedule",
   "cmd.aiScheduler.edit": "AI: Edit Schedule",
   "cmd.aiScheduler.runNow": "AI: Run Now",
@@ -134,7 +134,8 @@
   "cmd.aiScheduler.reset": "AI: Reset Schedule Data",
   "setting.aiSchedulerEnabled": "Enable AI schedules while VS Code is open. Turning this off stops active runs and scheduled execution without deleting schedules. Schedules are stored locally for this workspace.",
   "setting.aiSchedulerShowPanel": "Show the AI Schedules panel in the TaskHub sidebar. Hiding the panel does not stop scheduled execution.",
-  "setting.aiSchedulerExecutable": "CLI executable name or absolute path. The current runner uses Claude Code options and JSON results; changing this path alone does not add support for another CLI. Uses the existing CLI login. Windows requires a native executable.",
+  "setting.aiSchedulerExecutable": "CLI executable name or path. The current runner uses Claude Code options and JSON results; changing this path alone does not add support for another CLI. Uses the existing CLI login. Windows requires a native executable. Executable names are resolved only on the extension host's PATH; relative paths are based on the working folder.",
   "setting.aiSchedulerModel": "Model alias or ID. Leave empty for the restricted CLI default. User and project model settings are not loaded.",
-  "setting.aiSchedulerTimeout": "Time limit in seconds for each scheduled run. Stops the process tree on timeout and pauses the schedule."
+  "setting.aiSchedulerTimeout": "Time limit in seconds for each scheduled run. Stops the process tree on timeout and pauses the schedule.",
+  "setting.aiSchedulerPythonExecutable": "Python interpreter name or path for script schedules. Leave empty to use `python3` (`python` on Windows). To use a virtual environment, set its interpreter path. Relative paths are based on the schedule's working folder. On Windows, set the path to python.exe; .bat shims such as pyenv-win are unsupported."
 }

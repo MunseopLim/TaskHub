@@ -4,9 +4,9 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { t } from '../i18n';
 import { plainNotificationText } from '../notificationText';
-import { AiSchedulesProvider, cadenceLabel } from '../providers/aiSchedulesProvider';
+import { AiSchedulesProvider, aiStatusLabel, cadenceLabel } from '../providers/aiSchedulesProvider';
 import { AI_SCHEDULES_KEY, AiCadence, AiSchedule, AiScheduleChanges, AiScheduler, AiSchedulerError, SchedulerDependencies, validBashRules } from './model';
-import { AiCliOptions, KillCliProcess, runScheduledAi } from './runner';
+import { AiCliOptions, KillCliProcess, defaultPythonExecutable, resolveExecutable, runScheduledAi } from './runner';
 import { AiReportDocuments } from './reportDocument';
 import { aiScheduleSetting, aiSchedulesEnabled } from './settings';
 import { legacyAiScheduler } from './compatibility';
@@ -32,18 +32,42 @@ function numberSetting(key: 'timeoutSeconds', fallback: number, min: number, max
     const value = aiScheduleSetting<unknown>(key, fallback);
     return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
 }
-function cliOptions(): AiCliOptions {
-    return {
-        executable: aiScheduleSetting('executable', 'claude'),
-        model: aiScheduleSetting('model', '').trim() || undefined,
-        timeoutSeconds: Math.floor(numberSetting('timeoutSeconds', 600, 10, 3600)),
-    };
+/** A malformed settings.json value falls back instead of throwing, which would pause every schedule. */
+function stringSetting(key: 'executable' | 'model' | 'pythonExecutable', fallback: string): string {
+    const value = aiScheduleSetting<unknown>(key, fallback);
+    return typeof value === 'string' ? value : fallback;
+}
+function configuredPython(): string {
+    return stringSetting('pythonExecutable', '').trim();
+}
+/** Each kind reads only its own settings, so a broken AI CLI setting cannot stop script schedules. */
+export function cliOptions(kind: 'prompt' | 'script' = 'prompt'): AiCliOptions {
+    const timeoutSeconds = Math.floor(numberSetting('timeoutSeconds', 600, 10, 3600));
+    if (kind === 'script') { return { executable: '', timeoutSeconds, pythonExecutable: configuredPython() }; }
+    return { executable: stringSetting('executable', 'claude'), model: stringSetting('model', '').trim() || undefined, timeoutSeconds };
+}
+const pythonSettingQuery = '@id:taskhub.aiScheduler.pythonExecutable';
+/** Shows the interpreter a script run will actually start; it can differ from the Python extension's selection. */
+export async function pythonInterpreter(workspacePath?: string): Promise<{ label: string; found: boolean }> {
+    const name = configuredPython() || defaultPythonExecutable();
+    const resolved = await resolveExecutable(name, process.env, process.platform, workspacePath);
+    if (!resolved) { return { label: t(`$(warning) ${name} — 찾을 수 없음`, `$(warning) ${name} — not found`), found: false }; }
+    if (/\.(?:cmd|bat)$/i.test(resolved)) {
+        return { label: t(`$(warning) ${resolved} — .bat·.cmd는 지원하지 않음`, `$(warning) ${resolved} — .bat and .cmd are unsupported`), found: false };
+    }
+    // A Store app alias exists without Python installed and only opens the Store.
+    const alias = /[\\/]WindowsApps[\\/]/i.test(resolved) ? t(' (Microsoft Store 별칭일 수 있음)', ' (may be a Microsoft Store alias)') : '';
+    return { label: `${resolved === name ? name : `${name} → ${resolved}`}${alias}`, found: true };
 }
 
-function assertPromptInsideWorkspace(workspacePath: string, promptPath: string): void {
+function assertPromptInsideWorkspace(workspacePath: string, promptPath: string, kind: AiSchedule['kind'] = 'prompt'): void {
     const relative = path.relative(workspacePath, promptPath);
     if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-        throw new Error(t('요청문 파일을 선택한 워크스페이스 안에 저장하세요.', 'Save the prompt file inside the selected workspace.'));
+        throw new Error(kind === 'script' ? t(`선택한 워크스페이스(${workspacePath}) 안의 스크립트를 고르세요.`, `Choose a script inside the selected workspace (${workspacePath}).`)
+            : t('요청문 파일을 선택한 워크스페이스 안에 저장하세요.', 'Save the prompt file inside the selected workspace.'));
+    }
+    if (kind === 'script' && !/\.py$/i.test(promptPath)) {
+        throw new Error(t('Python 스크립트(.py) 파일을 선택하세요.', 'Choose a Python script (.py) file.'));
     }
 }
 
@@ -133,7 +157,8 @@ export class AiSchedulerController implements vscode.Disposable {
     private readonly reports: AiReportDocuments;
     private storageError?: unknown;
     private disposed = false;
-    constructor(private readonly context: vscode.ExtensionContext, kill: KillCliProcess, options: () => AiCliOptions = cliOptions) {
+    constructor(private readonly context: vscode.ExtensionContext, kill: KillCliProcess,
+        options: (kind: 'prompt' | 'script') => AiCliOptions = cliOptions) {
         const dependencies: SchedulerDependencies = {
             now: Date.now,
             schedule: (callback, delay) => {
@@ -141,8 +166,15 @@ export class AiSchedulerController implements vscode.Disposable {
                 return new vscode.Disposable(() => clearTimeout(timer));
             },
             save: async state => { await context.workspaceState.update(AI_SCHEDULES_KEY, state); },
-            run: (job: AiSchedule, signal: AbortSignal, slot?: number) => runScheduledAi(job, signal, slot, context.globalStorageUri.fsPath,
-                (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file').map(folder => folder.uri.fsPath), options(), kill),
+            run: async (job: AiSchedule, signal: AbortSignal, slot?: number) => {
+                const result = await runScheduledAi(job, signal, slot, context.globalStorageUri.fsPath,
+                    (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file').map(folder => folder.uri.fsPath), options(job.kind ?? 'prompt'), kill);
+                if (result.detail && result.status !== 'skipped' && !this.disposed) {
+                    const name = plainNotificationText(job.name); const detail = plainNotificationText(result.detail);
+                    void vscode.window.showWarningMessage(t(`AI 예약 '${name}': ${detail}`, `AI schedule '${name}': ${detail}`));
+                }
+                return result;
+            },
             changed: () => this.provider?.refresh(),
             error: (error: unknown) => { if (!this.disposed) { showError(error); } },
         };
@@ -193,7 +225,10 @@ export class AiSchedulerController implements vscode.Disposable {
         if (this.storageError) { throw this.storageError; }
         if (command === 'add') {
             const job = await this.wizard();
-            if (job && !this.disposed) { await this.engine.put(job); }
+            if (job && !this.disposed) {
+                await this.engine.put(job);
+                this.offerTrialRun(job.id);
+            }
             return;
         }
         const job = await this.select(node);
@@ -220,10 +255,56 @@ export class AiSchedulerController implements vscode.Disposable {
             if (answer === yes && !this.disposed) { await this.engine.remove(job.id); }
         }
         if (command === 'openReport') {
-            if (!job.lastRun?.report) { void vscode.window.showInformationMessage(t('아직 실행 보고서가 없습니다.', 'No run report yet.')); return; }
+            if (!job.lastRun?.report) {
+                void vscode.window.showInformationMessage(job.lastRun?.detail ?? t('아직 실행 보고서가 없습니다.', 'No run report yet.'));
+                return;
+            }
             const document = await vscode.workspace.openTextDocument(this.reports.uri(job));
             if (!this.disposed) { await vscode.window.showTextDocument(document); }
         }
+    }
+    /** The first run waits for the next slot; a trial run surfaces setup errors right away. */
+    private offerTrialRun(id: string): void {
+        const job = this.engine.list().find(item => item.id === id);
+        if (!job) { return; }
+        const runNow = t('지금 실행', 'Run Now');
+        const name = plainNotificationText(job.name);
+        const next = new Date(job.nextRunAt).toLocaleString();
+        void vscode.window.showInformationMessage(job.kind === 'script'
+            ? t(`'${name}' 예약을 추가했습니다. 다음 예약 실행: ${next}. 지금 실행해 인터프리터·패키지 오류를 미리 확인할 수 있습니다.`,
+                `Schedule '${name}' added. Next scheduled run: ${next}. Run it now to catch interpreter or package errors early.`)
+            : t(`'${name}' 예약을 추가했습니다. 다음 예약 실행: ${next}. 지금 실행해 CLI 로그인과 요청문을 미리 확인할 수 있습니다.`,
+                `Schedule '${name}' added. Next scheduled run: ${next}. Run it now to verify the CLI login and prompt.`), runNow).then(answer => {
+            if (answer === runNow && !this.disposed) { void this.trialRun(id).catch(error => { if (!this.disposed) { showError(error); } }); }
+        });
+    }
+    /** Report the trial outcome even when the panel is hidden; a failure pauses the schedule like any run. */
+    private async trialRun(id: string): Promise<void> {
+        if (!await this.engine.runNow(id)) {
+            void vscode.window.showInformationMessage(t('다른 AI 예약이 실행 중입니다.', 'Another AI schedule is running.'));
+            return;
+        }
+        const job = this.engine.list().find(item => item.id === id);
+        if (!job?.lastRun || this.disposed) { return; }
+        const name = plainNotificationText(job.name);
+        const openReport = t('보고서 열기', 'Open Report');
+        const resume = t('예약 재개', 'Resume Schedule');
+        const success = job.lastRun.status === 'success';
+        const help = job.lastRun.report ? t('보고서를 확인하고 원인을 고친 뒤 재개하세요.', 'Check the report, fix the cause, then resume.')
+            : plainNotificationText(job.lastRun.detail ?? t('원인을 확인하고 해결한 뒤 재개하세요.', 'Find and fix the cause, then resume.'));
+        const answer = success
+            ? await vscode.window.showInformationMessage(t(`'${name}' 시험 실행을 완료했습니다.`, `Trial run of '${name}' completed.`), openReport)
+            : await vscode.window.showWarningMessage(job.enabled
+                ? t(`'${name}' 시험 실행 결과: ${aiStatusLabel(job.lastRun.status)}.`, `Trial run of '${name}': ${aiStatusLabel(job.lastRun.status)}.`)
+                : job.lastRun.status === 'stopped'
+                    ? t(`'${name}' 시험 실행을 중지해 예약을 일시 정지했습니다. 준비되면 재개하세요.`,
+                        `Trial run of '${name}' was stopped and the schedule was paused. Resume it when ready.`)
+                    : t(`'${name}' 시험 실행이 실패해 예약을 일시 정지했습니다. ${help}`,
+                        `Trial run of '${name}' failed and the schedule was paused. ${help}`),
+            ...(job.lastRun.report ? [openReport] : []), ...(job.enabled ? [] : [resume]));
+        if (this.disposed) { return; }
+        if (answer === openReport) { await vscode.commands.executeCommand('taskhub.aiScheduler.openReport', job); }
+        if (answer === resume) { await vscode.commands.executeCommand('taskhub.aiScheduler.resume', job); }
     }
     private async resetStorage(): Promise<void> {
         if (!this.storageError) {
@@ -240,10 +321,13 @@ export class AiSchedulerController implements vscode.Disposable {
         this.storageError = undefined;
         void vscode.window.showInformationMessage(t(`예약 목록을 초기화했습니다. 백업: ${backup}`, `Schedules reset. Backup: ${backup}`));
     }
-    private async choosePrompt(selected: vscode.Uri, workspacePath: string, existing?: AiSchedule): Promise<string | undefined> {
+    private async choosePrompt(selected: vscode.Uri, workspacePath: string, existing?: AiSchedule): Promise<{ promptPath: string; kind: 'prompt' | 'script' } | undefined> {
+        let kind: 'prompt' | 'script' = existing?.kind ?? 'prompt';
         const filters = { [t('요청문', 'Prompt')]: ['md', 'txt'] };
         let promptUri: vscode.Uri | undefined;
         if (!existing) {
+            const interpreter = await pythonInterpreter(workspacePath);
+            if (this.disposed) { return; }
             const source = await vscode.window.showQuickPick([
                 {
                     label: t('예제 요청문 만들기', 'Create an example prompt'),
@@ -259,12 +343,34 @@ export class AiSchedulerController implements vscode.Disposable {
                         'Describe the recurring task in plain language. Saved content is read on each run. Set the cadence in the next steps.'),
                     promptSource: 'file' as const,
                 },
+                { label: 'Python', kind: vscode.QuickPickItemKind.Separator },
+                {
+                    label: t('Python 스크립트 선택', 'Choose a Python script'),
+                    description: interpreter.found ? t('워크스페이스 안의 .py', '.py inside the workspace')
+                        : t('워크스페이스 안의 .py · $(warning) 인터프리터를 찾을 수 없음', '.py inside the workspace · $(warning) Interpreter not found'),
+                    // Keep this short: a QuickPick detail is one truncated line, and the permission note must stay visible.
+                    detail: t('종료 코드 0이면 완료 · 실패 시 일시 정지 · 출력은 보고서에 저장 · 사용자 권한으로 제한 없이 실행',
+                        'Exit 0 = success · Failure pauses the schedule · Output goes to the report · Runs with your full user permissions'),
+                    promptSource: 'script' as const,
+                },
+                {
+                    label: t('Python 인터프리터 설정 열기…', 'Open Python interpreter setting…'),
+                    description: interpreter.label,
+                    detail: t('VS Code에서 선택한 Python 환경과 별개입니다. 설정을 바꾼 뒤 예약 추가를 다시 실행하세요.',
+                        'Separate from the Python environment selected in VS Code. After changing it, run Add Schedule again.'),
+                    promptSource: 'interpreter' as const,
+                },
             ], {
-                title: t('AI 예약 추가 — 요청문 준비', 'Add AI Schedule — Prepare a prompt'),
-                placeHolder: t('어떤 작업을 반복할까요? 요청문에 목표·대상 파일·지시·원하는 결과를 적으세요. 현재 실행 엔진: Claude Code.',
-                    'What should repeat? Describe the goal, target files, instructions, and desired output. Current engine: Claude Code.'),
+                title: t('AI 예약 추가 — 실행할 작업 준비', 'Add AI Schedule — Prepare what to run'),
+                placeHolder: t('어떤 작업을 반복할까요? 요청문은 Claude Code로, Python 스크립트는 표시된 인터프리터로 실행합니다.',
+                    'What should repeat? Prompts run with Claude Code; Python scripts run with the interpreter shown.'),
             });
             if (!source || this.disposed) { return; }
+            if (source.promptSource === 'interpreter') {
+                await vscode.commands.executeCommand('workbench.action.openSettings', pythonSettingQuery);
+                return;
+            }
+            if (source.promptSource === 'script') { kind = 'script'; }
             if (source.promptSource === 'example') {
                 const savedUri = await vscode.window.showSaveDialog({
                     title: t('작업 폴더 안에 예제 요청문 저장', 'Save the example prompt inside the working folder'),
@@ -300,17 +406,19 @@ export class AiSchedulerController implements vscode.Disposable {
         }
         if (!promptUri) {
             const files = await vscode.window.showOpenDialog({
-                title: t('반복할 작업을 작성한 요청문 파일 선택 (.md / .txt)', 'Select a prompt describing the recurring task (.md / .txt)'),
+                title: kind === 'script' ? t('주기적으로 실행할 Python 스크립트 선택 (.py)', 'Select a Python script to run on a cadence (.py)')
+                    : t('반복할 작업을 작성한 요청문 파일 선택 (.md / .txt)', 'Select a prompt describing the recurring task (.md / .txt)'),
                 canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
                 defaultUri: existing ? vscode.Uri.file(existing.promptPath) : selected,
-                openLabel: t('요청문 파일 선택', 'Select prompt file'), filters,
+                openLabel: kind === 'script' ? t('스크립트 선택', 'Select script') : t('요청문 파일 선택', 'Select prompt file'),
+                filters: kind === 'script' ? { [t('Python 스크립트', 'Python script')]: ['py'] } : filters,
             });
             promptUri = files?.[0];
         }
         if (!promptUri || promptUri.scheme !== 'file' || this.disposed) { return; }
         const promptPath = await fs.realpath(promptUri.fsPath);
-        assertPromptInsideWorkspace(workspacePath, promptPath);
-        return promptPath;
+        assertPromptInsideWorkspace(workspacePath, promptPath, kind);
+        return { promptPath, kind };
     }
     private async askName(value: string): Promise<string | undefined> {
         const name = await vscode.window.showInputBox({ value,
@@ -364,17 +472,24 @@ export class AiSchedulerController implements vscode.Disposable {
         return cadence;
     }
     private async editSchedule(job: AiSchedule): Promise<AiScheduleChanges | undefined> {
-        type Field = 'name' | 'promptContents' | 'promptFile' | 'workspace' | 'mode' | 'bashRules' | 'cadence';
+        type Field = 'name' | 'promptContents' | 'promptFile' | 'workspace' | 'mode' | 'bashRules' | 'cadence' | 'interpreter';
+        const script = job.kind === 'script';
+        const interpreter = script ? (await pythonInterpreter(job.workspacePath)).label : undefined;
+        if (this.disposed) { return; }
         const items: Array<vscode.QuickPickItem & { field: Field }> = [
             { label: t('예약 이름', 'Schedule name'), description: job.name, field: 'name' },
-            { label: t('요청문 내용 편집', 'Edit prompt contents'), description: path.basename(job.promptPath),
+            { label: script ? t('스크립트 내용 편집', 'Edit script contents') : t('요청문 내용 편집', 'Edit prompt contents'), description: path.basename(job.promptPath),
                 detail: t('파일을 열어 수정하고 저장하면 다음 실행부터 사용합니다.', 'Edit and save the file to use the new content on the next run.'), field: 'promptContents' },
-            { label: t('요청문 파일 변경', 'Change prompt file'), description: job.promptPath, field: 'promptFile' },
+            { label: script ? t('스크립트 파일 변경', 'Change script file') : t('요청문 파일 변경', 'Change prompt file'), description: job.promptPath, field: 'promptFile' },
             { label: t('작업 폴더', 'Working folder'), description: job.workspacePath, field: 'workspace' },
-            { label: t('허용 도구', 'Allowed tools'), description: job.mode === 'edit' ? t('코드 수정', 'Code editing') : t('분석', 'Analysis'), field: 'mode' },
+            ...(script ? [] : [{ label: t('허용 도구', 'Allowed tools'), description: job.mode === 'edit' ? t('코드 수정', 'Code editing') : t('분석', 'Analysis'), field: 'mode' as const }]),
             { label: t('실행 주기', 'Cadence'), description: cadenceLabel(job.cadence), field: 'cadence' },
+            ...(script ? [{ label: t('Python 인터프리터', 'Python interpreter'), description: interpreter,
+                detail: t('모든 스크립트 예약에 공통인 TaskHub 사용자 설정을 엽니다. VS Code에서 선택한 Python 환경과 별개입니다.',
+                    'Opens the TaskHub User setting shared by all script schedules. It is separate from the Python environment selected in VS Code.'),
+                field: 'interpreter' as const }] : []),
         ];
-        if (job.mode === 'edit') { items.push({ label: t('허용 명령', 'Allowed commands'), description: JSON.stringify(job.bashRules ?? []), field: 'bashRules' }); }
+        if (!script && job.mode === 'edit') { items.push({ label: t('허용 명령', 'Allowed commands'), description: JSON.stringify(job.bashRules ?? []), field: 'bashRules' }); }
         const selected = await vscode.window.showQuickPick(items, {
             title: t(`AI 예약 편집 — ${plainNotificationText(job.name)}`, `Edit AI Schedule — ${plainNotificationText(job.name)}`),
             placeHolder: t('변경할 항목을 선택하세요. 다른 설정과 실행 상태는 유지합니다.', 'Choose a field to edit. Other settings and run state are preserved.'),
@@ -387,15 +502,15 @@ export class AiSchedulerController implements vscode.Disposable {
             }
             case 'promptContents': {
                 const promptPath = await fs.realpath(job.promptPath);
-                assertPromptInsideWorkspace(await fs.realpath(job.workspacePath), promptPath);
+                assertPromptInsideWorkspace(await fs.realpath(job.workspacePath), promptPath, job.kind);
                 const document = await vscode.workspace.openTextDocument(vscode.Uri.file(promptPath));
                 if (!this.disposed) { await vscode.window.showTextDocument(document, { preview: false }); }
                 return;
             }
             case 'promptFile': {
                 const workspacePath = await fs.realpath(job.workspacePath);
-                const promptPath = await this.choosePrompt(vscode.Uri.file(workspacePath), workspacePath, job);
-                return promptPath === undefined ? undefined : { promptPath };
+                const chosen = await this.choosePrompt(vscode.Uri.file(workspacePath), workspacePath, job);
+                return chosen === undefined ? undefined : { promptPath: chosen.promptPath };
             }
             case 'workspace': {
                 const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file');
@@ -407,12 +522,13 @@ export class AiSchedulerController implements vscode.Disposable {
                 if (!choices.length) { throw new Error(t('로컬 워크스페이스 폴더를 열어주세요.', 'Open a local workspace folder.')); }
                 choices.sort((a, b) => Number(b.workspacePath === job.workspacePath) - Number(a.workspacePath === job.workspacePath));
                 const selectedFolder = await vscode.window.showQuickPick(choices, {
-                    placeHolder: t('작업 폴더를 변경하면 해당 폴더 안의 요청문 파일을 선택합니다.', 'Choose a working folder, then select a prompt file inside it.'),
+                    placeHolder: script ? t('작업 폴더를 변경하면 해당 폴더 안의 스크립트 파일을 선택합니다.', 'Choose a working folder, then select a script file inside it.')
+                        : t('작업 폴더를 변경하면 해당 폴더 안의 요청문 파일을 선택합니다.', 'Choose a working folder, then select a prompt file inside it.'),
                 });
                 if (!selectedFolder || selectedFolder.workspacePath === job.workspacePath || this.disposed) { return; }
                 const { folder, workspacePath } = selectedFolder;
-                const promptPath = await this.choosePrompt(folder.uri, workspacePath, { ...job, promptPath: path.join(workspacePath, path.basename(job.promptPath)) });
-                return promptPath === undefined ? undefined : { workspacePath, promptPath };
+                const chosen = await this.choosePrompt(folder.uri, workspacePath, { ...job, promptPath: path.join(workspacePath, path.basename(job.promptPath)) });
+                return chosen === undefined ? undefined : { workspacePath, promptPath: chosen.promptPath };
             }
             case 'mode': {
                 const mode = await this.askMode(job.mode);
@@ -428,6 +544,10 @@ export class AiSchedulerController implements vscode.Disposable {
                 const cadence = await this.askCadence(job.cadence);
                 return cadence === undefined ? undefined : { cadence };
             }
+            case 'interpreter': {
+                await vscode.commands.executeCommand('workbench.action.openSettings', pythonSettingQuery);
+                return;
+            }
         }
     }
     private async wizard(): Promise<AiSchedule | undefined> {
@@ -437,17 +557,19 @@ export class AiSchedulerController implements vscode.Disposable {
             { placeHolder: t('AI 예약을 실행할 작업 폴더를 선택하세요.', 'Choose the working folder for the AI schedule.') }))?.folder;
         if (!selected) { return; }
         const workspacePath = await fs.realpath(selected.uri.fsPath);
-        const promptPath = await this.choosePrompt(selected.uri, workspacePath);
-        if (!promptPath || this.disposed) { return; }
+        const chosen = await this.choosePrompt(selected.uri, workspacePath);
+        if (!chosen || this.disposed) { return; }
+        const { promptPath, kind } = chosen;
         const name = await this.askName(path.basename(promptPath));
         if (!name) { return; }
-        const mode = await this.askMode();
+        // Scripts run outside the AI CLI, so its tool permissions do not apply.
+        const mode = kind === 'script' ? 'analysis' : await this.askMode();
         if (!mode) { return; }
         const bashRules = mode === 'edit' ? await this.askBashRules() : [];
         if (!bashRules) { return; }
         const cadence = await this.askCadence();
         if (!cadence) { return; }
-        return { id: randomUUID(), name, workspacePath, promptPath, mode, bashRules, cadence, enabled: true, nextRunAt: 0 };
+        return { id: randomUUID(), name, ...(kind === 'script' ? { kind } : {}), workspacePath, promptPath, mode, bashRules, cadence, enabled: true, nextRunAt: 0 };
     }
     dispose(): void {
         if (this.disposed) { return; }

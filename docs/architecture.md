@@ -58,9 +58,9 @@ TaskHub/
 │   ├── hexBitwiseUtils.ts             # 고정 폭 정수 비트 수식 파서·계산 순수 로직
 │   ├── featureLauncher.ts             # Status Bar 기능 런처·그룹형 Quick Pick·최근 사용
 │   ├── retiredJenkinsCleanup.ts       # 제거된 Jenkins 기능의 API token·이력 정리 (활성화 시)
-│   ├── aiScheduler/                   # AI CLI 예약 실행
+│   ├── aiScheduler/                   # AI CLI·Python 스크립트 예약 실행
 │   │   ├── model.ts                   # 예약 검증·로컬 저장·시계·중복 방지·수명주기
-│   │   ├── runner.ts                  # stdin 요청·네이티브 실행·폴더 잠금·결과 보고서
+│   │   ├── runner.ts                  # stdin 요청·스크립트 실행·폴더 잠금·결과 보고서
 │   │   ├── reportDocument.ts          # 읽기 전용 보고서 가상 문서
 │   │   ├── settings.ts                # 새 설정·이전 사용자 설정 호환 읽기
 │   │   ├── compatibility.ts           # 이전 명령·저장 키·저장 경로 식별자 모음
@@ -378,10 +378,10 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 
 ## AI 예약 실행
 
-[aiScheduler/settings.ts](../src/aiScheduler/settings.ts)는 예약 설정을 실행기와 기능 런처에 연결하며 이전 실험적 사용자 설정을 호환합니다. [aiScheduler/controller.ts](../src/aiScheduler/controller.ts)는 신뢰된 워크스페이스에서 활성화 설정에 따라 뷰·명령·타이머를 등록합니다. 패널 표시 설정은 manifest의 뷰 조건으로만 적용하며 실행기의 수명주기를 바꾸지 않습니다. [model.ts](../src/aiScheduler/model.ts)는 workspaceState에 예약 정의와 다음 시각·최종 결과를 저장하고, 슬롯을 저장한 뒤 대기열에서 순차 실행합니다. 저장 실패는 자동 실행을 중단합니다. [runner.ts](../src/aiScheduler/runner.ts)는 쉘 없이 CLI를 시작하고 stdin으로 요청문을 전달합니다. 폴더 realpath 기반 임대 잠금과 슬롯 기록은 창 간 동시 수정·동일 시각 재실행을 막습니다. 임대가 손상되면 실행을 취소하며 CLI가 닫힐 때까지 잠금을 유지합니다. [reportDocument.ts](../src/aiScheduler/reportDocument.ts)는 명시적으로 연 보고서만 가상 문서로 제공합니다.
+[aiScheduler/settings.ts](../src/aiScheduler/settings.ts)는 예약 설정을 실행기와 기능 런처에 연결하며 이전 실험적 사용자 설정을 호환합니다. [aiScheduler/controller.ts](../src/aiScheduler/controller.ts)는 신뢰된 워크스페이스에서 활성화 설정에 따라 뷰·명령·타이머를 등록합니다. 패널 표시 설정은 manifest의 뷰 조건으로만 적용하며 실행기의 수명주기를 바꾸지 않습니다. [model.ts](../src/aiScheduler/model.ts)는 workspaceState에 예약 정의와 다음 시각·최종 결과를 저장하고, 슬롯을 저장한 뒤 대기열에서 순차 실행합니다. 예약 상태 저장 실패는 자동 실행을 중단합니다. [runner.ts](../src/aiScheduler/runner.ts)는 쉘 없이 CLI를 시작하고 stdin으로 요청문을 전달합니다. 스크립트 예약(`kind: 'script'`)은 같은 프로세스 관리·한도·잠금을 거쳐 사용자 설정의 Python 인터프리터로 스크립트를 실행하고 종료 코드로 결과를 판정합니다. `kind`가 없는 이전 예약은 요청문 예약으로 읽습니다. 폴더 realpath 기반 임대 잠금과 슬롯 기록은 창 간 동시 수정·동일 시각 재실행을 막습니다. 임대가 손상되면 실행을 취소하며 CLI가 닫힐 때까지 잠금을 유지합니다. [reportDocument.ts](../src/aiScheduler/reportDocument.ts)는 명시적으로 연 보고서만 가상 문서로 제공합니다.
 
 요청문 예제 생성은 부모 폴더의 realpath가 선택한 워크스페이스 안인지 확인하고 배타적 파일 생성으로 기존 파일·심볼릭 링크 덮어쓰기를 막습니다.
 
-결과·잠금은 globalStorageUri 아래에 저장합니다. 보고서의 실행 정보는 설정에서 재구성하지 않고 실제 spawn 인자와 stdin 기록 시점에 수집합니다. 정상 비활성화는 프로세스 트리 취소와 저장 완료를 기다리고, 강제 종료로 남은 실행 중 상태는 재시작 시 추적 중단·일시 정지로 복구합니다. CLI 실행 정책·사용법·한계는 [features.md §26](./features.md#26-ai-예약-실행)에서 관리합니다.
+결과·잠금은 globalStorageUri 아래에 저장합니다. 실행기의 보고서 저장·정리 오류는 `AiRunResult.detail`로 반환하여 스케줄러 상태 저장 예외와 구분합니다. 보고서의 실행 정보는 설정에서 재구성하지 않고 실제 spawn 인자와 stdin 기록 시점에 수집합니다. 정상 비활성화는 프로세스 트리 취소와 저장 완료를 기다리고, 강제 종료로 남은 실행 중 상태는 재시작 시 추적 중단·일시 정지로 복구합니다. CLI 실행 정책·사용법·한계는 [features.md §26](./features.md#26-ai-예약-실행)에서 관리합니다.
 
 [compatibility.ts](../src/aiScheduler/compatibility.ts)는 이전 식별자를 호환 경계에 모읍니다. 예약은 새 workspaceState 키에 저장하며 새 값이 없을 때만 이전 값을 읽고 검증한 뒤 저장합니다. 새 보고서와 손상 데이터 백업은 `ai-scheduler`에 쓰며, 이전 보고서는 기존 위치에서 읽고 전체 보관 한도에 함께 포함합니다. 폴더 임대와 실행 슬롯 기록은 이전 잠금 경로를 유지해 업그레이드 전 창과 동시에 실행되는 것을 막습니다.
