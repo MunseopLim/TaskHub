@@ -510,10 +510,11 @@ suite('대화형 태스크 대기 중 중지', () => {
     }
 
     /** 파일이 생길 때까지 폴링. 고정 sleep 대신 실제 상태를 기다린다. */
-    async function waitForFile(file: string, timeoutMs: number): Promise<boolean> {
+    async function waitForFile(file: string, timeoutMs: number, finished?: () => boolean): Promise<boolean> {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
             if (fs.existsSync(file)) { return true; }
+            if (finished?.()) { return false; }
             await new Promise(resolve => setTimeout(resolve, 50));
         }
         return false;
@@ -658,33 +659,44 @@ suite('대화형 태스크 대기 중 중지', () => {
             // 계약은 "스트리밍 태스크도 중지로 확실히 끝나고 실패로 기록된다"
             // 하나다.
             const script = makeTreeMarkerScript('streamed-stop', 3000);
+            const actionId = `stop-streamed-${process.pid}-${Date.now()}`;
             const context = makeContext();
             const actionItem: ActionItem = {
-                id: 'stop-streamed',
+                id: actionId,
                 title: 'Stop streamed task',
                 action: {
                     description: 'streamed shell task (vscode.tasks path)',
                     tasks: [{
                         id: 'run',
                         type: 'shell',
-                        command: script.command,
+                        // 중지 계약을 검증하므로 Windows PowerShell의 시작·문자열 재해석을 끼우지 않는다.
+                        // passTheResultToNextTask는 계속 생략해 실제 VS Code Task 경로를 지난다.
+                        command: 'node',
+                        args: script.runnerArgs,
                         cwd: script.cwd,
                     }],
                 },
             } as unknown as ActionItem;
             const history = new HistoryProvider(context);
             const mainView = new MainViewProvider(context, () => [actionItem]);
+            const executions: vscode.TaskExecution[] = [];
+            const subscription = vscode.tasks.onDidStartTask(event => {
+                if (event.execution.task.name.includes(actionId)) { executions.push(event.execution); }
+            });
+            let run: Promise<void> | undefined;
+            let settled = false;
 
             try {
-                const run = executeAction(actionItem, context, mainView, history);
-                run.catch(() => { /* settleWithin 이 판정한다 */ });
+                run = executeAction(actionItem, context, mainView, history);
+                void run.then(() => { settled = true; }, () => { settled = true; });
 
                 assert.ok(
-                    await waitForFile(script.startedMarker, 15000),
-                    '스트리밍 태스크가 시작되지 않았다 — 테스트 전제가 깨졌다'
+                    await waitForFile(script.startedMarker, 15000, () => settled),
+                    `스트리밍 태스크가 시작되지 않았다 — 종료 여부: ${settled}, 이력: ${JSON.stringify(history.getHistory())}`
                 );
+                assert.strictEqual(executions.length, 1, '실제 VS Code Task가 시작되어야 한다');
 
-                assert.strictEqual(stopRunningAction('stop-streamed'), true);
+                assert.strictEqual(stopRunningAction(actionId), true);
                 await settleWithin(run, 15000, 'IT-134');
 
                 const entries = history.getHistory();
@@ -695,11 +707,23 @@ suite('대화형 태스크 대기 중 중지', () => {
                     '중지된 스트리밍 태스크가 성공으로 기록되면 사용자는 빌드가 끝난 줄 안다'
                 );
                 assert.ok(
-                    !actionStates.has('stop-streamed'),
+                    !actionStates.has(actionId),
                     '중지된 액션은 상태 맵에서 지워져야 한다'
                 );
             } finally {
-                script.cleanup();
+                try {
+                    if (run && !settled) {
+                        stopRunningAction(actionId);
+                        for (const execution of executions) { try { execution.terminate(); } catch { /* Already finished. */ } }
+                        await settleWithin(run, 15000, 'IT-134 cleanup');
+                    }
+                } finally {
+                    subscription.dispose();
+                    for (const terminal of vscode.window.terminals) {
+                        if (terminal.name.includes(actionId)) { terminal.dispose(); }
+                    }
+                    await fs.promises.rm(script.cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+                }
             }
         });
 
