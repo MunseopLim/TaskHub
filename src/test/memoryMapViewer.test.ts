@@ -70,25 +70,25 @@ suite('Memory Map Viewer Test Suite', () => {
         return JSON.parse(match![1]);
     }
 
-    test('should open multiple panels for different file paths', () => {
+    test('should open multiple panels for different file paths', async () => {
         const file1 = createTempElf('project-a', 'firmware.axf');
         const file2 = createTempElf('project-b', 'firmware.axf');
 
         const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        openMemoryMapPanel(ctx, file1);
-        openMemoryMapPanel(ctx, file2);
+        await openMemoryMapPanel(ctx, file1);
+        await openMemoryMapPanel(ctx, file2);
 
         assert.strictEqual(panelRegistry.size(), 2, 'should have 2 separate panels');
         assert.ok(panelRegistry.has(file1), 'panel for file1 should exist');
         assert.ok(panelRegistry.has(file2), 'panel for file2 should exist');
     });
 
-    test('should reuse panel when opening the same file path', () => {
+    test('should reuse panel when opening the same file path', async () => {
         const file1 = createTempElf('project-c', 'app.axf');
 
         const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        openMemoryMapPanel(ctx, file1);
-        openMemoryMapPanel(ctx, file1);
+        await openMemoryMapPanel(ctx, file1);
+        await openMemoryMapPanel(ctx, file1);
 
         assert.strictEqual(panelRegistry.size(), 1, 'should still have 1 panel');
     });
@@ -105,7 +105,7 @@ suite('Memory Map Viewer Test Suite', () => {
                 panel = originalCreate(...args);
                 return panel;
             }) as typeof originalCreate;
-            assert.ok(openMemoryMapPanel({ subscriptions: [] } as unknown as vscode.ExtensionContext, filePath, {
+            assert.ok(await openMemoryMapPanel({ subscriptions: [] } as unknown as vscode.ExtensionContext, filePath, {
                 regions: [
                     { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
                     { name: 'RAM', origin: 0x20000000, size: 0x1000 },
@@ -248,7 +248,7 @@ suite('Memory Map Viewer Test Suite', () => {
             };
             (vscode.window as any).showWarningMessage = async (message: string) => { warnings.push(message); };
             const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapPanel(context, filePath));
+            assert.ok(await openMemoryMapPanel(context, filePath));
             assert.deepStrictEqual(options?.localResourceRoots, [], '이 패널은 로컬 리소스를 로드하지 않는다');
             for (const invalid of [null, undefined, false, 0, '', [], {}, { command: 'openHex' }]) {
                 await receive(invalid);
@@ -294,18 +294,18 @@ suite('Memory Map Viewer Test Suite', () => {
         }
     });
 
-    test('should track last active panel', () => {
+    test('should track last active panel', async () => {
         const file1 = createTempElf('project-d', 'a.axf');
         const file2 = createTempElf('project-e', 'b.axf');
 
         const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        openMemoryMapPanel(ctx, file1);
-        openMemoryMapPanel(ctx, file2);
+        await openMemoryMapPanel(ctx, file1);
+        await openMemoryMapPanel(ctx, file2);
 
         assert.strictEqual(panelRegistry.getLastActive(), file2, 'last active should be file2');
     });
 
-    test('ELF 심볼·섹션은 host가 보관한 file offset target으로 Hex 진입점을 만든다', () => {
+    test('ELF 심볼·섹션은 host가 보관한 file offset target으로 Hex 진입점을 만든다', async () => {
         const dir = path.join(tmpDir, 'taskhub-test', 'hex-targets');
         fs.mkdirSync(dir, { recursive: true });
         const filePath = path.join(dir, 'symbols.axf');
@@ -314,7 +314,7 @@ suite('Memory Map Viewer Test Suite', () => {
         tmpFiles.push(filePath);
 
         const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-        const opened = openMemoryMapPanel(ctx, filePath, {
+        const opened = await openMemoryMapPanel(ctx, filePath, {
             regions: [
                 { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
                 { name: 'RAM', origin: 0x20000000, size: 0x1000 },
@@ -398,7 +398,7 @@ suite('Memory Map Viewer Test Suite', () => {
                 extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [],
                 globalState: { get: () => undefined, update: async () => {} },
             } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapPanel(ctx, filePath, {
+            assert.ok(await openMemoryMapPanel(ctx, filePath, {
                 regions: [
                     { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
                     { name: 'RAM', origin: 0x20000000, size: 0x1000 },
@@ -506,7 +506,7 @@ suite('Memory Map Viewer Test Suite', () => {
             };
 
             const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapPanel(ctx, filePath, {
+            assert.ok(await openMemoryMapPanel(ctx, filePath, {
                 regions: [
                     { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
                     { name: 'RAM', origin: 0x20000000, size: 0x1000 },
@@ -585,7 +585,7 @@ suite('Memory Map Viewer Test Suite', () => {
         }
     });
 
-    test('IT-194b: SHF_COMPRESSED .debug_line은 파서 오류 대신 지원 안내 후 소스 열을 숨긴다', () => {
+    test('IT-194b: SHF_COMPRESSED .debug_line은 파서 오류 대신 지원 안내 후 소스 열을 숨긴다', async () => {
         const dir = path.join(tmpDir, 'taskhub-test', 'dwarf-compressed');
         fs.mkdirSync(dir, { recursive: true });
         const filePath = path.join(dir, 'compressed.axf');
@@ -600,7 +600,7 @@ suite('Memory Map Viewer Test Suite', () => {
                 return Promise.resolve(undefined);
             };
             const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapPanel(ctx, filePath, {
+            assert.ok(await openMemoryMapPanel(ctx, filePath, {
                 regions: [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }],
             }));
             assert.deepStrictEqual(panelRegistry.getSourceTargets(filePath), []);
@@ -666,7 +666,7 @@ suite('Memory Map Viewer Test Suite', () => {
             (vscode.window as any).showTextDocument = async () => editor as unknown as vscode.TextEditor;
 
             const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapPanel(ctx, filePath, {
+            assert.ok(await openMemoryMapPanel(ctx, filePath, {
                 regions: [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }],
             }));
             assert.ok(memoryHandler);
@@ -702,7 +702,7 @@ suite('Memory Map Viewer Test Suite', () => {
         }
     });
 
-    test('IT-195b: 압축된 DWARF 5 문자열 section은 미지원 안내 후 소스 이동만 숨긴다', () => {
+    test('IT-195b: 압축된 DWARF 5 문자열 section은 미지원 안내 후 소스 이동만 숨긴다', async () => {
         const dir = path.join(tmpDir, 'taskhub-test', 'dwarf5-compressed-string');
         fs.mkdirSync(dir, { recursive: true });
         const filePath = path.join(dir, 'compressed-string.axf');
@@ -723,7 +723,7 @@ suite('Memory Map Viewer Test Suite', () => {
                 return Promise.resolve(undefined);
             };
             const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapPanel(ctx, filePath, {
+            assert.ok(await openMemoryMapPanel(ctx, filePath, {
                 regions: [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }],
             }));
             assert.deepStrictEqual(panelRegistry.getSourceTargets(filePath), []);
@@ -737,7 +737,7 @@ suite('Memory Map Viewer Test Suite', () => {
         }
     });
 
-    test('IT-195c: 정상 unit이 함께 있어도 압축 문자열 unit의 미지원 형식을 안내한다', () => {
+    test('IT-195c: 정상 unit이 함께 있어도 압축 문자열 unit의 미지원 형식을 안내한다', async () => {
         const dir = path.join(tmpDir, 'taskhub-test', 'dwarf5-mixed-compressed-string');
         fs.mkdirSync(dir, { recursive: true });
         const filePath = path.join(dir, 'mixed-compressed-string.axf');
@@ -762,7 +762,7 @@ suite('Memory Map Viewer Test Suite', () => {
                 return Promise.resolve(undefined);
             };
             const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapPanel(ctx, filePath, {
+            assert.ok(await openMemoryMapPanel(ctx, filePath, {
                 regions: [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }],
             }));
             assert.strictEqual(panelRegistry.getSourceTargets(filePath)?.length, 3);
@@ -1383,10 +1383,10 @@ suite('Memory Map Viewer Test Suite', () => {
         // can't silently disappear (a broken template literal would also drop
         // the whole <script>, failing these assertions).
 
-        test('search box is sticky, has match-nav controls, and a match-highlight style', () => {
+        test('search box is sticky, has match-nav controls, and a match-highlight style', async () => {
             const file = createTempElf('search-ux-a', 'fw.axf');
             const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-            openMemoryMapPanel(ctx, file);
+            await openMemoryMapPanel(ctx, file);
             const html = panelRegistry.getHtml(file);
             assert.ok(html, 'panel HTML should be available');
             assert.ok(/\.search-box\s*\{[^}]*position:\s*sticky/.test(html!), '.search-box should be position: sticky');
@@ -1398,10 +1398,10 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.ok(/placeholder="Search\.\.\..*function.*"/.test(html!), 'search placeholder should mention the function column');
         });
 
-        test('webview script exposes the highlight + match-navigation helpers', () => {
+        test('webview script exposes the highlight + match-navigation helpers', async () => {
             const file = createTempElf('search-ux-b', 'fw.axf');
             const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-            openMemoryMapPanel(ctx, file);
+            await openMemoryMapPanel(ctx, file);
             const html = panelRegistry.getHtml(file)!;
             assert.ok(html.includes('function hl(text)'), 'hl() escape+highlight helper should be present');
             assert.ok(html.includes('function markTextNodes('), 'markTextNodes() helper should be present');
@@ -1424,15 +1424,15 @@ suite('Memory Map Viewer Test Suite', () => {
         // registry wasn't touched. The user-visible error is routed through
         // vscode.window.showErrorMessage, which the test host swallows.
 
-        test('non-existent file: panel is not created', () => {
+        test('non-existent file: panel is not created', async () => {
             const missing = path.join(tmpDir, 'taskhub-test', 'missing', 'does-not-exist.axf');
             const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-            openMemoryMapPanel(ctx, missing);
+            await openMemoryMapPanel(ctx, missing);
             assert.strictEqual(panelRegistry.has(missing), false);
             assert.strictEqual(panelRegistry.size(), 0);
         });
 
-        test('file one byte over MEMORY_MAP_MAX_FILE_SIZE: panel is not created', () => {
+        test('file one byte over MEMORY_MAP_MAX_FILE_SIZE: panel is not created', async () => {
             // Create a sparse file just above the limit. truncate allocates no
             // real blocks on APFS / ext4, so this stays fast and low-disk.
             const dir = path.join(tmpDir, 'taskhub-test', 'oversize');
@@ -1449,12 +1449,12 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.strictEqual(stat.size, MEMORY_MAP_MAX_FILE_SIZE + 1, 'sparse-file size boundary setup');
 
             const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-            openMemoryMapPanel(ctx, oversize);
+            await openMemoryMapPanel(ctx, oversize);
             assert.strictEqual(panelRegistry.has(oversize), false);
             assert.strictEqual(panelRegistry.size(), 0);
         });
 
-        test('file smaller than ELF header (<16 bytes): panel is not created', () => {
+        test('file smaller than ELF header (<16 bytes): panel is not created', async () => {
             const dir = path.join(tmpDir, 'taskhub-test', 'tooSmall');
             fs.mkdirSync(dir, { recursive: true });
             const tooSmall = path.join(dir, 'tiny.axf');
@@ -1462,12 +1462,12 @@ suite('Memory Map Viewer Test Suite', () => {
             tmpFiles.push(tooSmall);
 
             const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-            openMemoryMapPanel(ctx, tooSmall);
+            await openMemoryMapPanel(ctx, tooSmall);
             assert.strictEqual(panelRegistry.has(tooSmall), false);
             assert.strictEqual(panelRegistry.size(), 0);
         });
 
-        test('buffer with wrong ELF magic: panel is not created (parseElf32 throws)', () => {
+        test('buffer with wrong ELF magic: panel is not created (parseElf32 throws)', async () => {
             const dir = path.join(tmpDir, 'taskhub-test', 'badMagic');
             fs.mkdirSync(dir, { recursive: true });
             const badMagic = path.join(dir, 'bad.axf');
@@ -1478,7 +1478,7 @@ suite('Memory Map Viewer Test Suite', () => {
             tmpFiles.push(badMagic);
 
             const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-            openMemoryMapPanel(ctx, badMagic);
+            await openMemoryMapPanel(ctx, badMagic);
             assert.strictEqual(panelRegistry.has(badMagic), false);
             assert.strictEqual(panelRegistry.size(), 0);
         });
@@ -1501,12 +1501,12 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
     let handlerSource: string;
     let webviewHtml: string;
 
-    suiteSetup(() => {
+    suiteSetup(async () => {
         panelRegistry.clear();
         filePath = path.join(os.tmpdir(), `taskhub-mm-save-${process.pid}.axf`);
         fs.writeFileSync(filePath, buildMinimalElf32());
         const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapPanel(ctx, filePath, { regions: [] }));
+        assert.ok(await openMemoryMapPanel(ctx, filePath, { regions: [] }));
         webviewHtml = panelRegistry.getHtml(filePath) ?? '';
 
         // 주입된 핸들러 본문을 그대로 꺼내 실행한다.

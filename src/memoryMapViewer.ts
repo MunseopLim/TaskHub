@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { analyzeElfBuffer, analyzeListingBuffer } from './fileAnalysis';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary, ElfFileRangeResolution, ElfSymbol } from './elfParser';
+import { classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary, ElfFileRangeResolution, ElfSymbol } from './elfParser';
 import { parseLinkerFileWithDiagnostics } from './linkerScriptParser';
-import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
+import { ARM_LINK_MAX_ENTRIES, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
 import { plainNotificationText } from './notificationText';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
@@ -238,9 +239,11 @@ interface MemoryMapRegionResolution {
 interface MemoryMapPanelOpenResult {
     opened: boolean;
     reason?: string;
+    superseded?: boolean;
 }
 
 type MemoryMapOpenMode = 'cold' | 'refresh';
+const memoryMapOpenRequests = new Map<string, symbol>();
 
 class MemoryMapLinkerTooLargeError extends Error {
     constructor(readonly size: number) {
@@ -496,12 +499,12 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
 }
 
 /** Explorer 컨텍스트 메뉴에서 선택한 ELF를 추가 질문 없이 바로 연다. */
-export function openMemoryMapFromUri(
+export async function openMemoryMapFromUri(
     context: vscode.ExtensionContext,
     arg?: unknown,
     config?: MemoryMapConfig,
     recordHistory?: MemoryMapHistoryRecorder
-): boolean {
+): Promise<boolean> {
     const uri = coerceToUri(arg);
     // Remote extension hosts receive workspace resources as `file:` URIs whose
     // fsPath belongs to that host. A literal vscode-remote URI still carries a
@@ -523,7 +526,7 @@ export function openMemoryMapFromUri(
     }
 
     const filePath = uri.fsPath;
-    if (!openMemoryMapPanel(context, filePath, config, recordHistory)) {
+    if (!await openMemoryMapPanel(context, filePath, config, recordHistory)) {
         return false;
     }
     recordHistory?.({
@@ -535,22 +538,41 @@ export function openMemoryMapFromUri(
     return true;
 }
 
-export function openMemoryMapPanel(
+export async function openMemoryMapPanel(
     context: vscode.ExtensionContext,
     filePath: string,
     config?: MemoryMapConfig,
     recordHistory?: MemoryMapHistoryRecorder
-): boolean {
-    return openMemoryMapPanelResult(context, filePath, config, 'cold', recordHistory).opened;
+): Promise<boolean> {
+    return (await openMemoryMapPanelResult(context, filePath, config, 'cold', recordHistory)).opened;
 }
 
-function openMemoryMapPanelResult(
+async function openMemoryMapPanelResult(
     context: vscode.ExtensionContext,
     filePath: string,
     config: MemoryMapConfig | undefined,
     mode: MemoryMapOpenMode,
     recordHistory?: MemoryMapHistoryRecorder
-): MemoryMapPanelOpenResult {
+): Promise<MemoryMapPanelOpenResult> {
+    const key = filePathIdentityKey(filePath);
+    const request = Symbol();
+    memoryMapOpenRequests.set(key, request);
+    try {
+        return await analyzeMemoryMapPanel(context, filePath, config, mode, recordHistory,
+            () => memoryMapOpenRequests.get(key) === request);
+    } finally {
+        if (memoryMapOpenRequests.get(key) === request) { memoryMapOpenRequests.delete(key); }
+    }
+}
+
+async function analyzeMemoryMapPanel(
+    context: vscode.ExtensionContext,
+    filePath: string,
+    config: MemoryMapConfig | undefined,
+    mode: MemoryMapOpenMode,
+    recordHistory: MemoryMapHistoryRecorder | undefined,
+    isCurrent: () => boolean
+): Promise<MemoryMapPanelOpenResult> {
     const fileName = filePath.split(/[\\/]/).pop() || 'Memory Map';
 
     const resolvedRegions = resolveMemoryMapRegions(config, mode);
@@ -560,13 +582,15 @@ function openMemoryMapPanelResult(
 
     let stat: fs.Stats;
     try {
-        stat = fs.statSync(filePath);
+        stat = await fs.promises.stat(filePath);
     } catch (e: unknown) {
+        if (!isCurrent()) { return { opened: false, superseded: true }; }
         const reason = describeMemoryMapInputFailure(e, fileName);
         vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
+    if (!isCurrent()) { return { opened: false, superseded: true }; }
     if (stat.size > MEMORY_MAP_MAX_FILE_SIZE) {
         const reason = t(
             `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다. 한도 이하의 입력 파일을 사용하세요.`,
@@ -578,13 +602,18 @@ function openMemoryMapPanelResult(
 
     let buffer: Buffer;
     try {
-        buffer = fs.readFileSync(filePath);
+        buffer = await fs.promises.readFile(filePath);
+        if (buffer.length > MEMORY_MAP_MAX_FILE_SIZE) {
+            throw new Error(t('파일 읽기 한도를 초과했습니다.', 'File exceeds the read limit.'));
+        }
     } catch (e: unknown) {
+        if (!isCurrent()) { return { opened: false, superseded: true }; }
         const reason = describeMemoryMapInputFailure(e, fileName);
         vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
+    if (!isCurrent()) { return { opened: false, superseded: true }; }
     if (buffer.length < 16) {
         const reason = t(
             `유효한 ELF 파일이 아닙니다 (${fileName}): 파일이 너무 작습니다 (${formatFileSize(buffer.length)}). 파일을 다시 빌드한 뒤 다시 시도하세요.`,
@@ -596,13 +625,17 @@ function openMemoryMapPanelResult(
 
     let parseResult;
     try {
-        parseResult = parseElf32(buffer);
+        const analysis = await analyzeElfBuffer(buffer);
+        parseResult = analysis.result;
+        buffer = analysis.content;
     } catch (_e: unknown) {
+        if (!isCurrent()) { return { opened: false, superseded: true }; }
         const reason = describeMemoryMapParseFailure(fileName, 'elf');
         vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
+    if (!isCurrent()) { return { opened: false, superseded: true }; }
     const { sections, entryPoint, symbols, segments, isLittleEndian } = parseResult;
     const sectionSummary = summarizeSections(sections, segments, buffer.length);
 
@@ -714,9 +747,9 @@ function openMemoryMapPanelResult(
         sectionSummary, memoryUsage, regions, textReport, summaryReport, hasSymbols,
         { size: stat.size, mtimeMs: stat.mtimeMs }, sourceLocations, symbols,
         () => openMemoryMapPanelResult(context, filePath, config, 'refresh', recordHistory),
-        linkerFilePath => {
+        async linkerFilePath => {
             const nextConfig = { ...config, linkerFilePath };
-            const result = openMemoryMapPanelResult(
+            const result = await openMemoryMapPanelResult(
                 context,
                 filePath,
                 nextConfig,
@@ -737,25 +770,42 @@ function openMemoryMapPanelResult(
     return { opened: true };
 }
 
-export function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: string): boolean {
-    return openMemoryMapFromListingResult(context, filePath).opened;
+export async function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: string): Promise<boolean> {
+    return (await openMemoryMapFromListingResult(context, filePath)).opened;
 }
 
-function openMemoryMapFromListingResult(
+async function openMemoryMapFromListingResult(
     context: vscode.ExtensionContext,
     filePath: string
-): MemoryMapPanelOpenResult {
+): Promise<MemoryMapPanelOpenResult> {
+    const key = filePathIdentityKey(filePath);
+    const request = Symbol();
+    memoryMapOpenRequests.set(key, request);
+    try {
+        return await analyzeMemoryMapListing(context, filePath, () => memoryMapOpenRequests.get(key) === request);
+    } finally {
+        if (memoryMapOpenRequests.get(key) === request) { memoryMapOpenRequests.delete(key); }
+    }
+}
+
+async function analyzeMemoryMapListing(
+    context: vscode.ExtensionContext,
+    filePath: string,
+    isCurrent: () => boolean
+): Promise<MemoryMapPanelOpenResult> {
     const fileName = filePath.split(/[\\/]/).pop() || 'Memory Map';
 
     let stat: fs.Stats;
     try {
-        stat = fs.statSync(filePath);
+        stat = await fs.promises.stat(filePath);
     } catch (e: unknown) {
+        if (!isCurrent()) { return { opened: false, superseded: true }; }
         const reason = describeMemoryMapInputFailure(e, fileName);
         vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
+    if (!isCurrent()) { return { opened: false, superseded: true }; }
     if (stat.size > MEMORY_MAP_MAX_FILE_SIZE) {
         const reason = t(
             `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다. 한도 이하의 입력 파일을 사용하세요.`,
@@ -765,16 +815,31 @@ function openMemoryMapFromListingResult(
         return { opened: false, reason };
     }
 
-    let content: string;
+    let content: Buffer;
     try {
-        content = fs.readFileSync(filePath, 'utf-8');
+        content = await fs.promises.readFile(filePath);
+        if (content.length > MEMORY_MAP_MAX_FILE_SIZE) {
+            throw new Error(t('파일 읽기 한도를 초과했습니다.', 'File exceeds the read limit.'));
+        }
     } catch (e: unknown) {
+        if (!isCurrent()) { return { opened: false, superseded: true }; }
         const reason = describeMemoryMapInputFailure(e, fileName);
         vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
-    if (content.trim().length === 0) {
+    let result;
+    try {
+        result = await analyzeListingBuffer(content);
+    } catch (_e: unknown) {
+        if (!isCurrent()) { return { opened: false, superseded: true }; }
+        const reason = describeMemoryMapParseFailure(fileName, 'listing');
+        vscode.window.showErrorMessage(plainNotificationText(reason));
+        return { opened: false, reason };
+    }
+
+    if (!isCurrent()) { return { opened: false, superseded: true }; }
+    if (result.empty) {
         const reason = t(
             `Listing 파일이 비어 있습니다 (${fileName}). Listing을 다시 생성한 뒤 다시 시도하세요.`,
             `The listing file is empty (${fileName}). Regenerate it, then try again.`
@@ -782,16 +847,6 @@ function openMemoryMapFromListingResult(
         vscode.window.showWarningMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
-
-    let result;
-    try {
-        result = parseArmLinkList(content);
-    } catch (_e: unknown) {
-        const reason = describeMemoryMapParseFailure(fileName, 'listing');
-        vscode.window.showErrorMessage(plainNotificationText(reason));
-        return { opened: false, reason };
-    }
-
     // 조용히 자르면 사용자가 불완전한 목록을 완전한 것으로 착각한다 —
     // "이 심볼이 왜 없지"가 링커 문제인지 뷰어 한계인지 알 수 없다.
     // 요약 수치(Total RO/RW/ROM)는 잘린 엔트리까지 포함해 계산되므로 정확하다.
@@ -896,8 +951,8 @@ function showPanel(
     sourceFingerprint?: { size: number; mtimeMs: number },
     sourceLocations: DwarfSourceLocation[] = [],
     sourceSymbols: ElfSymbol[] = [],
-    refresh?: () => MemoryMapPanelOpenResult,
-    configureLinker?: (linkerFilePath: string) => MemoryMapPanelOpenResult
+    refresh?: () => MemoryMapPanelOpenResult | Promise<MemoryMapPanelOpenResult>,
+    configureLinker?: (linkerFilePath: string) => MemoryMapPanelOpenResult | Promise<MemoryMapPanelOpenResult>
 ) {
     const panelKey = filePathIdentityKey(filePath);
     const existing = panels.get(panelKey);
@@ -1027,7 +1082,7 @@ function showPanel(
                     return;
                 }
 
-                openHexViewerFile(context, filePath, {
+                await openHexViewerFile(context, filePath, {
                     forceBinary: true,
                     initialSelection: {
                         startOffset: target.fileRange.offset,
@@ -1096,13 +1151,13 @@ function showPanel(
                 state.panelFeedback = undefined;
                 let result: MemoryMapPanelOpenResult = { opened: false };
                 try {
-                    result = refresh();
+                    result = await refresh();
                 } catch (_e: unknown) {
                     const reason = describeUnexpectedMemoryMapRefreshFailure(fileName);
                     vscode.window.showErrorMessage(plainNotificationText(reason));
                     result = { opened: false, reason };
                 }
-                if (!result.opened) {
+                if (!result.opened && !result.superseded) {
                     state.refreshFailure = {
                         renderId: state.renderId,
                         refreshAttemptId,
@@ -1121,7 +1176,7 @@ function showPanel(
                         || t('선택한 링커/스캐터 파일', 'selected linker/scatter file');
                     let result: MemoryMapPanelOpenResult;
                     try {
-                        result = configureLinker(linkerFilePath);
+                        result = await configureLinker(linkerFilePath);
                     } catch (_e: unknown) {
                         result = {
                             opened: false,
@@ -1131,6 +1186,7 @@ function showPanel(
                             ),
                         };
                     }
+                    if (result.superseded) { return; }
                     const feedbackState = panels.get(panelKey);
                     if (!feedbackState) { return; }
                     feedbackState.panelFeedback = {

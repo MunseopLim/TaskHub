@@ -42,7 +42,7 @@ suite('Object Summary 정렬', () => {
     let filePath: string;
     let html: string;
 
-    suiteSetup(() => {
+    suiteSetup(async () => {
         panelRegistry.clear();
         filePath = path.join(os.tmpdir(), `taskhub-objsort-${process.pid}.axf`);
         fs.writeFileSync(filePath, buildElf32WithSymbols());
@@ -50,7 +50,7 @@ suite('Object Summary 정렬', () => {
             extensionPath: path.resolve(__dirname, '..', '..'),
             subscriptions: [],
         } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapPanel(ctx, filePath, {
+        assert.ok(await openMemoryMapPanel(ctx, filePath, {
             regions: [
                 { name: 'FLASH', origin: 0x08000000, size: 512 * 1024 },
                 { name: 'RAM', origin: 0x20000000, size: 128 * 1024 },

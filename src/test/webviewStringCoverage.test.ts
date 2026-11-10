@@ -77,7 +77,7 @@ import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures
  * 없으면 향후 VS Code가 `language`를 재정의 불가로 바꿨을 때 탐지기가 조용히
  * 원래의 로케일 의존 상태로 돌아간다 — 이 함수가 고치려는 결함 그 자체다.
  */
-function withLanguage<T>(language: string, body: () => T): T {
+async function withLanguage<T>(language: string, body: () => T | Promise<T>): Promise<T> {
     const descriptor = Object.getOwnPropertyDescriptor(vscode.env, 'language');
     assert.ok(
         descriptor && (descriptor.configurable || typeof descriptor.set === 'function'),
@@ -90,7 +90,7 @@ function withLanguage<T>(language: string, body: () => T): T {
             language.startsWith('ko') ? '한국어' : 'English',
             `로케일 고정이 t()에 반영되지 않았다 (language=${language})`
         );
-        return body();
+        return await body();
     } finally {
         Object.defineProperty(vscode.env, 'language', descriptor!);
     }
@@ -218,8 +218,8 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
     // 두 로케일 모두에서 돌린다 — 근거는 파일 상단 주석 참조.
     for (const lang of ['ko', 'en'] as const) {
 
-        test(`JSON Editor (${lang})`, () => {
-            withLanguage(lang, () => {
+        test(`JSON Editor (${lang})`, async () => {
+            await withLanguage(lang, () => {
                 const html = getJsonEditorHtml(
                     { rows: [{ name: 'a', tags: ['x', 'y'] }] },
                     undefined,
@@ -235,8 +235,8 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
             });
         });
 
-        test(`Hex Viewer (${lang})`, () => {
-            withLanguage(lang, () => {
+        test(`Hex Viewer (${lang})`, async () => {
+            await withLanguage(lang, () => {
                 const parsed = parseIntelHex([':10000000000102030405060708090A0B0C0D0E0F78', ':00000001FF'].join('\n'));
                 assertNoHardcodedStrings(
                     buildHexViewerHtml('firmware.hex', parsed),
@@ -247,8 +247,8 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
             });
         });
 
-        test(`Hex/Text Converter (${lang})`, () => {
-            withLanguage(lang, () => {
+        test(`Hex/Text Converter (${lang})`, async () => {
+            await withLanguage(lang, () => {
                 assertNoHardcodedStrings(
                     buildHexConverterHtml(),
                     buildHexConverterStrings(),
@@ -267,9 +267,9 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
          * 분기 자체가 ELF 렌더에서는 그려지지 않았다. 0.6.27이 그 버튼의
          * 하드코딩을 고치고도 탐지기로는 확인할 수 없었던 이유다.
          */
-        test(`Memory Map — ARM link listing (${lang})`, function () {
+        test(`Memory Map — ARM link listing (${lang})`, async function () {
             this.timeout(10000);
-            withLanguage(lang, () => {
+            await withLanguage(lang, async () => {
                 panelRegistry.clear();
                 const listingPath = path.resolve(__dirname, '..', '..', 'examples', 'sample_armlink.txt');
                 assert.ok(fs.existsSync(listingPath), `픽스처가 없다: ${listingPath}`);
@@ -278,7 +278,7 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
                         extensionPath: path.resolve(__dirname, '..', '..'),
                         subscriptions: [],
                     } as unknown as vscode.ExtensionContext;
-                    assert.ok(openMemoryMapFromListing(ctx, listingPath));
+                    assert.ok(await openMemoryMapFromListing(ctx, listingPath));
                     const html = panelRegistry.getHtml(listingPath) ?? '';
                     // 이 분기가 실제로 열렸는지 먼저 못박는다. 픽스처가 바뀌어
                     // func 정보를 잃으면 아래 검사가 조용히 무의미해진다.
@@ -301,9 +301,9 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
          * 조립하는 영역이라, 픽스처가 이걸 열지 못하면 그 마크업의 결함은
          * 어떤 검사로도 보이지 않는다.
          */
-        test(`Memory Map (${lang})`, function () {
+        test(`Memory Map (${lang})`, async function () {
             this.timeout(10000);
-            withLanguage(lang, () => {
+            await withLanguage(lang, async () => {
                 panelRegistry.clear();
                 const filePath = path.join(os.tmpdir(), `taskhub-strcov-${lang}-${process.pid}.axf`);
                 fs.writeFileSync(filePath, buildElf32WithSymbols());
@@ -312,7 +312,7 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
                         extensionPath: path.resolve(__dirname, '..', '..'),
                         subscriptions: [],
                     } as unknown as vscode.ExtensionContext;
-                    assert.ok(openMemoryMapPanel(ctx, filePath, {
+                    assert.ok(await openMemoryMapPanel(ctx, filePath, {
                         regions: [
                             { name: 'FLASH', origin: 0x08000000, size: 512 * 1024 },
                             { name: 'RAM', origin: 0x20000000, size: 128 * 1024 },
@@ -349,7 +349,7 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
         );
     });
 
-    test('긴 번들 값이 짧은 하드코딩을 가리지 못한다 (0.6.26 마스킹 회귀 가드)', () => {
+    test('긴 번들 값이 짧은 하드코딩을 가리지 못한다 (0.6.26 마스킹 회귀 가드)', async () => {
         // 0.6.26 탐지기는 "어떤 번들 값이 이 조각을 포함하면 통과"라는 양방향
         // 부분 일치를 썼다. 그 결과 하드코딩된 `Function ▶`이 번들의
         // `toggleFunctionColumn`(ko: `Function 열 표시 전환`)에 'Function'이
@@ -358,7 +358,7 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
         //
         // **실제 번들**로 검사한다. 합성 번들로 대신하면 진짜 번들이 바뀌었을 때
         // 이 가드가 무의미해진다.
-        const bundle = withLanguage('ko', () => buildMemoryMapStrings());
+        const bundle = await withLanguage('ko', () => buildMemoryMapStrings());
         assert.ok(
             Object.values(bundle).some(v => v.includes('Function')),
             '전제: ko 번들에 "Function"을 포함하는 값이 있어야 이 가드가 의미를 갖는다'
@@ -375,19 +375,19 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
         );
     });
 
-    test('로케일 고정이 실제로 번들 값을 바꾼다 (탐지기 전제 검증)', () => {
+    test('로케일 고정이 실제로 번들 값을 바꾼다 (탐지기 전제 검증)', async () => {
         // 이 전제가 깨지면 두 로케일 실행이 같은 HTML을 두 번 검사하는 것에
         // 불과해진다 — 0.6.26이 `Function ▶`을 놓친 상태로 되돌아간다.
-        const ko = withLanguage('ko', () => buildMemoryMapStrings());
-        const en = withLanguage('en', () => buildMemoryMapStrings());
+        const ko = await withLanguage('ko', () => buildMemoryMapStrings());
+        const en = await withLanguage('en', () => buildMemoryMapStrings());
         assert.notDeepStrictEqual(ko, en, '로케일을 바꿔도 번들이 동일하다');
         assert.strictEqual(ko.colFunction, '함수');
         assert.strictEqual(en.colFunction, 'Function');
     });
 
-    test('한국어 Refresh 실패 시각 문구에 조사와 종결 문맥이 유지된다', () => {
-        const ko = withLanguage('ko', () => buildMemoryMapStrings());
-        const en = withLanguage('en', () => buildMemoryMapStrings());
+    test('한국어 Refresh 실패 시각 문구에 조사와 종결 문맥이 유지된다', async () => {
+        const ko = await withLanguage('ko', () => buildMemoryMapStrings());
+        const en = await withLanguage('en', () => buildMemoryMapStrings());
         assert.strictEqual(
             ko.refreshFailedAt,
             '{time}에 새로 고침 실패 — {reason} 이전 결과를 표시 중입니다.'

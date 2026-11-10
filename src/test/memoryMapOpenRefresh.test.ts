@@ -189,13 +189,103 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
-    test('ELF 로드 주소가 Flash 합계·영역 행·Hex 파일 범위에 함께 반영된다', () => {
+    async function assertSupersededRefresh(input: 'elf' | 'listing', failOldRead = false): Promise<void> {
+        const filePath = path.join(tempDir, input === 'elf' ? 'overlap.elf' : 'overlap.txt');
+        if (input === 'elf') { fs.writeFileSync(filePath, buildMinimalElf32()); }
+        else { fs.copyFileSync(path.resolve(__dirname, '..', '..', 'examples', 'sample_armlink.txt'), filePath); }
+        const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const open = () => input === 'elf'
+            ? openMemoryMapFromUri(context, vscode.Uri.file(filePath))
+            : openMemoryMapFromListing(context, filePath);
+        assert.strictEqual(await open(), true);
+        const previousRender = fake.harness.renderId();
+        const mutableFs = require('fs') as typeof fs;
+        const originalRead = mutableFs.promises.readFile;
+        let release!: () => void;
+        let started!: () => void;
+        let first = true;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const reading = new Promise<void>(resolve => { started = resolve; });
+        let pending: Promise<void> | undefined;
+        (mutableFs.promises as any).readFile = async (...args: Parameters<typeof originalRead>) => {
+            const result = await originalRead(...args);
+            if (typeof args[0] === 'string' && filePathIdentityKey(args[0]) === filePathIdentityKey(filePath) && first) {
+                first = false; started(); await gate;
+                if (failOldRead) { throw new Error('superseded read failed'); }
+            }
+            return result;
+        };
+        try {
+            pending = fake.harness.send({ command: 'refresh' });
+            await reading;
+            assert.strictEqual(await open(), true);
+            const latestRender = fake.harness.renderId();
+            assert.notStrictEqual(latestRender, previousRender);
+            release();
+            await pending;
+            assert.strictEqual(fake.harness.renderId(), latestRender);
+            assert.deepStrictEqual(fake.harness.posted.filter(message => message.command === 'refreshFailed'), []);
+            assert.deepStrictEqual(errors, []);
+        } finally {
+            release();
+            await pending;
+            mutableFs.promises.readFile = originalRead;
+        }
+    }
+
+    test('IT-314: ELF Refresh가 새 열기에 밀려도 실패를 표시하지 않는다', async () => {
+        await assertSupersededRefresh('elf');
+    });
+
+    test('IT-314b: Listing Refresh가 새 열기에 밀려도 실패를 표시하지 않는다', async () => {
+        await assertSupersededRefresh('listing');
+    });
+
+    test('IT-314c: 밀린 ELF 읽기가 실패해도 최신 패널에 오류를 알리지 않는다', async () => {
+        await assertSupersededRefresh('elf', true);
+    });
+
+    test('IT-314d: 밀린 Listing 읽기가 실패해도 최신 패널에 오류를 알리지 않는다', async () => {
+        await assertSupersededRefresh('listing', true);
+    });
+
+    test('IT-315: Listing 비동기 읽기가 끝나기 전에는 패널을 만들지 않는다', async () => {
+        const filePath = path.join(tempDir, 'async-listing.txt');
+        fs.copyFileSync(path.resolve(__dirname, '..', '..', 'examples', 'sample_armlink.txt'), filePath);
+        const mutableFs = require('fs') as typeof fs;
+        const originalRead = mutableFs.promises.readFile;
+        let release!: () => void;
+        let started!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const reading = new Promise<void>(resolve => { started = resolve; });
+        let pending: Promise<boolean> | undefined;
+        (mutableFs.promises as any).readFile = async (...args: Parameters<typeof originalRead>) => {
+            const result = await originalRead(...args);
+            if (args[0] === filePath) { started(); await gate; }
+            return result;
+        };
+        try {
+            pending = openMemoryMapFromListing({ subscriptions: [] } as unknown as vscode.ExtensionContext, filePath);
+            await reading;
+            assert.strictEqual(fake.harness.createCount, 0);
+            release();
+            assert.strictEqual(await pending, true);
+            assert.strictEqual(fake.harness.createCount, 1);
+            assert.ok(panelRegistry.getAllEntries(filePath)!.length > 0);
+        } finally {
+            release();
+            await pending;
+            mutableFs.promises.readFile = originalRead;
+        }
+    });
+
+    test('ELF 로드 주소가 Flash 합계·영역 행·Hex 파일 범위에 함께 반영된다', async () => {
         const buffer = buildElf32WithDataLoadAddress();
         const sections = parseElf32(buffer).sections;
         const data = sections.find(section => section.name === '.data')!;
         const filePath = path.join(tempDir, 'load-data.elf');
         fs.writeFileSync(filePath, buffer);
-        assert.strictEqual(openMemoryMapFromUri(
+        assert.strictEqual(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext, vscode.Uri.file(filePath)
         ), true);
         const html = panelRegistry.getHtml(filePath)!;
@@ -208,7 +298,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.deepStrictEqual(loadTarget.fileRange, { kind: 'file', offset: data.offset, size: data.size });
     });
 
-    test('Explorer URI를 대화상자 없이 열고 History를 한 번 기록한다', () => {
+    test('Explorer URI를 대화상자 없이 열고 History를 한 번 기록한다', async () => {
         const filePath = path.join(tempDir, 'FIRMWARE.ELF');
         fs.writeFileSync(filePath, buildMinimalElf32());
         const history: MemoryMapOpenHistory[] = [];
@@ -225,7 +315,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
                 throw new Error('빠른 열기는 파일 대화상자를 열면 안 된다');
             };
 
-            assert.strictEqual(openMemoryMapFromUri(
+            assert.strictEqual(await openMemoryMapFromUri(
                 { subscriptions: [] } as unknown as vscode.ExtensionContext,
                 vscode.Uri.file(filePath),
                 { regions: [{ name: 'FLASH', origin: 0x08000000, size: 64 * 1024 }] },
@@ -244,12 +334,12 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.strictEqual(history[0].inputType, 'elf');
     });
 
-    test('ELF 계열이 아닌 URI는 패널이나 History를 만들지 않는다', () => {
+    test('ELF 계열이 아닌 URI는 패널이나 History를 만들지 않는다', async () => {
         const filePath = path.join(tempDir, 'firmware.txt');
         fs.writeFileSync(filePath, buildMinimalElf32());
         const history: MemoryMapOpenHistory[] = [];
 
-        assert.strictEqual(openMemoryMapFromUri(
+        assert.strictEqual(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath),
             undefined,
@@ -262,14 +352,14 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.ok(errors.some(message => /\.elf|\.axf|\.out/.test(message)));
     });
 
-    test('파일시스템이 아닌 URI는 ELF 확장자여도 열지 않는다', () => {
+    test('파일시스템이 아닌 URI는 ELF 확장자여도 열지 않는다', async () => {
         const history: MemoryMapOpenHistory[] = [];
         for (const uri of [
             vscode.Uri.parse('https://example.com/firmware.elf'),
             vscode.Uri.parse('vscode-remote://ssh-remote+box/home/dev/firmware.elf'),
         ]) {
             const previousErrorCount = errors.length;
-            assert.strictEqual(openMemoryMapFromUri(
+            assert.strictEqual(await openMemoryMapFromUri(
                 { subscriptions: [] } as unknown as vscode.ExtensionContext,
                 uri,
                 undefined,
@@ -296,7 +386,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
                 { name: 'RAM', origin: 0x20000000, size: 32 * 1024 },
             ],
         };
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             context,
             vscode.Uri.file(filePath),
             config,
@@ -397,7 +487,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
     test('같은 render의 이전 Refresh 확인이 최신 실패 상태를 지우지 않는다', async () => {
         const filePath = path.join(tempDir, 'refresh-attempt-race.elf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));
@@ -436,7 +526,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
     test('잘못된 Refresh attempt ID는 host 재분석을 시작하지 않는다', async () => {
         const filePath = path.join(tempDir, 'invalid-refresh-attempt.elf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath),
             { regions: [{ name: 'FLASH', origin: 0x08000000, size: 64 * 1024 }] }
@@ -481,7 +571,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
     test('Refresh 중 사라진 ELF는 raw errno 없이 복구 방법을 안내한다', async () => {
         const filePath = path.join(tempDir, 'removed-input.elf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));
@@ -505,7 +595,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             path.resolve(__dirname, '..', '..', 'examples', 'sample_armlink.txt'),
             filePath
         );
-        assert.ok(openMemoryMapFromListing(
+        assert.ok(await openMemoryMapFromListing(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             filePath
         ));
@@ -530,7 +620,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fs.writeFileSync(linkerPath, 'MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }');
 
         const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), { linkerFilePath: linkerPath }));
+        assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath), { linkerFilePath: linkerPath }));
         assert.ok((panelRegistry.getHtml(filePath) ?? '').includes('64.0 KB'));
 
         fs.writeFileSync(linkerPath, 'MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 128K }');
@@ -556,7 +646,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fs.writeFileSync(filePath, buildMinimalElf32());
         fs.writeFileSync(linkerPath, 'MEMORY { FLASH : ORIGIN = 0x08000000, LENGTH = 128K - 4K }');
         const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), { linkerFilePath: linkerPath }));
+        assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath), { linkerFilePath: linkerPath }));
         const stableHtml = panelRegistry.getHtml(filePath);
         assert.ok(stableHtml?.includes('124.0 KB'));
 
@@ -581,7 +671,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         }`;
         fs.writeFileSync(linkerPath, scatter('64K'));
         const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
+        assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
             linkerFilePath: linkerPath,
             regions: [{ name: 'SAVED_FLASH', origin: 0x08000000, size: 96 * 1024 }],
         }));
@@ -601,7 +691,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.ok(warnings.some(message => /일부|Some MEMORY/i.test(message)));
     });
 
-    test('일부만 해석되는 linker의 cold open도 저장된 전체 영역으로 폴백한다', () => {
+    test('일부만 해석되는 linker의 cold open도 저장된 전체 영역으로 폴백한다', async () => {
         const filePath = path.join(tempDir, 'partial-open.elf');
         const linkerPath = path.join(tempDir, 'partial.ld');
         fs.writeFileSync(filePath, buildMinimalElf32());
@@ -609,7 +699,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             FLASH : ORIGIN = 0x08000000, LENGTH = 64K
             RAM : ORIGIN = 0x20000000, LENGTH = RAM_SIZE
         }`);
-        assert.ok(openMemoryMapFromUri({ subscriptions: [] } as unknown as vscode.ExtensionContext, vscode.Uri.file(filePath), {
+        assert.ok(await openMemoryMapFromUri({ subscriptions: [] } as unknown as vscode.ExtensionContext, vscode.Uri.file(filePath), {
             linkerFilePath: linkerPath,
             regions: [{ name: 'FLASH', origin: 0x08000000, size: 96 * 1024 }],
         }));
@@ -623,7 +713,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fs.writeFileSync(filePath, buildMinimalElf32());
 
         const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
+        assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
             regions: [{ name: 'FLASH', origin: 0x08000000, size: 80 * 1024 }],
             linkerFilePath: linkerPath,
         }), '저장된 영역이 있으면 linker 파일이 사라져도 cold open이 성공해야 한다');
@@ -650,8 +740,8 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fs.writeFileSync(filePath, buildMinimalElf32());
         const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
 
-        assert.doesNotThrow(() => {
-            assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
+        assert.doesNotThrow(async () => {
+            assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
                 linkerFilePath: {} as unknown as string,
             }));
         }, 'persisted config가 손상돼도 path.basename TypeError가 밖으로 새면 안 된다');
@@ -659,7 +749,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         const linkerPath = path.join(tempDir, 'oversized.ld');
         fs.writeFileSync(linkerPath, '');
         fs.truncateSync(linkerPath, MEMORY_MAP_MAX_LINKER_FILE_SIZE + 1);
-        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
+        assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
             regions: [{ name: 'FLASH', origin: 0x08000000, size: 64 * 1024 }],
             linkerFilePath: linkerPath,
         }), 'cold open은 저장 영역으로 계속 열어야 한다');
@@ -678,7 +768,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fs.writeFileSync(linkerPath, 'MEMORY { /* no valid regions */ }');
 
         const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
+        assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
             linkerFilePath: linkerPath,
         }), 'PT_LOAD가 있으면 linker 파싱 실패에도 cold open이 성공해야 한다');
 
@@ -741,7 +831,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fs.writeFileSync(linkerPath, 'MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }');
         const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
         const recorded: MemoryMapOpenHistory[] = [];
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             context,
             vscode.Uri.file(filePath),
             undefined,
@@ -812,7 +902,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fs.writeFileSync(filePath, buildMinimalElf32());
         fs.writeFileSync(originalLinker, 'MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }');
         const recorded: MemoryMapOpenHistory[] = [];
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath),
             { linkerFilePath: originalLinker },
@@ -862,7 +952,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
     test('linker picker가 열린 동안 중복 설정 요청을 무시하고 종료 뒤 다시 허용한다', async () => {
         const filePath = path.join(tempDir, 'configure-reentry.elf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));
@@ -897,10 +987,10 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         }
     });
 
-    test('standalone HTML에서는 동작할 수 없는 Refresh 컨트롤을 제거한다', () => {
+    test('standalone HTML에서는 동작할 수 없는 Refresh 컨트롤을 제거한다', async () => {
         const filePath = path.join(tempDir, 'standalone.axf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath),
             { regions: [{ name: 'FLASH', origin: 0x08000000, size: 64 * 1024 }] }
@@ -1068,11 +1158,11 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             '실패 뒤 저장한 HTML에 다시 시도할 수 없는 실패 배너가 남으면 안 된다');
     });
 
-    test('같은 render는 실패 상태를 유지하고 pending의 새 render는 성공으로 전환한다', () => {
+    test('같은 render는 실패 상태를 유지하고 pending의 새 render는 성공으로 전환한다', async () => {
         const filePath = path.join(tempDir, 'webview-state.axf');
         fs.writeFileSync(filePath, buildMinimalElf32());
         const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath)));
+        assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath)));
 
         type StoredState = {
             [key: string]: unknown;
@@ -1165,7 +1255,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             memoryMapViewState: viewState,
         };
 
-        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath)));
+        assert.ok(await openMemoryMapFromUri(context, vscode.Uri.file(filePath)));
         const nextHtml = panelRegistry.getHtml(filePath) ?? '';
         const refreshed = runStatePrelude(nextHtml);
         assert.strictEqual(refreshed.sameRenderState, false);
@@ -1177,10 +1267,10 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.strictEqual(storedState.refreshAttemptId, undefined);
     });
 
-    test('startup 하단이 복원 판정에 맞는 Refresh UI 전이를 실행한다', () => {
+    test('startup 하단이 복원 판정에 맞는 Refresh UI 전이를 실행한다', async () => {
         const filePath = path.join(tempDir, 'webview-startup-render.axf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));
@@ -1391,10 +1481,10 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             '이전 startup 상태가 새 Refresh 중 포커스를 가져가면 안 된다');
     });
 
-    test('Refresh live region 순서·로케일·실패 disclosure를 실제 함수로 검증한다', () => {
+    test('Refresh live region 순서·로케일·실패 disclosure를 실제 함수로 검증한다', async () => {
         const filePath = path.join(tempDir, 'webview-refresh-feedback.axf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));
@@ -1584,10 +1674,10 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.strictEqual(focused, true, '접은 뒤 같은 disclosure 버튼으로 포커스를 복원해야 한다');
     });
 
-    test('같은 render의 이전 Refresh 실패 메시지가 최신 busy를 취소하지 않는다', () => {
+    test('같은 render의 이전 Refresh 실패 메시지가 최신 busy를 취소하지 않는다', async () => {
         const filePath = path.join(tempDir, 'webview-refresh-attempt-race.axf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));
@@ -1696,10 +1786,10 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.strictEqual(controller.generation(), 2);
     });
 
-    test('실제 beginRefresh가 generation과 동일한 attempt ID를 저장·전송한다', () => {
+    test('실제 beginRefresh가 generation과 동일한 attempt ID를 저장·전송한다', async () => {
         const filePath = path.join(tempDir, 'webview-begin-refresh.axf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));
@@ -1797,10 +1887,10 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.deepStrictEqual(feedback, [['busy', 'refreshing', false, undefined]]);
     });
 
-    test('Refresh 실패 뒤 사용자 조작도 같은 render의 복원 snapshot에 반영한다', () => {
+    test('Refresh 실패 뒤 사용자 조작도 같은 render의 복원 snapshot에 반영한다', async () => {
         const filePath = path.join(tempDir, 'webview-failed-snapshot.axf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));
@@ -1863,10 +1953,10 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             '진행 중 조작을 저장하던 기존 경로도 유지해야 한다');
     });
 
-    test('Refresh snapshot 함수가 검색·접기·정렬·스크롤 문맥을 실제로 저장·복원한다', () => {
+    test('Refresh snapshot 함수가 검색·접기·정렬·스크롤 문맥을 실제로 저장·복원한다', async () => {
         const filePath = path.join(tempDir, 'webview-view-state.axf');
         fs.writeFileSync(filePath, buildMinimalElf32());
-        assert.ok(openMemoryMapFromUri(
+        assert.ok(await openMemoryMapFromUri(
             { subscriptions: [] } as unknown as vscode.ExtensionContext,
             vscode.Uri.file(filePath)
         ));

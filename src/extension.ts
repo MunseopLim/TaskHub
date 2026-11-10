@@ -4630,9 +4630,9 @@ async function openToolHistoryEntry(
         const memoryMapConfig = cloneMemoryMapHistoryConfig(tool.memoryMapConfig);
         const memoryMapRecorder = (nextEntry: MemoryMapOpenHistory) =>
             recordMemoryMapHistory(historyProvider, nextEntry);
-        const opened = inputType === 'listing'
+        const opened = await (inputType === 'listing'
             ? openMemoryMapFromListing(context, tool.filePath)
-            : openMemoryMapPanel(context, tool.filePath, memoryMapConfig, memoryMapRecorder);
+            : openMemoryMapPanel(context, tool.filePath, memoryMapConfig, memoryMapRecorder));
         if (opened) {
             recordMemoryMapHistory(historyProvider, {
                 filePath: tool.filePath,
@@ -4649,7 +4649,7 @@ async function openToolHistoryEntry(
         return;
     }
 
-    if (openHexViewerFile(context, tool.filePath)) {
+    if (await openHexViewerFile(context, tool.filePath)) {
         recordHexViewerHistory(historyProvider, {
             filePath: tool.filePath,
             fileName: tool.fileName,

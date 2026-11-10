@@ -56,12 +56,12 @@ suite('Memory Map — Go to Symbol', () => {
         return webviewHtml.slice(start, end + '\n    }'.length);
     }
 
-    suiteSetup(() => {
+    suiteSetup(async () => {
         panelRegistry.clear();
         const filePath = path.join(os.tmpdir(), `taskhub-mm-webview-${process.pid}.axf`);
         fs.writeFileSync(filePath, buildElf32WithSymbols());
         const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-        assert.ok(openMemoryMapPanel(ctx, filePath, { regions: [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }] }));
+        assert.ok(await openMemoryMapPanel(ctx, filePath, { regions: [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }] }));
         webviewHtml = panelRegistry.getHtml(filePath) ?? '';
         panelRegistry.clear();
         try { fs.unlinkSync(filePath); } catch { /* best effort */ }
@@ -71,7 +71,7 @@ suite('Memory Map — Go to Symbol', () => {
         let filePath: string;
         let html: string;
 
-        suiteSetup(() => {
+        suiteSetup(async () => {
             panelRegistry.clear();
             filePath = path.join(os.tmpdir(), `taskhub-mm-goto-${process.pid}.axf`);
             fs.writeFileSync(filePath, buildElf32WithSymbols());
@@ -83,7 +83,7 @@ suite('Memory Map — Go to Symbol', () => {
                     { name: 'RAM', origin: 0x20000000, size: 128 * 1024 },
                 ],
             };
-            assert.ok(openMemoryMapPanel(ctx, filePath, config), '패널이 열려야 목록을 검사할 수 있다');
+            assert.ok(await openMemoryMapPanel(ctx, filePath, config), '패널이 열려야 목록을 검사할 수 있다');
             html = panelRegistry.getHtml(filePath) ?? '';
         });
 
@@ -817,12 +817,12 @@ suite('Memory Map — Go to Symbol', () => {
             filePath = '';
         });
 
-        function openMap(name: string, buffer: Buffer, regions: { name: string; origin: number; size: number }[]) {
+        async function openMap(name: string, buffer: Buffer, regions: { name: string; origin: number; size: number }[]) {
             filePath = path.join(os.tmpdir(), `taskhub-mm-src-${process.pid}-${name}`);
             fs.writeFileSync(filePath, buffer);
             opened.push(filePath);
             const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapPanel(ctx, filePath, { regions }), '패널이 열려야 한다');
+            assert.ok(await openMemoryMapPanel(ctx, filePath, { regions }), '패널이 열려야 한다');
             return filePath;
         }
 
@@ -845,7 +845,7 @@ suite('Memory Map — Go to Symbol', () => {
         });
 
         test('심볼 하나면 목록 없이 바로 이동한다', async () => {
-            openMap('single.axf', buildElf32WithSymbols(), flashAndRam);
+            await openMap('single.axf', buildElf32WithSymbols(), flashAndRam);
             await revealSourceSymbolInMemoryMap('HAL_GPIO_Init');
             assert.deepStrictEqual(infos, [], `안내가 떴다: ${infos.join(' | ')}`);
             assert.strictEqual(picks.length, 0, '후보가 하나인데 고르라고 했다');
@@ -853,7 +853,7 @@ suite('Memory Map — Go to Symbol', () => {
         });
 
         test('없는 이름이면 이유를 함께 알린다', async () => {
-            openMap('missing.axf', buildElf32WithSymbols(), flashAndRam);
+            await openMap('missing.axf', buildElf32WithSymbols(), flashAndRam);
             await revealSourceSymbolInMemoryMap('no_such_symbol');
             assert.strictEqual(infos.length, 1);
             assert.ok(infos[0].includes('no_such_symbol'), infos[0]);
@@ -864,7 +864,7 @@ suite('Memory Map — Go to Symbol', () => {
         test('심볼 없는 맵에서는 맵 자체를 지목한다', async () => {
             // stripped 바이너리에서는 어떤 이름도 맞지 않는다 — 매번 "인라인됐을
             // 수 있다"고 답하면 사용자는 자기 코드를 의심하게 된다.
-            openMap('stripped.axf', buildMinimalElf32(), [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }]);
+            await openMap('stripped.axf', buildMinimalElf32(), [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }]);
             await revealSourceSymbolInMemoryMap('main');
             assert.strictEqual(infos.length, 1);
             assert.ok(/stripped|심볼 단위/.test(infos[0]), `맵 자체를 지목하지 않는다: ${infos[0]}`);
@@ -873,8 +873,8 @@ suite('Memory Map — Go to Symbol', () => {
 
         test('맵이 둘이면 파일명과 함께 고르게 한다', async () => {
             // 부트로더와 앱을 함께 열어 둔 상황. 같은 이름이 양쪽에 있다.
-            const first = openMap('bootloader.axf', buildElf32WithSymbols(), flashAndRam);
-            const second = openMap('app.axf', buildElf32WithSymbols(), flashAndRam);
+            const first = await openMap('bootloader.axf', buildElf32WithSymbols(), flashAndRam);
+            const second = await openMap('app.axf', buildElf32WithSymbols(), flashAndRam);
             pickAnswer = items => items[0];
             await revealSourceSymbolInMemoryMap('main');
 
@@ -908,7 +908,7 @@ suite('Memory Map — Go to Symbol', () => {
                 fs.mkdirSync(path.dirname(target), { recursive: true });
                 fs.writeFileSync(target, buildElf32WithSymbols());
                 opened.push(target);
-                assert.ok(openMemoryMapPanel(ctx, target, { regions: flashAndRam }));
+                assert.ok(await openMemoryMapPanel(ctx, target, { regions: flashAndRam }));
             }
             pickAnswer = items => items[0];
             await revealSourceSymbolInMemoryMap('main');
@@ -924,7 +924,7 @@ suite('Memory Map — Go to Symbol', () => {
             // 가득한 맵을 두고 "심볼 단위 행이 없습니다" 라고 답하게 된다.
             const listingPath = path.resolve(__dirname, '..', '..', 'examples', 'sample_armlink.txt');
             const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
-            assert.ok(openMemoryMapFromListing(ctx, listingPath), 'Listing 이 열려야 한다');
+            assert.ok(await openMemoryMapFromListing(ctx, listingPath), 'Listing 이 열려야 한다');
 
             const entries = panelRegistry.getAllEntries(listingPath) ?? [];
             assert.ok(entries.some(e => e.func), '이 픽스처에 func 행이 없으면 검사 전제가 깨진다');
@@ -945,17 +945,17 @@ suite('Memory Map — Go to Symbol', () => {
         });
 
         test('목록에서 취소하면 아무 데도 가지 않는다', async () => {
-            openMap('cancel.axf', buildElf32WithSymbols(), flashAndRam);
+            await openMap('cancel.axf', buildElf32WithSymbols(), flashAndRam);
             const before = panelRegistry.getLastActive();
             pickAnswer = () => undefined;
             await revealSourceSymbolInMemoryMap('no_such_symbol');
             assert.strictEqual(panelRegistry.getLastActive(), before);
         });
 
-        test('상한에 잘린 목록이 아니라 전체에서 찾는다', () => {
+        test('상한에 잘린 목록이 아니라 전체에서 찾는다', async () => {
             // Quick Pick 상한(5,000)은 렌더용이지 존재 판정 기준이 아니다.
             // 잘리는 쪽이 하필 작은 심볼 — 크기를 궁금해하는 바로 그 대상이다.
-            openMap('capped.axf', buildElf32WithSymbols(), flashAndRam);
+            await openMap('capped.axf', buildElf32WithSymbols(), flashAndRam);
             const searchable = panelRegistry.getAllEntries(filePath) ?? [];
             const shown = panelRegistry.getEntries(filePath) ?? [];
             assert.ok(searchable.length >= shown.length, '탐색 목록이 표시 목록보다 작다');

@@ -19,6 +19,35 @@
 
 ## 시나리오 그룹
 
+### 대용량 분석과 비동기 Hex Viewer 수명주기
+
+파일: [fileAnalysis.test.ts](../src/test/fileAnalysis.test.ts), [hexViewerOpenFlow.test.ts](../src/test/hexViewerOpenFlow.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-304 | 50MB HEX worker | 호스트 타이머 진행·페이지 저장소 메서드와 바이트 복원 |
+| IT-305 | Binary worker | 파일 offset·원본 바이트 보존 |
+| IT-306 | 100MB ELF worker | 파싱 결과·후속 분석용 원본 Buffer 보존 |
+| IT-307 | Worker 오류 | 파싱 실패 전달·후속 분석 정상 실행 |
+| IT-312 | 100MB ARM Listing worker | 영역·엔트리와 빈 입력 안내 보존·호스트 타이머 진행 |
+| IT-313 | 느린 분석의 호환성 | 30초 경과 뒤에도 유효한 worker 결과 수신 |
+| IT-309 | 중첩 파일 열기 | 늦게 끝난 이전 읽기가 새 데이터를 덮지 않음 |
+| IT-310 | CustomDocument 읽기 재시도 | 같은 파일·문서에서 일시 읽기 실패 후 복구 |
+| IT-311 | 분석 중 패널 종료 | 종료 뒤 HTML·메시지 핸들러를 만들지 않음 |
+
+### Memory Map 비동기 재조회
+
+파일: [memoryMapOpenRefresh.test.ts](../src/test/memoryMapOpenRefresh.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-314 | ELF Refresh 중 새 열기 | 밀린 분석이 최신 화면을 덮거나 실패 안내를 남기지 않음 |
+| IT-314b | Listing Refresh 중 새 열기 | Listing도 최신 요청만 반영하고 거짓 실패를 알리지 않음 |
+| IT-314c | 밀린 ELF 읽기 실패 | 최신 패널에 과거 요청의 파일 오류·실패 표시가 남지 않음 |
+| IT-314d | 밀린 Listing 읽기 실패 | Listing의 과거 읽기 오류도 최신 화면에 알리지 않음 |
+| IT-315 | Listing 비동기 읽기 | 파일 읽기를 기다리는 동안 패널을 만들지 않고 완료 뒤 결과 표시 |
+
+
 ### AI 예약 실행 표지 복구
 
 파일: [aiScheduler.test.ts](../src/test/aiScheduler.test.ts)

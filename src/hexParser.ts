@@ -6,6 +6,24 @@ import { HexByteStore } from './hexByteStore';
 
 export type HexFormat = 'intel' | 'srec' | 'binary';
 
+const FORMAT_BY_EXTENSION = new Map<string, HexFormat>([
+    ['.bin', 'binary'], ['.dat', 'binary'],
+    ['.hex', 'intel'], ['.ihex', 'intel'],
+    ['.srec', 'srec'], ['.s19', 'srec'], ['.s28', 'srec'], ['.s37', 'srec'],
+]);
+
+/** The caller has already chosen the file format through its extension. */
+export function parseHexBuffer(extension: string, content: Buffer, forceBinary = false): HexParseResult {
+    const known = FORMAT_BY_EXTENSION.get(extension.toLowerCase());
+    if (forceBinary || known === 'binary') { return parseBinary(content); }
+    const text = content.toString('utf8');
+    switch (known ?? detectFormat(text)) {
+        case 'intel': return parseIntelHex(text);
+        case 'srec': return parseSrec(text);
+        default: return parseBinary(content);
+    }
+}
+
 /** HEX/SREC의 고유 바이트 수 상한. Binary는 rawBuffer와 파일 크기 제한을 쓴다. */
 export const HEX_MAX_BYTE_ENTRIES = 32 * 1024 * 1024;
 /** Maximum bytes per single record (Intel HEX data field is 1 byte → 255; SREC is 253). Guards malformed input. */

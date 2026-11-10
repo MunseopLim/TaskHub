@@ -5,9 +5,10 @@
  */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { analyzeHexBuffer } from './fileAnalysis';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult, HexFormat } from './hexParser';
+import { toFlatArray, HexParseResult } from './hexParser';
 import { t } from './i18n';
 import { plainNotificationText } from './notificationText';
 import { HexByteStore } from './hexByteStore';
@@ -22,6 +23,7 @@ interface HexPanelState {
 
 /** standalone Hex Viewer 패널은 파일별로 하나씩 유지한다. */
 const hexPanels = new Map<string, HexPanelState>();
+const openRequests = new Map<string, symbol>();
 
 const HEX_VIEWER_PREFERENCES_KEY = 'taskhub.hexViewer.preferences.v1';
 
@@ -209,12 +211,19 @@ export async function showHexViewer(context: vscode.ExtensionContext, recordHist
     }
 }
 
-export function openHexViewerFile(
+export async function openHexViewerFile(
     context: vscode.ExtensionContext,
     filePath: string,
     options?: HexViewerOpenOptions
-): boolean {
-    return openHexViewerFileInternal(context, filePath, options, false);
+): Promise<boolean> {
+    const key = filePathIdentityKey(filePath);
+    const request = Symbol();
+    openRequests.set(key, request);
+    try {
+        return await openHexViewerFileInternal(context, filePath, options, false, () => openRequests.get(key) === request);
+    } finally {
+        if (openRequests.get(key) === request) { openRequests.delete(key); }
+    }
 }
 
 function describeEmptyHexData(result: HexParseResult, fileName: string): string {
@@ -230,12 +239,13 @@ function describeEmptyHexData(result: HexParseResult, fileName: string): string 
     );
 }
 
-function openHexViewerFileInternal(
+async function openHexViewerFileInternal(
     context: vscode.ExtensionContext,
     filePath: string,
     options: HexViewerOpenOptions | undefined,
-    preserveFocus: boolean
-): boolean {
+    preserveFocus: boolean,
+    isCurrent: () => boolean = () => true
+): Promise<boolean> {
     const fileName = path.basename(filePath);
 
     // 타입 검사를 우회한 JS/any 호출도 같은 계약을 지켜야 한다. HEX/SREC의
@@ -251,7 +261,7 @@ function openHexViewerFileInternal(
 
     let stat: fs.Stats;
     try {
-        stat = fs.statSync(filePath);
+        stat = await fs.promises.stat(filePath);
     } catch (e: any) {
         vscode.window.showErrorMessage(plainNotificationText(t(
             `파일을 읽을 수 없습니다: ${filePath}\n${e.message}`,
@@ -270,7 +280,7 @@ function openHexViewerFileInternal(
 
     let result: HexParseResult;
     try {
-        result = parseFile(filePath, options?.forceBinary === true);
+        result = await parseFile(filePath, options?.forceBinary === true);
     } catch (e: any) {
         const detail = localizeHexParseError(String(e?.message ?? e));
         vscode.window.showErrorMessage(plainNotificationText(t(
@@ -280,6 +290,7 @@ function openHexViewerFileInternal(
         return false;
     }
 
+    if (!isCurrent()) { return false; }
     if (result.byteCount === 0) {
         vscode.window.showWarningMessage(plainNotificationText(describeEmptyHexData(result, fileName)));
         return false;
@@ -559,31 +570,12 @@ export function buildHexViewerHtml(
  *
  * 내용 탐지(`detectFormat`)는 **확장자로 알 수 없는 파일**만 맡는다.
  */
-const FORMAT_BY_EXTENSION = new Map<string, HexFormat>([
-    ['.bin', 'binary'], ['.dat', 'binary'],
-    ['.hex', 'intel'], ['.ihex', 'intel'],
-    ['.srec', 'srec'], ['.s19', 'srec'], ['.s28', 'srec'], ['.s37', 'srec'],
-]);
-
-export function parseFile(filePath: string, forceBinary = false): HexParseResult {
-    const rawContent = fs.readFileSync(filePath);
-    if (forceBinary) {
-        return parseBinary(rawContent);
+export async function parseFile(filePath: string, forceBinary = false): Promise<HexParseResult> {
+    const content = await fs.promises.readFile(filePath);
+    if (content.length > HEX_VIEWER_MAX_FILE_SIZE) {
+        throw new Error(t('파일 읽기 한도를 초과했습니다.', 'File exceeds the read limit.'));
     }
-    // 확장자 판정을 **먼저** 한다. 한도(`HEX_VIEWER_MAX_FILE_SIZE`, 50MB)에 가까운
-    // 바이너리를 UTF-8 문자열로 바꾸는 비용도 함께 사라진다.
-    const known = FORMAT_BY_EXTENSION.get(path.extname(filePath).toLowerCase());
-    if (known === 'binary') {
-        return parseBinary(rawContent);
-    }
-    const textContent = rawContent.toString('utf-8');
-    const format = known ?? detectFormat(textContent);
-
-    switch (format) {
-        case 'intel': return parseIntelHex(textContent);
-        case 'srec': return parseSrec(textContent);
-        default: return parseBinary(rawContent);
-    }
+    return analyzeHexBuffer(path.extname(filePath), content, forceBinary);
 }
 
 /**
@@ -609,7 +601,7 @@ interface HexWebviewHandshake extends vscode.Disposable {
 function setupWebviewMessageHandler(
     context: vscode.ExtensionContext,
     webview: vscode.Webview,
-    onReady?: () => void,
+    onReady?: () => void | Promise<void>,
     onDataReceived?: (deliveryId: string) => void
 ): HexWebviewHandshake {
     let readyReceived = false;
@@ -630,7 +622,7 @@ function setupWebviewMessageHandler(
         }
         if (message.command === 'ready') {
             readyReceived = true;
-            onReady?.();
+            await onReady?.();
             return;
         }
         if (message.command === 'dataReceived') {
@@ -674,7 +666,7 @@ function renderWithReadyHandshake(
     result: HexParseResult,
     isCurrent: () => boolean,
     initialSelection?: HexViewerSelection,
-    onReloadReady?: () => void
+    onReloadReady?: () => void | Promise<void>
 ): HexWebviewHandshake {
     const deliveryId = generateHexNonce();
     // ready/fallback 콜백이 큰 HexParseResult를 패널 수명 내내 붙잡지 않게 한다.
@@ -699,7 +691,7 @@ function renderWithReadyHandshake(
                 // ACK 뒤의 ready는 같은 문서의 정상 흐름에서는 나오지 않는다.
                 // Developer: Reload Webviews 등으로 새 문서가 생긴 경우이므로,
                 // 원본을 계속 보관하는 대신 소유자가 파일을 다시 읽어 렌더한다.
-                onReloadReady?.();
+                return onReloadReady?.();
             }
         },
         receivedDeliveryId => {
@@ -798,13 +790,14 @@ function openPanel(
             context, panel.webview, fileName, result,
             () => hexPanels.get(key) === state && state.renderGeneration === generation,
             initialSelection,
-            () => {
+            async () => {
                 if (hexPanels.get(key) === state && state.renderGeneration === generation) {
-                    const reloaded = openHexViewerFileInternal(
+                    const reloaded = await openHexViewerFileInternal(
                         context,
                         filePath,
                         reloadOptions,
-                        true
+                        true,
+                        () => hexPanels.get(key) === state && state.renderGeneration === generation
                     );
                     if (!reloaded
                         && hexPanels.get(key) === state
@@ -2205,7 +2198,7 @@ function getWebviewContent(
 }
 
 export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
-    private readonly parsedDocuments = new WeakMap<vscode.CustomDocument, { stamp: string; result: HexParseResult }>();
+    private readonly parsedDocuments = new WeakMap<vscode.CustomDocument, { stamp: string; result: Promise<HexParseResult> }>();
     private readonly disposedDocuments = new WeakSet<vscode.CustomDocument>();
 
     constructor(private context: vscode.ExtensionContext, private recordHistory?: HexViewerHistoryRecorder) {}
@@ -2231,24 +2224,26 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             disposed = true;
             handshake?.dispose();
         });
-        return withHexViewerAnalysisProgress(document.uri.fsPath, () => {
+        return withHexViewerAnalysisProgress(document.uri.fsPath, async () => {
             if (disposed || this.disposedDocuments.has(document)) { return; }
-            handshake = this.resolveCustomEditorNow(document, webviewPanel);
+            handshake = await this.resolveCustomEditorNow(document, webviewPanel,
+                () => !disposed && !this.disposedDocuments.has(document));
             if (disposed) { handshake?.dispose(); }
         });
     }
 
-    private resolveCustomEditorNow(
+    private async resolveCustomEditorNow(
         document: vscode.CustomDocument,
-        webviewPanel: vscode.WebviewPanel
-    ): HexWebviewHandshake | undefined {
+        webviewPanel: vscode.WebviewPanel,
+        isCurrent: () => boolean
+    ): Promise<HexWebviewHandshake | undefined> {
         webviewPanel.webview.options = { enableScripts: true, localResourceRoots: [] };
         const filePath = document.uri.fsPath;
         const fileName = path.basename(filePath);
 
         let stat: fs.Stats;
         try {
-            stat = fs.statSync(filePath);
+            stat = await fs.promises.stat(filePath);
         } catch (e: any) {
             const msg = t(`파일을 읽을 수 없습니다: ${e.message}`, `Cannot read file: ${e.message}`);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
@@ -2267,14 +2262,18 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         }
 
         let result: HexParseResult;
+        let parsing: Promise<HexParseResult> | undefined;
         try {
             // VS Code는 같은 파일의 분할 패널에 같은 CustomDocument를 넘긴다.
             // 같은 스냅샷만 공유하며, 파일 교체·수정 뒤 새 패널은 다시 읽는다.
             const stamp = [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
             const cached = this.parsedDocuments.get(document);
-            result = cached?.stamp === stamp ? cached.result : parseFile(filePath);
-            this.parsedDocuments.set(document, { stamp, result });
+            parsing = cached?.stamp === stamp ? cached.result : parseFile(filePath);
+            this.parsedDocuments.set(document, { stamp, result: parsing });
+            result = await parsing;
         } catch (e: any) {
+            if (this.parsedDocuments.get(document)?.result === parsing) { this.parsedDocuments.delete(document); }
+            if (!isCurrent()) { return; }
             const detail = localizeHexParseError(String(e?.message ?? e));
             const msg = t(`파일 파싱 실패 (${fileName}): ${detail}`, `Failed to parse file (${fileName}): ${detail}`);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
@@ -2282,6 +2281,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             return;
         }
 
+        if (!isCurrent()) { return; }
         if (result.byteCount === 0) {
             const msg = describeEmptyHexData(result, fileName);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'info');

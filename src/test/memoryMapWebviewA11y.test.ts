@@ -48,7 +48,7 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
         return (element?.[2] ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     }
 
-    suiteSetup(() => {
+    suiteSetup(async () => {
         panelRegistry.clear();
         filePath = path.join(os.tmpdir(), `taskhub-mm-a11y-${process.pid}.axf`);
         fs.writeFileSync(filePath, buildMinimalElf32(armScatterSymbol));
@@ -56,7 +56,7 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
         // 영역 설정을 함께 준다: region이 없으면 사용량 막대 / 영역 카드 /
         // 모두 펼치기 버튼이 아예 렌더되지 않아 그 경로를 검사할 수 없다.
         const config = { regions: [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }] };
-        assert.ok(openMemoryMapPanel(ctx, filePath, config), '패널이 열려야 HTML을 검사할 수 있다');
+        assert.ok(await openMemoryMapPanel(ctx, filePath, config), '패널이 열려야 HTML을 검사할 수 있다');
         html = panelRegistry.getHtml(filePath) ?? '';
         assert.ok(html.length > 0, '웹뷰 HTML이 비어 있다');
 
@@ -64,7 +64,7 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
         // 없는 ELF에서는 패널 안에 실제 복구 경로가 있어야 한다.
         noRegionFilePath = path.join(os.tmpdir(), `taskhub-mm-a11y-no-region-${process.pid}.axf`);
         fs.writeFileSync(noRegionFilePath, buildMinimalElf32());
-        assert.ok(openMemoryMapPanel(ctx, noRegionFilePath), '영역 없는 패널도 열려야 한다');
+        assert.ok(await openMemoryMapPanel(ctx, noRegionFilePath), '영역 없는 패널도 열려야 한다');
         noRegionHtml = panelRegistry.getHtml(noRegionFilePath) ?? '';
         assert.ok(noRegionHtml.includes('class="no-regions"'), '영역 없음 안내 분기에 도달하지 못했다');
     });
@@ -109,13 +109,13 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
             assert.match(scroll?.declarations ?? '', /overflow-x:\s*auto/);
         });
 
-        test('한 행으로 합친 별칭이 실제 영역 데이터와 Copy Full Dump에 남는다', () => {
+        test('한 행으로 합친 별칭이 실제 영역 데이터와 Copy Full Dump에 남는다', async () => {
             const aliasPath = path.join(os.tmpdir(), `taskhub-mm-alias-${process.pid}.axf`);
             fs.writeFileSync(aliasPath, buildElf32WithAliasSymbols());
             try {
                 const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
                 const config = { regions: [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }] };
-                assert.ok(openMemoryMapPanel(ctx, aliasPath, config));
+                assert.ok(await openMemoryMapPanel(ctx, aliasPath, config));
                 const aliasHtml = panelRegistry.getHtml(aliasPath) ?? '';
                 // 행 하나에 대표 이름과 별칭이 함께 실린다(같은 바이트를 두 번 세지 않는다).
                 assert.match(aliasHtml, /"n":"(Default_Handler|USART1_IRQHandler)"[^}]*"al":"(USART1_IRQHandler|Default_Handler)"/);

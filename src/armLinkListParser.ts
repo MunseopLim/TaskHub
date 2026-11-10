@@ -42,6 +42,11 @@ export interface ArmLinkListResult {
     truncatedEntries: number;
 }
 
+/** Preserve the viewer's empty-input diagnostic without scanning large text on the host. */
+export function analyzeArmLinkList(content: string): ArmLinkListResult & { empty: boolean } {
+    return { ...parseArmLinkList(content), empty: content.trim().length === 0 };
+}
+
 /**
  * 담을 엔트리 최대 개수.
  *

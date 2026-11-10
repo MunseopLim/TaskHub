@@ -172,7 +172,9 @@ const validatorConfig = {
 
 async function main() {
 	const contexts = await Promise.all(
-		[extensionConfig, featureConfig, validatorConfig, webviewConfig, regexWorkerConfig].map(config => esbuild.context(config))
+		[extensionConfig, featureConfig, validatorConfig, webviewConfig, regexWorkerConfig,
+            { ...regexWorkerConfig, entryPoints: ['src/fileAnalysisWorker.ts'], outfile: 'dist/fileAnalysisWorker.js' }
+        ].map(config => esbuild.context(config))
 	);
 	if (watch) {
 		await Promise.all(contexts.map(ctx => ctx.watch()));

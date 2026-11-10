@@ -52,6 +52,8 @@ TaskHub/
 │   │   └── jsonEditorLogic.ts         # 위 로직을 webview 번들로 내보내는 엔트리
 │   ├── hexViewer.ts                   # Hex Viewer WebView (초기 file-offset 선택 포함)
 │   ├── hexByteStore.ts                # HEX/SREC 페이지 저장소와 희소 저장 공간 제한
+│   ├── fileAnalysis.ts                # 대용량 HEX/SREC·ELF·ARM Listing 분석 worker 호출·결과 복원
+│   ├── fileAnalysisWorker.ts          # 확장 호스트 밖에서 파일 버퍼 파싱
 │   ├── hexParser.ts                   # Intel HEX / SREC / Binary 파서
 │   ├── hexConverter.ts                # Text ↔ Hex 실시간 변환 WebView와 패널 수명주기
 │   ├── hexConverterUtils.ts           # Text/Hex 변환·숫자 해석 순수 로직
@@ -121,6 +123,7 @@ TaskHub/
 - `dist/dialogMemory.js`: 초기 호스트와 기능 번들이 함께 사용하는 상태 모듈. 따로 복제하면 마지막 파일 열기 위치가 분리되므로 모든 번들이 같은 파일을 참조한다.
 - `dist/actionsValidator.js`: 현재 `schema/actions.schema.json`에서 Ajv standalone으로 빌드한 검증기. 런타임에는 스키마 컴파일러가 필요 없다.
 - `dist/regexWorker.js`: esbuild, CJS, Node 타깃. 사용자 정규식 worker (`src/regexWorker.ts`)
+- `dist/fileAnalysisWorker.js`: 대용량 HEX/SREC·ELF·ARM Listing 파싱 worker. 뷰어는 파일을 비동기로 읽고 512KB 이상 버퍼의 파싱을 worker에서 실행한다. HEX 페이지 저장소의 메서드는 결과 수신 뒤 복원하며 Listing의 빈 입력도 worker에서 판정한다. 고정된 실행 시간 제한 없이 완료·오류·worker 종료를 기다린다. 새 열기에 밀린 분석은 별도 결과로 구분해 Refresh 실패나 과거 파일 오류를 알리지 않는다.
 - `dist/jsonEditorWebview.js`: esbuild, IIFE, 브라우저 타깃. JSON Editor webview 의 순수 로직 번들 (아래 참조)
 - `out/`: tsc 컴파일 (테스트용). `out/build/*.meta.json`은 각 번들에 실제 포함된 패키지를 확인하는 esbuild 메타데이터다. 생성 검증기의 Ajv 도우미와 전이 의존성도 `npm audit --omit=dev` 범위에 들어가는지 검사하며 배포에는 포함하지 않는다.
 - 외부 의존성: `vscode` (번들에서 제외)

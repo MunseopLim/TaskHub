@@ -397,11 +397,11 @@ suite('HexParser Test Suite', () => {
         const fs = require('fs');
         const os = require('os');
 
-        test('should parse binary file', () => {
+        test('should parse binary file', async () => {
             const tmpFile = path.join(os.tmpdir(), 'test_taskhub.bin');
             fs.writeFileSync(tmpFile, Buffer.from([0x00, 0x00, 0x02, 0x20, 0x01, 0x01, 0x00, 0x08]));
             try {
-                const result = parseFile(tmpFile);
+                const result = (await parseFile(tmpFile));
                 assert.strictEqual(result.format, 'binary');
                 assert.strictEqual(result.byteCount, 8);
                 assert.ok(result.rawBuffer);
@@ -413,7 +413,7 @@ suite('HexParser Test Suite', () => {
             }
         });
 
-        test('should parse Intel HEX file', () => {
+        test('should parse Intel HEX file', async () => {
             const tmpFile = path.join(os.tmpdir(), 'test_taskhub.hex');
             fs.writeFileSync(tmpFile, [
                 ':020000040800F2',
@@ -421,7 +421,7 @@ suite('HexParser Test Suite', () => {
                 ':00000001FF'
             ].join('\n'));
             try {
-                const result = parseFile(tmpFile);
+                const result = (await parseFile(tmpFile));
                 assert.strictEqual(result.format, 'intel');
                 assert.strictEqual(result.minAddress, 0x08000000);
                 assert.strictEqual(result.data.get(0x08000000), 0x00);
@@ -430,7 +430,7 @@ suite('HexParser Test Suite', () => {
             }
         });
 
-        test('should parse SREC file', () => {
+        test('should parse SREC file', async () => {
             const tmpFile = path.join(os.tmpdir(), 'test_taskhub.srec');
             fs.writeFileSync(tmpFile, [
                 'S0030000FC',
@@ -438,7 +438,7 @@ suite('HexParser Test Suite', () => {
                 'S9030000FC'
             ].join('\n'));
             try {
-                const result = parseFile(tmpFile);
+                const result = (await parseFile(tmpFile));
                 assert.strictEqual(result.format, 'srec');
                 assert.strictEqual(result.byteCount, 4);
             } finally {
@@ -452,12 +452,12 @@ suite('HexParser Test Suite', () => {
          * 열었다면 그것이 Raw Binary 라고 이미 말한 것이다.
          */
         for (const ext of ['.bin', '.dat']) {
-            test(`${ext} 는 내용이 유효한 HEX 라도 Raw Binary 로 연다`, () => {
+            test(`${ext} 는 내용이 유효한 HEX 라도 Raw Binary 로 연다`, async () => {
                 const tmpFile = path.join(os.tmpdir(), `test_taskhub_extfirst${ext}`);
                 // 그대로 두면 detectFormat 이 intel 로 판정할 완전한 레코드다.
                 fs.writeFileSync(tmpFile, ':020000040800F2\n:00000001FF');
                 try {
-                    const result = parseFile(tmpFile);
+                    const result = (await parseFile(tmpFile));
                     assert.strictEqual(result.format, 'binary', '확장자보다 내용을 우선했다');
                     assert.ok(result.rawBuffer, 'Raw Binary 는 rawBuffer 로 온다');
                 } finally {
@@ -471,7 +471,7 @@ suite('HexParser Test Suite', () => {
          * 창을 벗어나 Raw Binary 로 열렸다 — 파서는 깨진 줄을 건너뛰고 읽을 수
          * 있는데도 그랬다. 확장자가 말해 주는 것을 내용 추측으로 뒤집지 않는다.
          */
-        test('앞쪽 레코드가 여러 개 깨진 .hex 도 Intel HEX 로 연다', () => {
+        test('앞쪽 레코드가 여러 개 깨진 .hex 도 Intel HEX 로 연다', async () => {
             const tmpFile = path.join(os.tmpdir(), 'test_taskhub_lateok.hex');
             fs.writeFileSync(tmpFile, [
                 ...Array.from({ length: 8 }, () => ':020000040800F3'),  // 전부 체크섬 오류
@@ -480,7 +480,7 @@ suite('HexParser Test Suite', () => {
                 ':00000001FF',
             ].join('\n'));
             try {
-                const result = parseFile(tmpFile);
+                const result = (await parseFile(tmpFile));
                 assert.strictEqual(result.format, 'intel', '확장자보다 내용 탐지를 우선했다');
                 assert.strictEqual(result.data.get(0x08000000), 0x00, '유효한 레코드를 읽지 못했다');
             } finally {
@@ -489,23 +489,23 @@ suite('HexParser Test Suite', () => {
         });
 
         for (const ext of ['.srec', '.s19']) {
-            test(`${ext} 도 확장자로 SREC 를 확정한다`, () => {
+            test(`${ext} 도 확장자로 SREC 를 확정한다`, async () => {
                 const tmpFile = path.join(os.tmpdir(), `test_taskhub_srecext${ext}`);
                 fs.writeFileSync(tmpFile, ['S0030000FD', 'S107000001020304EE', 'S9030000FC'].join('\n'));
                 try {
-                    assert.strictEqual(parseFile(tmpFile).format, 'srec');
+                    assert.strictEqual((await parseFile(tmpFile)).format, 'srec');
                 } finally {
                     fs.unlinkSync(tmpFile);
                 }
             });
         }
 
-        test('첫 바이트가 `:` 인 .img 바이너리를 Intel HEX 로 열지 않는다', () => {
+        test('첫 바이트가 `:` 인 .img 바이너리를 Intel HEX 로 열지 않는다', async () => {
             // 확장자로는 정할 수 없는 자리 — 첫 레코드 검증이 막아야 한다.
             const tmpFile = path.join(os.tmpdir(), 'test_taskhub_colon.img');
             fs.writeFileSync(tmpFile, Buffer.from([0x3A, 0x00, 0xFF, 0x10, 0x20]));
             try {
-                const result = parseFile(tmpFile);
+                const result = (await parseFile(tmpFile));
                 assert.strictEqual(result.format, 'binary');
                 assert.strictEqual(result.byteCount, 5, '빈 뷰어가 되면 byteCount 가 0 이다');
             } finally {
