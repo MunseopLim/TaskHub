@@ -383,6 +383,48 @@ suite('AI scheduler CLI execution and UI integration', function () {
     const run = (item: AiSchedule, options: AiCliOptions, storage: string, signal = new AbortController().signal, slot?: number) =>
         runScheduledAi(item, signal, slot, storage, [item.workspacePath], options, killProcessTree);
 
+    test('IT-302: slot markers survive interrupted replacement and retry without executing the failed claim', async () => {
+        assert.strictEqual((await run(item, options, storage, undefined, 60000)).status, 'success');
+        const lease = aiWorkspaceLeaseDirectory(storage, await fs.realpath(directory));
+        const marker = path.join(lease, `${item.id}.json`);
+        const fsModule = require('fs/promises') as typeof fs;
+        const originalRename = fsModule.rename;
+        const edited = path.join(directory, 'claim-started.txt');
+        options.prefixArgs = [script, 'edit', edited];
+        try {
+            fsModule.rename = (async (from, to) => {
+                if (to === marker) { throw new Error('interrupted marker replacement'); }
+                return originalRename(from, to);
+            }) as typeof fs.rename;
+            assert.strictEqual((await run(item, options, storage, undefined, 120000)).status, 'failed');
+            assert.strictEqual(await fs.readFile(marker, 'utf8'), '60000');
+            await assert.rejects(fs.stat(edited), { code: 'ENOENT' });
+            assert.deepStrictEqual((await fs.readdir(lease)).filter(name => name.endsWith('.tmp')), []);
+        } finally { fsModule.rename = originalRename; }
+        assert.strictEqual((await run(item, options, storage, undefined, 120000)).status, 'success');
+        assert.strictEqual(await fs.readFile(edited, 'utf8'), 'modified by fixture');
+        assert.strictEqual((await run(item, options, storage, undefined, 120000)).status, 'skipped');
+    });
+
+    test('IT-303: corrupt slot markers skip one slot conservatively and recover for the next slot', async () => {
+        const lease = aiWorkspaceLeaseDirectory(storage, await fs.realpath(directory));
+        await fs.mkdir(lease, { recursive: true });
+        const marker = path.join(lease, `${item.id}.json`);
+        const edited = path.join(directory, 'recovered-claim.txt');
+        options.prefixArgs = [script, 'edit', edited];
+        for (const content of ['', '{truncated', 'null', '-1', '1.5', '"60000"', '9'.repeat(257)]) {
+            await fs.writeFile(marker, content);
+            const repaired = await run(item, options, storage, undefined, 60000);
+            assert.strictEqual(repaired.status, 'skipped', content);
+            assert.match(repaired.detail!, /복구|Repaired/);
+            assert.strictEqual(await fs.readFile(marker, 'utf8'), '60000');
+            await assert.rejects(fs.stat(edited), { code: 'ENOENT' });
+            assert.strictEqual((await run(item, options, storage, undefined, 60000)).status, 'skipped');
+        }
+        assert.strictEqual((await run(item, options, storage, undefined, 120000)).status, 'success');
+        assert.strictEqual(await fs.readFile(edited, 'utf8'), 'modified by fixture');
+    });
+
     test('native argv and stdin preserve hostile-looking multiline prompts and save the actual result', async () => {
         const result = await run(item, options, storage, undefined, 60000);
         assert.strictEqual(result.status, 'success'); item.lastRun = result;

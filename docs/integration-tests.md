@@ -19,6 +19,16 @@
 
 ## 시나리오 그룹
 
+### AI 예약 실행 표지 복구
+
+파일: [aiScheduler.test.ts](../src/test/aiScheduler.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-302 | 예약 표지 원자 교체 | rename 실패 시 이전 표지 보존·실행 방지·임시 파일 정리·재시도 |
+| IT-303 | 손상된 예약 표지 복구 | 손상·과대 표지는 현재 슬롯을 건너뛰고 다음 슬롯부터 복구 |
+
+
 ### Windows 실행 경계 회귀
 
 파일: [executionReview.test.ts](../src/test/executionReview.test.ts)

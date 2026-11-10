@@ -469,12 +469,32 @@ export async function runScheduledAi(job: AiSchedule, signal: AbortSignal, sched
         if (scheduledAt !== undefined) {
             const marker = path.join(lockDirectory, `${job.id}.json`);
             let previous = 0;
+            let corrupt = false;
             try {
-                previous = JSON.parse((await boundedRead(marker, 256)).toString('utf8'));
-                if (!Number.isSafeInteger(previous) || previous < 0) { throw new Error(t('저장된 예약 실행 표지가 손상됐습니다.', 'Stored run marker is corrupt.')); }
+                const stats = await fs.stat(marker);
+                if (stats.isFile() && stats.size > 256) { corrupt = true; }
+                else {
+                    const content = (await boundedRead(marker, 256)).toString('utf8');
+                    try {
+                        previous = JSON.parse(content);
+                        corrupt = !Number.isSafeInteger(previous) || previous < 0;
+                    } catch { corrupt = true; }
+                }
             } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; } }
-            if (previous >= scheduledAt) { return { status: 'skipped', startedAt, finishedAt: Date.now(), detail: t('이 예약 시각은 다른 창에서 처리했습니다.', 'This scheduled slot was handled by another window.') }; }
-            await fs.writeFile(marker, JSON.stringify(scheduledAt), { mode: 0o600 });
+            if (!corrupt && previous >= scheduledAt) { return { status: 'skipped', startedAt, finishedAt: Date.now(), detail: t('이 예약 시각은 다른 창에서 처리했습니다.', 'This scheduled slot was handled by another window.') }; }
+            // 같은 폴더 lease 안에서 교체한다. 중단돼도 이전 표지는 온전하게 남는다.
+            const temporary = `${marker}.${randomUUID()}.tmp`;
+            try {
+                await fs.writeFile(temporary, JSON.stringify(scheduledAt), { mode: 0o600, flag: 'wx' });
+                await fs.rename(temporary, marker);
+            } finally { await fs.rm(temporary, { force: true }); }
+            if (corrupt) {
+                // 이전 실행 여부를 알 수 없으므로 현재 슬롯은 실행하지 않고 다음 슬롯부터 복구한다.
+                return { status: 'skipped', startedAt, finishedAt: Date.now(), detail: t(
+                    '손상된 예약 실행 표지를 복구했습니다. 중복 실행을 막기 위해 이번 시각은 건너뛰고 다음 시각부터 실행합니다.',
+                    'Repaired a corrupt run marker. This slot was skipped to prevent duplicate execution; the next slot can run.'
+                ) };
+            }
         }
         const result = prompt ? await invokeCli({ ...job, workspacePath: root }, prompt, options, abort.signal, kill, invocations)
             : await invokeScript({ ...job, workspacePath: root }, target, scheduledAt, options, abort.signal, kill, invocations);
