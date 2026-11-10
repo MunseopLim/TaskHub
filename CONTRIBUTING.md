@@ -42,15 +42,21 @@ esbuild는 초기 확장·기능별 지연 로딩·공유 상태·사전 생성 
 
 | 워크플로 / 정의 원본 | 실행 조건 | 환경·설치 | 검사·산출물 | 원격 변경 |
 | --- | --- | --- | --- | --- |
-| **CI** — [ci.yml](.github/workflows/ci.yml) | `main` 브랜치 push, `pull_request`, 수동 `workflow_dispatch` | `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`, Git 전체 이력 | Linux: `xvfb-run -a npm test`; Windows: `npm test`. 버전 비교 기준은 PR의 base SHA 또는 push 직전 SHA | 없음 (`contents: read`) |
-| **Release** — [release.yml](.github/workflows/release.yml) | `v*.*.*` 패턴의 태그 push | `ubuntu-latest`, Node.js `22`, `npm ci`, Git 전체 이력 | 태그의 `v`를 뺀 값과 `package.json` 버전 일치 검사 → `xvfb-run -a npm test` → `npx --yes @vscode/vsce@3.9.0 package --out "taskhub-${VSIX_VERSION}.vsix"` (`VSIX_VERSION`은 검사한 패키지 버전) | GitHub Release 생성·릴리스 노트 자동 생성·VSIX 첨부 (`contents: write`) |
+| **CI** — [ci.yml](.github/workflows/ci.yml) | `main` 브랜치 push, `pull_request`, 수동 `workflow_dispatch` | `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`, Git 전체 이력 | 두 OS에서 고정 VS Code `1.145.2` 전체 테스트·최소 `1.75.0` 스모크 테스트, Linux에서 최신 stable 전체 테스트. Linux: `xvfb-run -a npm test`; Windows: `npm test`. 버전 비교 기준은 PR의 base SHA 또는 push 직전 SHA | 없음 (`contents: read`) |
+| **Release** — [release.yml](.github/workflows/release.yml) | `v*.*.*` 패턴의 태그 push | 빌드: `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`, Git 전체 이력. 게시: 별도 `ubuntu-latest` 잡 | 두 OS에서 태그·패키지 버전 일치 검사와 고정 버전 전체 테스트 → Linux에서 `npm exec --no -- vsce package --out "taskhub-${VSIX_VERSION}.vsix"` → 산출물 전달. 두 OS 모두 성공해야 게시 | 빌드·테스트는 `contents: read`, 게시 잡만 `contents: write`로 GitHub Release·릴리스 노트·VSIX 생성 |
 | **Dependency Audit** — [security-audit.yml](.github/workflows/security-audit.yml) | 매주 월요일 `03:23` UTC (`23 3 * * 1`), 수동 `workflow_dispatch` | `ubuntu-latest`, Node.js `22`, `npm ci` | `npm audit --omit=dev --audit-level=high`로 운영 의존성의 high 이상 취약점 검사 | 없음 (`contents: read`) |
 
 `npm test`는 `pretest`에서 버전 검사·타입 검사를 포함한 테스트 컴파일·린트·확장과 웹뷰 번들 빌드를 각각 한 번 수행한 뒤
 VS Code Extension Host에서 테스트한다. 별도로 요구하는 `npm run package`도 버전 검사 후 프로덕션 빌드를 수행하며,
 VSIX 생성은 [VSIX 패키지 빌드 및 설치](#vsix-패키지-빌드-및-설치)를 참고한다. Release의 로컬
-재현에는 표에 지정한 `vsce` 버전과 패키징 명령을 사용한다. Dependency Audit는 일반 push/PR에서
+재현에는 lockfile에 고정한 개발 의존성 `@vscode/vsce`와 표의 패키징 명령을 사용한다. 모든 외부 액션은
+커밋 SHA로 고정하고 checkout은 자격 증명을 남기지 않는다. 게시 잡은 checkout·npm 설치·제품 코드를 실행하지 않는다. Dependency Audit는 일반 push/PR에서
 자동으로 실행되지 않으므로, 의존성 변경의 검증을 CI 테스트 결과로 대신하지 않는다.
+
+테스트 호스트의 기본 버전은 `.vscode-test.mjs`에 고정한다. PowerShell에서는
+`$env:TASKHUB_TEST_VERSION='1.75.0'; npm test`로 최소 버전 스모크 테스트(배포 번들 활성화·핵심 명령 등록·
+예제 문서 열기)를 실행하고, `stable`이면 최신 버전 전체 테스트를 실행한다. 실행 후
+`Remove-Item Env:TASKHUB_TEST_VERSION`으로 기본값을 복원한다. POSIX에서는 `TASKHUB_TEST_VERSION=1.75.0 npm test`를 사용한다.
 
 #### 커밋 전 체크리스트
 
@@ -184,7 +190,7 @@ VS Code 자체 수정 후에는 기본 `extensionHost` 구성으로 다시 확�
 ### VSIX 패키지 빌드 및 설치
 
 ```bash
-npx @vscode/vsce package # TaskHub-<version>.vsix 생성
+npm exec --no -- vsce package # TaskHub-<version>.vsix 생성
 ```
 
 생성된 `.vsix` 파일은 VS Code `Extensions: Install from VSIX...` 명령으로 설치해 실제 설치 환경과 동일하게 검증할 수 있습니다.
@@ -309,6 +315,10 @@ API나 동작이 바뀔 수 있고 사용자 피드백이 필요한 기능만 ex
 - `glob`: mocha 내부의 지원 종료된 glob 10 설치 경고 제거
 
 override 제거 전에 `npm audit`으로 취약점 상태 확인 필요.
+
+VSIX 패키징 도구 `@vscode/vsce`는 `minimatch` 10 API를 사용하는 버전으로 고정한다.
+3.9.0처럼 callable default export를 요구하는 버전은 전역 override와 충돌하므로,
+도구 버전을 바꾸면 실제 VSIX 생성까지 검증한다.
 
 ### `@types/vscode` 잠금 정책
 

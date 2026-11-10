@@ -12,9 +12,12 @@ mkdirSync(join(userDataDir, 'User'), { recursive: true });
 writeFileSync(join(userDataDir, 'User', 'settings.json'), JSON.stringify({ 'taskhub.aiScheduler.enabled': false }));
 
 export default defineConfig({
-	files: 'out/test/**/*.test.js',
+    version: process.env.TASKHUB_TEST_VERSION ?? '1.145.2',
+    files: process.env.TASKHUB_TEST_VERSION === '1.75.0'
+        ? 'out/test/minimumCompatibility.test.js' : 'out/test/**/*.test.js',
 	workspaceFolder: join(__dirname, 'schema'),
 	launchArgs: [
+        '--disable-extensions',
 		// 실제 웹뷰 테스트가 다른 창에 가려져도 timer/RAF가 멈추지 않게 한다.
 		// 제품의 HTML·스크립트·CSP는 바꾸지 않고 테스트 호스트에만 적용한다.
 		'--disable-background-timer-throttling',

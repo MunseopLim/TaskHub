@@ -196,7 +196,8 @@ suite('Memory Map Viewer Test Suite', () => {
                                 assert.ok((Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) >= 4.5);
                                 if (index >= 2) {
                                     assert.strictEqual(badge.border, expected[index][0]);
-                                    assert.strictEqual(badge.borderWidth, '1px');
+                                    assert.ok(Number.parseFloat(badge.borderWidth) > 0,
+                                        `${theme.name} ${badge.text}: high contrast border must remain visible at any DPI`);
                                 }
                             }
                         });

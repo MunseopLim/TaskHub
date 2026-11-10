@@ -19,6 +19,14 @@
 
 ## 시나리오 그룹
 
+### 최소 지원 버전 스모크 테스트
+
+파일: [minimumCompatibility.test.ts](../src/test/minimumCompatibility.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-308 | 배포 번들 호환성 | 실제 활성화·핵심 명령 등록·예제 문서 열기 |
+
 ### 열려 있는 파일 즐겨찾기 등록 방식
 파일: [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts)
 

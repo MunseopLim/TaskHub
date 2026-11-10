@@ -1473,7 +1473,7 @@
     "pretest": "npm run check-version && npm run compile-tests && npm run lint && node esbuild.js",
     "check-version": "node scripts/check-release-version.cjs",
     "check-types": "tsc --noEmit",
-    "lint": "eslint src",
+    "lint": "eslint src --max-warnings 0",
     "test": "vscode-test",
     "clean-tests": "node -e \"require('fs').rmSync('out', { recursive: true, force: true })\""
   },
@@ -1489,6 +1489,7 @@
     "@typescript-eslint/parser": "^8.0.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "4.1.0",
     "adm-zip": "^0.6.1",
     "esbuild": "^0.28.0",
     "eslint": "^10.0.0",

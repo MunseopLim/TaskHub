@@ -41,6 +41,14 @@ const changelog = `# Change Log
 `;
 
 suite('업데이트 변경 내용', () => {
+    suiteSetup(async function () {
+        this.timeout(20000);
+        // 전역 API 스텁을 설치하기 전에 실제 명령·가상 문서 등록을 마친다.
+        const extension = vscode.extensions.getExtension('Munseop.taskhub');
+        assert.ok(extension);
+        await extension.activate();
+    });
+
     test('변경 이력 경로는 소스·VSIX의 실제 대소문자를 보존하고 누락된 파일은 거부한다', async () => {
         const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-changelog-case-'));
         try {
