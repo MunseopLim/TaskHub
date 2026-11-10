@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import * as vscode from 'vscode';
 import { __testHook_resetShellEnvNamesCache, executeActionPipeline, handleEnvPick, handleQuickPick, runCommandCaptureLines, wrapCommandForOneShot } from '../extension';
 import { encodePowerShellScript, resolveTaskWorkingDirectory, WindowsBatchArgumentError } from '../pipelineUtils';
+import { windowsCmdPath } from '../processEnvironment';
 
 const windowsOneShotFixtureArgs = ['C:\\Build Output\\firmware.bin', '', 'after empty', 'build\\', 'C:\\Build Output\\'];
 
@@ -76,7 +77,7 @@ suite('실행 작업 디렉터리와 UTF-8 목록', () => {
                 assert.deepStrictEqual(await result, ['Debug', 'Release']);
                 assert.ok(captured);
                 const isWindows = platform === 'win32';
-                assert.strictEqual(captured.shell, isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh'));
+                assert.strictEqual(captured.shell, isWindows ? windowsCmdPath() : (process.env.SHELL || '/bin/sh'));
                 assert.deepStrictEqual(captured.args, isWindows ? ['/d', '/s', '/c', `"${command}"`] : ['-l', '-c', command]);
                 assert.strictEqual(captured.options.windowsVerbatimArguments, isWindows);
                 assert.strictEqual(captured.options.detached, !isWindows);

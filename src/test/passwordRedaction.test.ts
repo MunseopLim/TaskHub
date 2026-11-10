@@ -1138,6 +1138,7 @@ suite('Password taint and redaction', function () {
         const marker = path.join(tempWorkspace, 'cmd-shim-one-shot.marker');
         const runner = path.join(tempWorkspace, 'cmd-shim-runner.js');
         const shim = path.join(tempWorkspace, 'sensitive-shim.cmd');
+        const fakeShell = path.join(tempWorkspace, 'powershell.exe');
         // 실패했을 때 `PowerShell → cmd.exe → %* → node` 중 **어디서** 끊겼는지
         // 한 번의 실행으로 가르기 위한 중간 신호들. 이게 없으면 "marker 없음"
         // 하나만 남아 제품 문제와 fixture 인용 문제를 구분할 수 없다.
@@ -1177,6 +1178,7 @@ suite('Password taint and redaction', function () {
         };
 
         try {
+            fs.copyFileSync(path.join(process.env.SystemRoot!, 'System32', 'whoami.exe'), fakeShell);
             await extension.executeActionPipeline(
                 {
                     description: 'sensitive .cmd shim one-shot',
@@ -1226,6 +1228,7 @@ suite('Password taint and redaction', function () {
                 `성공한 민감 .cmd one-shot이 실패 알림을 냈다: ${redact(shownErrors.join(' | '))}`);
             assert.ok(!verboseLines.join('\n').includes(secret), '민감 .cmd 명령이 verbose log에 샜다');
         } finally {
+            fs.rmSync(fakeShell, { force: true });
             observedChild.restore();
             (vscode.tasks as any).executeTask = originalExecuteTask;
             (vscode.window as any).showErrorMessage = originalShowError;

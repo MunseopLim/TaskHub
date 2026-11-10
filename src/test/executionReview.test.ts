@@ -5,14 +5,14 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import {
     Action, MainViewProvider, executeAction, executeActionPipeline,
-    executeShellCommand, registerStopActionCommand, TaskTransitionEvent,
+    executeShellCommand, registerStopActionCommand, runCommandCaptureLines, TaskTransitionEvent,
 } from '../extension';
 import { Action as PipelineAction, ActionItem, Task } from '../schema';
 import { HistoryProvider } from '../providers/historyProvider';
 import { actionStates } from '../providers/actionStatus';
 import { buildBuiltinVariableContext } from '../builtinVariables';
 import { ActionRunLogCollector } from '../runLogStore';
-import { TaskScheduler } from '../pipelineUtils';
+import { resolveWindowsDirectExecutable, TaskScheduler } from '../pipelineUtils';
 
 suite('실행 경계 회귀', function () {
     this.timeout(15000);
@@ -49,6 +49,29 @@ suite('실행 경계 회귀', function () {
             ...options,
         });
     }
+
+    test('IT-300: Windows 캡처와 목록 생성은 cwd에 심은 시스템 셸 대신 실제 시스템 셸을 실행한다', async function () {
+        if (process.platform !== 'win32') { this.skip(); }
+        const whoami = path.join(process.env.SystemRoot!, 'System32', 'whoami.exe');
+        for (const name of ['powershell.exe', 'pwsh.exe', 'cmd.exe']) {
+            fs.copyFileSync(whoami, path.join(workspace, name));
+        }
+        assert.strictEqual((await executeShellCommand('echo', ['trusted-command'], workspace)).stdout.trim(), 'trusted-command');
+        assert.strictEqual((await executeShellCommand('Write-Output trusted-shell', [], workspace,
+            undefined, undefined, undefined, undefined, undefined, undefined, false, undefined, undefined, false, true)).stdout.trim(), 'trusted-shell');
+        assert.deepStrictEqual(await runCommandCaptureLines('echo trusted-cmd', workspace), ['trusted-cmd']);
+    });
+
+    test('IT-301: Windows 캡처의 대소문자가 다른 환경 재정의는 실제 자식과 PATH 실행 계획에 적용된다', async function () {
+        if (process.platform !== 'win32') { this.skip(); }
+        const directory = path.join(workspace, 'toolchain');
+        fs.mkdirSync(directory);
+        fs.copyFileSync(resolveWindowsDirectExecutable('node')!, path.join(directory, 'env-probe.exe'));
+        fs.writeFileSync(path.join(workspace, 'env.cjs'), "process.stdout.write(process.env.TEMP);");
+        const result = await executeShellCommand('env-probe', ['env.cjs'], workspace,
+            { path: directory, temp: 'taskhub-override' });
+        assert.strictEqual(result.stdout, 'taskhub-override');
+    });
 
     for (const type of ['command', 'shell'] as const) {
         test(`${type} 캡처는 stdin EOF를 전달해 입력 없는 명령을 종료한다`, async () => {

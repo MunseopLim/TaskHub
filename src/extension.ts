@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
+import { mergeProcessEnvironment, windowsCmdPath, windowsPowerShellPath } from './processEnvironment';
 import { StringDecoder } from 'string_decoder';
 import { ActionItem, Action as PipelineAction, type QuickPickItem } from './schema';
 import { NumberBaseHoverProvider, registerHoverCopyCommand } from './numberBaseHoverProvider';
@@ -8820,7 +8821,7 @@ export function createShellExecution(
     // 명시적 args 속 큰따옴표를 제거하지 않도록 native argv 로 실행한다.
     if (raw) {
         if (process.platform === 'win32') {
-            const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
+            const effectiveEnv = mergeProcessEnvironment(process.env, options.env ?? {});
             const taskLookup = { env: effectiveEnv, cwd: options.cwd || process.cwd(), ...lookup };
             const plan = resolveWindowsTaskSpawn(true, command, args, taskLookup);
             if (plan.strategy === 'native') {
@@ -8857,10 +8858,9 @@ export function createShellExecution(
     }
 
     if (process.platform === 'win32') {
-        // VS Code merges `options.env` onto the parent environment for the
-        // spawned task, so the child's effective PATH is `options.env.PATH ??
-        // process.env.PATH` — judge launchability against that.
-        const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
+        // Match VS Code's Windows environment merge, including case-insensitive
+        // names, when judging launchability against the child's effective PATH.
+        const effectiveEnv = mergeProcessEnvironment(process.env, options.env ?? {});
         const taskLookup = { env: effectiveEnv, cwd: options.cwd || process.cwd(), ...lookup };
         const plan = resolveWindowsTaskSpawn(false, command, args, taskLookup);
         if (plan.strategy === 'native') {
@@ -8873,7 +8873,7 @@ export function createShellExecution(
         const invocation = buildPowerShellInvocation(command, args, useUtf8Console);
         const encoded = encodePowerShellScript(withPowerShellExitCode(invocation.script));
         return {
-            shellExecution: new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options),
+            shellExecution: new vscode.ShellExecution(windowsPowerShellPath(), ['-NoProfile', '-EncodedCommand', encoded], options),
             displayCommand: invocation.display
         };
     }
@@ -9039,11 +9039,11 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
         // Effective env the one-shot child runs with (VS Code merges options.env
         // onto the parent env) — used so `task.env.PATH` extensions are honoured
         // when judging launchability.
-        const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...envOverrides };
+        const effectiveEnv = mergeProcessEnvironment(process.env, envOverrides);
         const wrapped = wrapCommandForOneShot(command, taskArgs, options.cwd, useUtf8Console, effectiveEnv, task.type === 'shell');
         if (wrapped.isPowerShellScript) {
             const encoded = encodePowerShellScript(wrapped.commandLine);
-            shellExecution = new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options);
+            shellExecution = new vscode.ShellExecution(windowsPowerShellPath(), ['-NoProfile', '-EncodedCommand', encoded], options);
         } else {
             // `nohup … &` 래퍼는 sh 문법이다(raw 본문도 안쪽 `sh -c`로 감싼다).
             shellExecution = new vscode.ShellExecution(wrapped.commandLine, withPosixShell(options));
@@ -9195,7 +9195,7 @@ function executeSensitiveBackgroundOneShot(task: any, workspaceFolderPath?: stri
     const command = getCommandString(task.command);
     const args = Array.isArray(task.args) ? task.args : [];
     const { envOverrides, useUtf8Console } = resolveExecutionSettings(task.env);
-    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...envOverrides };
+    const childEnv = mergeProcessEnvironment(process.env, envOverrides);
     const workingDirectory = resolveTaskCwd(task.cwd, workspaceFolderPath);
     const shownWorkingDirectory = task.redactedCwd ?? workingDirectory ?? '';
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
@@ -9253,7 +9253,7 @@ function executeSensitiveBackgroundOneShot(task: any, workspaceFolderPath?: stri
                 // raw 는 여기서도 인터프리터를 골라야 한다 — 이 경로는 stdio:'ignore'
                 // 이고 실패 안내가 일부러 무내용("상세는 숨겼습니다")이라, 5.1 의
                 // `&&` 파스 오류가 나면 사용자에게 **아무 진단 단서도 남지 않는다**.
-                const shell = raw ? resolveRawShellExecutable(command, { env: childEnv }) : 'powershell.exe';
+                const shell = raw ? resolveRawShellExecutable(command, { env: childEnv }) : windowsPowerShellPath();
                 // powershell.exe does not reliably propagate an external program's
                 // exit code unless the script exits explicitly with LASTEXITCODE.
                 const script = withPowerShellExitCode(invocation.script);
@@ -9562,7 +9562,7 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
         }
 
         const isWindows = process.platform === 'win32';
-        const shell = isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh');
+        const shell = isWindows ? windowsCmdPath() : (process.env.SHELL || '/bin/sh');
         // cmd의 인용 규칙은 Windows argv 인용과 다르다. Node의 shell:true와
         // 같은 외곽 인용 + /s를 쓰고 libuv의 재인용을 막아 node -e "..."와
         // 공백이 든 실행 파일 경로의 내부 큰따옴표를 그대로 보존한다.
@@ -10281,7 +10281,7 @@ function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
     }
     cachedShellEnvNamesPromise = new Promise<Set<string> | null>((resolve) => {
         const isWindows = process.platform === 'win32';
-        const shell = isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh');
+        const shell = isWindows ? windowsCmdPath() : (process.env.SHELL || '/bin/sh');
         const args = isWindows ? ['/c', 'set'] : ['-l', '-c', 'env'];
 
         // 핵심: spawn 의 기본 env 상속을 막아야 한다. 그렇게 두면 확장 호스트가
@@ -11477,10 +11477,7 @@ export function executeShellCommand(
     return new Promise((resolve, reject) => {
 
         const { envOverrides, useUtf8Console } = resolveExecutionSettings(taskEnv);
-        const childEnv: NodeJS.ProcessEnv = { ...process.env };
-        for (const [key, value] of Object.entries(envOverrides)) {
-            childEnv[key] = value;
-        }
+        const childEnv = mergeProcessEnvironment(process.env, envOverrides);
         // Use undefined instead of empty string to let Node.js use process.cwd() as fallback
         const workingDirectory = resolveTaskCwd(cwd, workspaceFolderPath);
         const windowsLookup = {
@@ -11616,7 +11613,7 @@ export function executeShellCommand(
             // 우리가 인용하므로 그 안의 `&&` 는 연산자가 아니다.
             const shell = raw
                 ? resolveRawShellExecutable(command, windowsLookup)
-                : 'powershell.exe';
+                : windowsPowerShellPath();
             childProcess = spawn(shell, ['-NoProfile', '-EncodedCommand', encoded], {
                 cwd: workingDirectory,
                 env: childEnv,

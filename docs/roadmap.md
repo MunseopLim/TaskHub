@@ -100,3 +100,10 @@ disassembly 웹뷰는 만들지 않습니다.
 ## 테스트 부채
 
 - `jsonEditorUtils.test.ts`의 소스 문자열 정규식 검사를 실행 기반 테스트로 점진적으로 교체합니다.
+
+## 실행 모듈의 기술 부채
+
+`extension.ts`의 프로세스 실행·종료와 태스크 준비를 분리하고 `executeSingleTask`·`prepareTaskExecution`의
+`any` 경계를 스키마 기반 타입으로 좁힙니다. 기존 export와 실행 경로 통합 테스트를 유지하면서 책임별로
+진행합니다. 환경 병합과 시스템 셸 경로는 `processEnvironment.ts`로 분리했으며, 나머지 영역은 실행 결과를
+바꾸지 않는 별도 리팩터링으로 다룹니다.

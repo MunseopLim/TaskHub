@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import { windowsPowerShellPath } from '../processEnvironment';
 import * as vscode from 'vscode';
 import {
 	interpolatePipelineVariables,
@@ -2193,8 +2194,8 @@ suite('Extension Test Suite', () => {
 			isFile: (p: string) => p === 'C:\\bin\\node.exe',
 		};
 
-		test('PATH 에 있으면 이름, 없으면 전체 경로를 돌려준다', () => {
-			assert.strictEqual(resolvePwshPath(withPwsh), 'pwsh.exe');
+		test('PATH 와 기본 설치 폴더 모두 전체 경로를 돌려준다', () => {
+			assert.strictEqual(resolvePwshPath(withPwsh), 'C:\\ps\\pwsh.exe');
 			assert.strictEqual(resolvePwshPath(withoutPwsh), undefined);
 			// **PATH 에 없는 설치본은 이름만으로 띄울 수 없다.** 처음 구현은
 			// 여기서 찾고도 `pwsh.exe` 만 반환해서 spawn 이 실패했다 — false
@@ -2211,8 +2212,8 @@ suite('Extension Test Suite', () => {
 			// 무조건 pwsh 를 선호하면 이미 동작하던 액션의 의미가 바뀐다 (PS 7 은
 			// curl/wget 별칭을 없앴고 `>` 의 기본 인코딩도 다르다). 필요할 때만
 			// 바꿔야 같은 actions.json 이 기계마다 다르게 돌지 않는다.
-			assert.strictEqual(selectWindowsRawShell(false, 'pwsh.exe'), 'powershell.exe');
-			assert.strictEqual(selectWindowsRawShell(false, undefined), 'powershell.exe');
+			assert.strictEqual(selectWindowsRawShell(false, 'pwsh.exe'), windowsPowerShellPath());
+			assert.strictEqual(selectWindowsRawShell(false, undefined), windowsPowerShellPath());
 			assert.strictEqual(selectWindowsRawShell(true, 'pwsh.exe'), 'pwsh.exe');
 			assert.strictEqual(
 				selectWindowsRawShell(true, 'C:\\PF\\PowerShell\\7\\pwsh.exe'),
@@ -2247,10 +2248,10 @@ suite('Extension Test Suite', () => {
 				/PowerShell 7|pwsh/,
 				'파스 오류로 넘기지 말고 이유를 설명해야 한다'
 			);
-			assert.strictEqual(resolveRawShellExecutable('make && make flash', withPwsh), 'pwsh.exe');
-			assert.strictEqual(resolveRawShellExecutable('make flash', withoutPwsh), 'powershell.exe');
+			assert.strictEqual(resolveRawShellExecutable('make && make flash', withPwsh), 'C:\\ps\\pwsh.exe');
+			assert.strictEqual(resolveRawShellExecutable('make flash', withoutPwsh), windowsPowerShellPath());
 			// args 는 우리가 인용하므로 스캔 대상이 아니다 — command 만 넘긴다.
-			assert.strictEqual(resolveRawShellExecutable('cmd /c "a && b"', withoutPwsh), 'powershell.exe');
+			assert.strictEqual(resolveRawShellExecutable('cmd /c "a && b"', withoutPwsh), windowsPowerShellPath());
 		});
 
 		test('Windows 실행 전략은 raw 단일 실행 파일 예외와 셸 문법을 구분한다', () => {
@@ -2290,7 +2291,7 @@ suite('Extension Test Suite', () => {
 				));
 
 				assert.strictEqual(result.isPowerShellScript, true);
-				assert.ok(result.commandLine.startsWith("Start-Process -FilePath 'powershell.exe'"), result.commandLine);
+				assert.ok(result.commandLine.startsWith(`Start-Process -FilePath '${windowsPowerShellPath()}'`), result.commandLine);
 				// **표시는 원본 줄이다** — 다른 형제 분기와 달리 여기만 다르다.
 				// 스크립트를 그대로 보여주면 이력과 로그가 읽을 수 없게 된다.
 				assert.strictEqual(result.displayCommand, 'echo hi > out.txt');
@@ -2339,7 +2340,7 @@ suite('Extension Test Suite', () => {
 				));
 				const exec = result.shellExecution as vscode.ShellExecution;
 				// chain 연산자가 있으니 pwsh 로 간다.
-				assert.strictEqual(exec.command, 'pwsh.exe');
+				assert.strictEqual(exec.command, 'C:\\ps\\pwsh.exe');
 				assert.strictEqual((exec.args?.[0] as string), '-NoProfile');
 				const payload = decodeEncodedCommand(`-EncodedCommand ${exec.args?.[2] as string}`);
 				assert.ok(payload.startsWith('echo hi && echo bye'), payload);
@@ -2366,7 +2367,7 @@ suite('Extension Test Suite', () => {
 				const exec = onWin32(() => createShellExecution(
 					'make flash', [], {}, false, true, withPwsh
 				)).shellExecution as vscode.ShellExecution;
-				assert.strictEqual(exec.command, 'powershell.exe');
+				assert.strictEqual(exec.command, windowsPowerShellPath());
 			});
 		});
 

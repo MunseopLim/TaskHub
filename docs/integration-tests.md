@@ -19,6 +19,16 @@
 
 ## 시나리오 그룹
 
+### Windows 실행 경계 회귀
+
+파일: [executionReview.test.ts](../src/test/executionReview.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-300 | 시스템 셸 위장 | cwd의 가짜 셸 대신 실제 시스템 셸로 캡처·목록 생성 |
+| IT-301 | Windows 환경 재정의 | 소문자 PATH·TEMP 재정의가 실제 자식에 전달됨 |
+
+
 ### 최소 지원 버전 스모크 테스트
 
 파일: [minimumCompatibility.test.ts](../src/test/minimumCompatibility.test.ts)

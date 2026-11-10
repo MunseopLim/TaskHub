@@ -16,6 +16,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import { environmentValue, windowsPowerShellPath } from './processEnvironment';
 import type { OutputCapture, SwitchTaskBranch, Task, TaskCondition } from './schema';
 import { USER_REGEX_HOST_THREAD_MAX_MS, regexBudgetForInput, runWithRegexBudget } from './regexBudget';
 import {
@@ -2270,8 +2271,8 @@ const defaultWindowsExecutableLookup: Pick<WindowsExecutableLookup, 'env' | 'isF
  *
  * `lookup` may override `env`, `cwd`, and/or `isFile`; whatever isn't supplied
  * falls back to `process.env`, `process.cwd()`, and a real `fs.statSync`. Callers
- * MUST pass the **task's effective env** (`{ ...process.env, ...envOverrides }`
- * — i.e. the same env the child will run with) so a `PATH` extended via
+ * MUST pass the **task's effective env** from `mergeProcessEnvironment`
+ * (the same env the child will run with) so a `PATH` extended via
  * `task.env.PATH` is honoured here too; otherwise a toolchain `.exe` could be
  * misjudged and routed through PowerShell (re-triggering the very quote bug
  * this avoids).
@@ -2310,7 +2311,7 @@ export function resolveWindowsDirectExecutable(
         return undefined;
     }
 
-    const pathValue = env.PATH ?? env.Path;
+    const pathValue = environmentValue(env, 'PATH');
     if (pathValue === undefined || pathValue.length === 0) {
         return undefined;
     }
@@ -2378,7 +2379,7 @@ export function resolveWindowsBatchTarget(
     const cwd = lookup.cwd ?? process.cwd();
     const isFile = lookup.isFile ?? defaultWindowsExecutableLookup.isFile;
     const base = (executable.split(/[\\/]/).pop() || executable).toLowerCase();
-    const pathExt = (env.PATHEXT ?? env.PathExt)?.split(';')
+    const pathExt = environmentValue(env, 'PATHEXT')?.split(';')
         .map(ext => ext.trim().toLowerCase())
         .filter(ext => ext.startsWith('.')) ?? [];
     const extensions = pathExt.length > 0 ? pathExt : WINDOWS_DEFAULT_PATHEXT;
@@ -2398,7 +2399,7 @@ export function resolveWindowsBatchTarget(
     if (hasSeparator) {
         directories.push(path.win32.isAbsolute(executable) ? '' : cwd);
     } else {
-        const pathValue = env.PATH ?? env.Path ?? '';
+        const pathValue = environmentValue(env, 'PATH') ?? '';
         for (const rawDir of pathValue.split(';')) {
             if (rawDir.length === 0) { continue; }
             const dir = rawDir.length >= 2 && rawDir.startsWith('"') && rawDir.endsWith('"') ? rawDir.slice(1, -1) : rawDir;
@@ -2495,15 +2496,15 @@ export function rawCommandUsesChainOperators(command: string): boolean {
  * 아예 실패**하므로 false negative 의 대가가 크다.
  */
 export function resolvePwshPath(lookup: Partial<WindowsExecutableLookup> = {}): string | undefined {
-    // PATH 에 있으면 이름만으로 띄울 수 있다.
-    if (windowsCommandIsDirectlyLaunchable('pwsh', [], lookup)) { return 'pwsh.exe'; }
+    const found = resolveWindowsDirectExecutable('pwsh', [], lookup);
+    if (found) { return found; }
     const env = lookup.env ?? defaultWindowsExecutableLookup.env;
     const isFile = lookup.isFile ?? defaultWindowsExecutableLookup.isFile;
     // PATH 에 없다면 **전체 경로를 돌려줘야 한다.** 처음 구현은 여기서 찾고도
     // 이름(`pwsh.exe`)만 반환해서, PATH 에 없는 그 설치본을 spawn 이 찾지
     // 못하고 세 실행 모드 모두 실패했다 — false negative 를 줄이려던 보완이
     // 오히려 확실한 실패를 만들었다.
-    for (const root of [env.ProgramFiles, env['ProgramFiles(x86)']]) {
+    for (const root of [environmentValue(env, 'ProgramFiles'), environmentValue(env, 'ProgramFiles(x86)')]) {
         if (!root) { continue; }
         const candidate = path.win32.join(root, 'PowerShell', '7', 'pwsh.exe');
         if (isFile(candidate)) { return candidate; }
@@ -2532,7 +2533,7 @@ export function resolvePwshPath(lookup: Partial<WindowsExecutableLookup> = {}): 
  * (7.0 에서 도입). PS 6 은 EOL 이라 그 구분까지는 하지 않는다.
  */
 export function selectWindowsRawShell(needsChainOperators: boolean, pwshPath: string | undefined): string | undefined {
-    if (!needsChainOperators) { return 'powershell.exe'; }
+    if (!needsChainOperators) { return windowsPowerShellPath(); }
     return pwshPath;
 }
 
