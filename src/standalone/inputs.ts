@@ -34,12 +34,23 @@ export function inputResult(task: Task, inputs: Inputs, context: Record<string, 
             if (![true, false, 'true', 'false'].includes(value as boolean | string)) { throw invalid(); }
             if (value !== true && value !== 'true') { throw new TaskHubError(130, t('확인이 취소되었습니다.', 'Confirmation declined.')); }
             return { confirmed: 'true' };
-        case 'inputBox':
+        case 'inputBox': {
             if (typeof value !== 'string') { throw invalid(); }
-            if (task.validatePattern && !runWithRegexBudget(task.validatePattern, () => new RegExp(task.validatePattern!).test(value))) {
-                throw invalid();
+            if (task.validatePattern) {
+                const pattern = task.validatePattern;
+                let validator: RegExp | undefined;
+                try {
+                    validator = new RegExp(pattern);
+                } catch (error) {
+                    // Match the schema and extension: invalid regex syntax disables validation.
+                    if (!(error instanceof SyntaxError)) { throw error; }
+                }
+                if (validator && !runWithRegexBudget(pattern, validator.test.bind(validator, value))) {
+                    throw invalid();
+                }
             }
             return { value: expand(task.prefix ?? '') + value + expand(task.suffix ?? '') };
+        }
         case 'envPick':
             if (typeof value !== 'string' || !Object.hasOwn(process.env, value)) { throw invalid(); }
             return { value };

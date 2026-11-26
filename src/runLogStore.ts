@@ -659,21 +659,26 @@ export async function listActionRunHistory(root: string) {
         }
         files = await collectLogFiles(logsRoot);
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return { runs: [] }; }
         throw error;
     }
     const runs = [];
+    let skippedLogs = 0;
     for (const file of files) {
         const runId = path.relative(root, file.path).split(path.sep).join('/');
         try {
             const { actionId, actionTitle, startedAt, finishedAt, outcome } = await readActionRunLog(root, runId);
             runs.push({ runId, actionId, actionTitle, startedAt, finishedAt, outcome });
         } catch (error) {
+            if (!(error instanceof RunLogReadError)) { throw error; }
             // Rotation may remove an entry between discovery and opening it.
-            if (!(error instanceof RunLogReadError && error.code === 'missing')) { throw error; }
+            if (error.code === 'missing') { continue; }
+            if (error.code !== 'invalid' && error.code !== 'too-large') { throw error; }
+            skippedLogs++;
         }
     }
-    return runs.sort((a, b) => b.startedAt - a.startedAt || a.runId.localeCompare(b.runId));
+    runs.sort((a, b) => b.startedAt - a.startedAt || a.runId.localeCompare(b.runId));
+    return skippedLogs ? { runs, skippedLogs } : { runs };
 }
 
 /** 다른 창이 아직 쓰는 중일 수 있으므로 이보다 오래된 임시 파일만 고아로 본다. */

@@ -14,21 +14,30 @@ const usage = `taskhub <list | doctor [ACTION] | preview ACTION | run ACTION | h
 
 async function readInputs(file: string | undefined, signal: AbortSignal) {
     if (!file) { return parseInputs({}); }
+    const chunks: Buffer[] = [];
     try {
         const stream = file === '-' ? process.stdin : createReadStream(file);
-        const chunks: Buffer[] = [];
         let bytes = 0;
         for await (const chunk of addAbortSignal(signal, stream)) {
             const buffer = Buffer.from(chunk);
             bytes += buffer.length;
-            if (bytes > 8 * 1024 * 1024) { throw new Error(); }
+            if (bytes > 8 * 1024 * 1024) {
+                throw new TaskHubError(2, t('입력 데이터가 8 MiB를 초과합니다.', 'Input data exceeds 8 MiB.'));
+            }
             chunks.push(buffer);
         }
-        return parseInputs(JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '')));
-    } catch {
+    } catch (error) {
         if (signal.aborted) { throw new TaskHubError(130, t('실행 취소', 'Cancelled')); }
-        throw new TaskHubError(2, t('입력 파일에 8 MiB 이하의 JSON 객체가 필요합니다.', 'Expected a JSON input object of at most 8 MiB.'));
+        if (error instanceof TaskHubError) { throw error; }
+        throw new TaskHubError(2, t('입력 데이터를 읽을 수 없습니다.', 'Cannot read input data.'));
     }
+    let value: unknown;
+    try {
+        value = JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, ''));
+    } catch {
+        throw new TaskHubError(2, t('입력 데이터가 올바른 JSON이 아닙니다.', 'Input data is not valid JSON.'));
+    }
+    return parseInputs(value);
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -36,8 +45,9 @@ async function main(argv: string[]): Promise<void> {
     let serving = argv.includes('mcp');
     const abort = new AbortController();
     const stop = () => abort.abort();
-    process.on('SIGINT', stop);
-    process.on('SIGTERM', stop);
+    const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
+    if (process.platform !== 'win32') { signals.push('SIGHUP'); }
+    for (const signal of signals) { process.on(signal, stop); }
     try {
         let args;
         try {
@@ -88,10 +98,16 @@ async function main(argv: string[]): Promise<void> {
                 display = [result.actionId, result.outcome, result.error, result.runId, result.warning].filter(Boolean).join('\n');
                 break;
             case 'history': {
-                const runs = await workspace.history();
-                result = { runs };
+                result = await workspace.history();
+                const { runs, skippedLogs } = result;
                 display = runs.map(run => `${new Date(run.startedAt).toISOString()}\t${run.outcome}\t${run.actionId}\t${run.runId}`).join('\n')
                     || t('실행 이력이 없습니다.', 'No run history.');
+                if (!json && skippedLogs) {
+                    process.stderr.write(t(
+                        `읽을 수 없는 실행 로그 ${skippedLogs}개를 건너뛰었습니다.\n`,
+                        `Skipped ${skippedLogs} invalid or oversized run log entries.\n`
+                    ));
+                }
                 break;
             }
             case 'logs':
@@ -112,8 +128,7 @@ async function main(argv: string[]): Promise<void> {
         if (json && !serving) { process.stdout.write(JSON.stringify({ error: message, exitCode }) + '\n'); }
         else { process.stderr.write(message + '\n'); }
     } finally {
-        process.off('SIGINT', stop);
-        process.off('SIGTERM', stop);
+        for (const signal of signals) { process.off(signal, stop); }
     }
 }
 void main(process.argv.slice(2));

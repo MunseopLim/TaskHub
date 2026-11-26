@@ -5,6 +5,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
+import { RUN_LOG_MAX_FILE_BYTES } from '../runLogStore';
 import { parseInputs } from '../standalone/inputs';
 import { launchPlan } from '../standalone/process';
 import { executionIssues } from '../standalone/runner';
@@ -13,6 +14,7 @@ import type { Task } from '../schema';
 const cli = process.env.TASKHUB_TEST_CLI ?? path.resolve(__dirname, '../../bin/taskhub.cjs');
 const arg = '두 단어 & $NAME | >';
 const secret = 'synthetic-private-input';
+const env = { ...process.env, LC_ALL: 'en' };
 const pipeline: Task[] = [
     { id: 'slot', type: 'quickPick', items: [{ id: 'debug', label: 'Debug', value: ['--debug', arg] }] },
     { id: 'probe', type: 'command', command: 'node', args: ['probe.cjs', '${slot}'], passTheResultToNextTask: true },
@@ -44,14 +46,14 @@ suite('Standalone Core, CLI and stdio MCP', function () {
 
     function invoke(args: string[], inputs?: object) {
         const result = spawnSync('node', [cli, ...args, ...(inputs ? ['--inputs-file', '-'] : []), '--workspace', root, '--json'],
-            { encoding: 'utf8', input: inputs && JSON.stringify(inputs), timeout: 15_000 });
+            { encoding: 'utf8', input: inputs && JSON.stringify(inputs), timeout: 15_000, env });
         assert.ifError(result.error);
         assert.equal(result.stderr, '');
         return { code: result.status, data: JSON.parse(result.stdout), stdout: result.stdout };
     }
 
     function mcp(...args: string[]) {
-        const child = spawn('node', [cli, 'mcp', '--workspace', root, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn('node', [cli, 'mcp', '--workspace', root, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env });
         const closed = once(child, 'close');
         const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })[Symbol.asyncIterator]();
         const send = (method: string, params?: object, id?: number) =>
@@ -147,11 +149,20 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         const args = ['run', 'build', '--trust', '--non-interactive', '--inputs-file', file];
         const limit = 8 * 1024 * 1024;
         const valid = JSON.stringify({ slot: 'debug' });
-        assert.equal(invoke(args).code, 2);
+        const missing = invoke(args);
+        assert.equal(missing.code, 2);
+        assert.match(missing.data.error, /Cannot read input data/);
+        assert.ok(!missing.data.error.includes(file));
         // The oversized file is otherwise valid, so only the size limit can reject it.
-        for (const content of ['{', valid + ' '.repeat(limit + 1 - valid.length)]) {
+        for (const [content, message] of [
+            ['{', /not valid JSON/],
+            ['{"slot":123}', /Inputs must map task IDs/],
+            [valid + ' '.repeat(limit + 1 - valid.length), /exceeds 8 MiB/],
+        ] as const) {
             fs.writeFileSync(file, content);
-            assert.equal(invoke(args).code, 2);
+            const result = invoke(args);
+            assert.equal(result.code, 2);
+            assert.match(result.data.error, message);
         }
         assert.equal(fs.existsSync(path.join(root, '.taskhub')), false);
         fs.writeFileSync(file, valid + ' '.repeat(limit - valid.length));
@@ -159,6 +170,63 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         fs.writeFileSync(file, '\uFEFF' + valid);
         assert.equal(invoke(args).code, 0);
         assert.equal(fs.readFileSync(path.join(root, 'result'), 'utf8'), JSON.stringify(['--debug', arg]));
+    });
+
+    test('ignores invalid validation regex syntax and still rejects input that fails a valid pattern', async () => {
+        const input = { id: 'name', type: 'inputBox', validatePattern: '[' } as const;
+        const write: Task = { id: 'save', type: 'writeFile', path: 'chosen', content: '${name.value}' };
+        fs.writeFileSync(config, JSON.stringify([action('validate', [input, write])]));
+        const params = { actionId: 'validate', inputs: { name: 'alpha' } };
+        assert.equal(invoke(['run', 'validate', '--trust'], params.inputs).code, 0);
+        assert.equal(fs.readFileSync(path.join(root, 'chosen'), 'utf8'), 'alpha');
+        fs.unlinkSync(path.join(root, 'chosen'));
+
+        const client = mcp('--trust');
+        try {
+            await client.init();
+            assert.equal((await client.call('run_action', params)).data.outcome, 'success');
+            assert.equal(fs.readFileSync(path.join(root, 'chosen'), 'utf8'), 'alpha');
+            fs.unlinkSync(path.join(root, 'chosen'));
+            fs.writeFileSync(config, JSON.stringify([action('validate', [{ ...input, validatePattern: '^\\d+$' }, write])]));
+            const mismatch = await client.call('run_action', params);
+            assert.equal(mismatch.error, true);
+            assert.equal(mismatch.data.exitCode, 2);
+            assert.equal(fs.existsSync(path.join(root, 'chosen')), false);
+            assert.equal(invoke(['run', 'validate', '--trust'], { name: '42' }).code, 0);
+            assert.equal(fs.readFileSync(path.join(root, 'chosen'), 'utf8'), '42');
+        } finally { await client.close(); }
+    });
+
+    test('keeps intact history visible in CLI and MCP when another log is invalid or oversized', async () => {
+        const run = invoke(['run', 'build', '--trust'], { slot: 'debug' });
+        assert.equal(run.code, 0);
+        const directory = path.posix.dirname(run.data.runId);
+        const invalid = directory + '/invalid.log';
+        const oversized = directory + '/oversized.log';
+        fs.writeFileSync(path.join(root, invalid), '{bad');
+        fs.writeFileSync(path.join(root, oversized), '{}');
+        fs.truncateSync(path.join(root, oversized), RUN_LOG_MAX_FILE_BYTES + 1);
+
+        const history = invoke(['history']);
+        assert.equal(history.code, 0);
+        assert.equal(history.data.skippedLogs, 2);
+        assert.deepEqual(history.data.runs.map((entry: { runId: string }) => entry.runId), [run.data.runId]);
+        const human = spawnSync('node', [cli, 'history', '--workspace', root], { encoding: 'utf8', timeout: 10_000, env });
+        assert.ifError(human.error);
+        assert.equal(human.status, 0);
+        assert.ok(human.stdout.includes(run.data.runId));
+        assert.match(human.stderr, /Skipped 2 .* run log entries/);
+        assert.equal(invoke(['logs', invalid]).code, 2);
+        assert.equal(invoke(['logs', oversized]).code, 2);
+
+        const client = mcp();
+        try {
+            await client.init();
+            const listing = await client.call('list_run_history');
+            assert.equal(listing.error, false);
+            assert.deepEqual(listing.data, history.data);
+            assert.equal((await client.call('get_run_log', { runId: invalid })).data.exitCode, 2);
+        } finally { await client.close(); }
     });
 
     test('returns cancellation code 130 and records a declined confirmation', () => {
@@ -259,6 +327,61 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         assert.equal(fs.existsSync(path.join(root, 'implicit')), false);
     });
 
+    test('captures failed command output for CLI and MCP while redacting credentials', async () => {
+        fs.writeFileSync(path.join(root, 'fail.cjs'), `
+            console.log('build output');
+            console.error(process.env.DEMO_TOKEN || 'build diagnostic');
+            process.exitCode = 7;
+        `);
+        const command: Task = { id: 'command', type: 'command', command: 'node', args: ['fail.cjs'] };
+        fs.writeFileSync(config, JSON.stringify([
+            action('fail', [command]),
+            action('private', [{ ...command, env: { DEMO_TOKEN: secret } }]),
+        ]));
+        const run = invoke(['run', 'fail', '--trust', '--capture-output']);
+        assert.equal(run.code, 1);
+        const expected = { availability: 'captured', stdout: 'build output', stderr: 'build diagnostic' };
+        const logged = invoke(['logs', run.data.runId]).data.tasks[0];
+        assert.equal(logged.exitCode, 7);
+        assert.deepEqual(logged.output, expected);
+        const uncaptured = invoke(['run', 'fail', '--trust']);
+        assert.ok(!invoke(['logs', uncaptured.data.runId]).stdout.includes('build diagnostic'));
+
+        const client = mcp('--trust', '--capture-output');
+        try {
+            await client.init();
+            const failed = await client.call('run_action', { actionId: 'fail' });
+            assert.equal(failed.error, true);
+            const failedLog = await client.call('get_run_log', { runId: failed.data.runId });
+            assert.deepEqual(failedLog.data.tasks[0].output, expected);
+            const privateRun = await client.call('run_action', { actionId: 'private' });
+            assert.equal(privateRun.error, true);
+            const privateLog = invoke(['logs', privateRun.data.runId]);
+            assert.equal(privateLog.data.tasks[0].output.availability, 'redacted');
+            assert.ok(!privateLog.stdout.includes(secret));
+            assert.ok(!JSON.stringify(privateRun.data).includes(secret));
+        } finally { await client.close(); }
+    });
+
+    test('reports a missing task working directory without exposing its path', () => {
+        const cwd = 'missing-private-directory';
+        fs.writeFileSync(config, JSON.stringify([action('broken', [{ id: 'command', type: 'command', command: 'node', cwd }])]));
+        const run = invoke(['run', 'broken', '--trust']);
+        assert.equal(run.code, 1);
+        assert.match(run.data.error, /Cannot open the task working directory/);
+        assert.ok(!run.stdout.includes(cwd));
+    });
+
+    test('reports a POSIX spawn ENOENT without exposing the executable name', function () {
+        if (process.platform === 'win32') { this.skip(); }
+        const command = 'taskhub-test-absent-executable';
+        fs.writeFileSync(config, JSON.stringify([action('broken', [{ id: 'command', type: 'command', command }])]));
+        const run = invoke(['run', 'broken', '--trust']);
+        assert.equal(run.code, 1);
+        assert.match(run.data.error, /Executable not found/);
+        assert.ok(!run.stdout.includes(command));
+    });
+
     test('dispatches selected branches, iterations, path inputs and ZIP using existing result fields', () => {
         fs.writeFileSync(path.join(root, 'source.txt'), 'payload');
         fs.writeFileSync(config, JSON.stringify([action('flow', [
@@ -279,15 +402,25 @@ suite('Standalone Core, CLI and stdio MCP', function () {
     });
 
     function longAction(timeoutSeconds?: number) {
-        fs.writeFileSync(path.join(root, 'parent.cjs'), `require('node:child_process').spawn(process.execPath, ['grandchild.cjs'], {stdio:'inherit'}); setTimeout(()=>{}, 20000);`);
+        fs.writeFileSync(path.join(root, 'parent.cjs'), `
+            require('node:fs').writeFileSync('parent-pid', String(process.pid));
+            const child = require('node:child_process').spawn(process.execPath, ['grandchild.cjs'], { stdio: 'inherit' });
+            const fallback = setTimeout(() => {}, 20000);
+            process.once('SIGTERM', () => child.once('exit', () => clearTimeout(fallback)));
+        `);
         fs.writeFileSync(path.join(root, 'grandchild.cjs'), `require('node:fs').writeFileSync('pid', String(process.pid)); setTimeout(()=>{}, 20000);`);
         fs.writeFileSync(config, JSON.stringify([action('long', [
             { id: 'long', type: 'command', command: 'node', args: ['parent.cjs'], timeoutSeconds },
             { id: 'after', type: 'writeFile', path: 'after', content: 'bad' },
         ])]));
     }
-    function childGone() {
-        const pid = Number(fs.readFileSync(path.join(root, 'pid'), 'utf8'));
+    function pidFrom(file: string) {
+        const marker = path.join(root, file);
+        return fs.existsSync(marker) ? Number(fs.readFileSync(marker, 'utf8')) : 0;
+    }
+    function childGone(file = 'pid') {
+        const pid = pidFrom(file);
+        if (!pid) { return false; }
         try { process.kill(pid, 0); return false; }
         catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
     }
@@ -301,6 +434,41 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         assert.equal(fs.existsSync(path.join(root, 'after')), false);
     });
 
+    for (const signal of ['SIGINT', 'SIGHUP'] as const) {
+        test(`stops the CLI process tree on ${signal}`, async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            longAction();
+            const child = spawn('node', [cli, 'run', 'long', '--trust', '--workspace', root, '--json'],
+                { stdio: ['ignore', 'pipe', 'pipe'], env });
+            const closed = once(child, 'close');
+            let stdout = '';
+            child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+            const deadline = setTimeout(() => child.kill('SIGKILL'), 16_000);
+            let treeStopped = false;
+            try {
+                await until(() => pidFrom('pid') > 0);
+                assert.ok(child.kill(signal));
+                assert.deepEqual(await closed, [130, null]);
+                await until(() => childGone() && childGone('parent-pid'));
+                treeStopped = true;
+                assert.equal(JSON.parse(stdout).outcome, 'cancelled');
+                assert.equal(invoke(['history']).data.runs[0].outcome, 'cancelled');
+                assert.equal(fs.existsSync(path.join(root, 'after')), false);
+            } finally {
+                clearTimeout(deadline);
+                if (!treeStopped) {
+                    const parent = pidFrom('parent-pid');
+                    if (parent) {
+                        try { process.kill(-parent, 'SIGKILL'); }
+                        catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ESRCH') { throw err; } }
+                    }
+                    child.kill('SIGKILL');
+                    await closed;
+                }
+            }
+        });
+    }
+
     for (const mode of ['cancel', 'eof']) {
         test('stops the process tree on MCP ' + mode, async () => {
             longAction();
@@ -308,7 +476,7 @@ suite('Standalone Core, CLI and stdio MCP', function () {
             try {
                 await client.init();
                 client.send('tools/call', { name: 'run_action', arguments: { actionId: 'long' } }, 70);
-                await until(() => fs.existsSync(path.join(root, 'pid')) && Number(fs.readFileSync(path.join(root, 'pid'), 'utf8')) > 0);
+                await until(() => pidFrom('pid') > 0);
                 if (mode === 'cancel') {
                     client.send('notifications/cancelled', { requestId: 70 });
                     await until(async () => (await client.call('list_run_history')).data.runs.length === 1);

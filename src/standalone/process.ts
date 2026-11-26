@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
+import { stat } from 'node:fs/promises';
 import { terminateProcessTree } from '../processTree';
 import { windowsPowerShellPath } from '../processEnvironment';
 import { buildNativeCommandInvocation, buildPowerShellInvocation, buildPowerShellUtf8Preamble, buildRawPowerShellCommandLine,
     buildRawShellCommandLine, encodePowerShellScript, mergeCommandAndArgs, rawCommandUsesChainOperators, resolvePwshPath,
     resolveWindowsTaskSpawn, selectWindowsRawShell, withPowerShellExitCode, type WindowsExecutableLookup } from '../pipelineUtils';
+import { TaskHubError } from './errors';
 import { t } from './language';
 
 export function launchPlan(raw: boolean, command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv,
@@ -22,8 +24,13 @@ export function launchPlan(raw: boolean, command: string, args: string[], cwd: s
     return { executable, args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShellScript(withPowerShellExitCode(script))] };
 }
 
+export interface ProcessStreams {
+    output: string;
+    stderr: string;
+}
+
 export class ProcessFailure extends Error {
-    constructor(readonly code: number | null, readonly signal: NodeJS.Signals | null) {
+    constructor(readonly code: number | null, readonly signal: NodeJS.Signals | null, readonly streams: ProcessStreams) {
         super(signal ? t(`프로세스 종료 신호 ${signal}`, `Process terminated by ${signal}`)
             : t(`프로세스 종료 코드 ${code}`, `Process exited with code ${code}`));
     }
@@ -57,8 +64,22 @@ export async function runProcess(raw: boolean, command: string, args: string[], 
         });
         signal.throwIfAborted();
         if (size > limit) { throw new Error(t('프로세스 출력이 8 MiB를 초과했습니다.', 'Process output exceeds 8 MiB.')); }
-        if (code !== 0) { throw new ProcessFailure(code, stoppedBy); }
-        return { output: Buffer.concat(stdout).toString('utf8').trim(), stderr: Buffer.concat(stderr).toString('utf8').trim() };
+        const streams = { output: Buffer.concat(stdout).toString('utf8').trim(), stderr: Buffer.concat(stderr).toString('utf8').trim() };
+        if (code !== 0) { throw new ProcessFailure(code, stoppedBy, streams); }
+        return streams;
+    } catch (error) {
+        signal.throwIfAborted();
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+            // spawn uses ENOENT for both an absent executable and a missing working directory.
+            const directory = await stat(cwd).catch((statError: NodeJS.ErrnoException) => {
+                if (statError.code !== 'ENOENT' && statError.code !== 'ENOTDIR') { throw statError; }
+            });
+            throw new TaskHubError(1, directory?.isDirectory()
+                ? t('실행 파일을 찾을 수 없습니다.', 'Executable not found.')
+                : t('태스크 작업 디렉터리를 열 수 없습니다.', 'Cannot open the task working directory.'));
+        }
+        throw error;
     } finally {
         signal.removeEventListener('abort', stop);
         await termination;

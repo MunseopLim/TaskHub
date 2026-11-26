@@ -15,7 +15,7 @@ import { aggregateForEachResults, transformString, writeTaskFile } from '../task
 import { TaskHubError } from './errors';
 import { inputResult, missingInput, type Inputs } from './inputs';
 import { t } from './language';
-import { ProcessFailure, runProcess } from './process';
+import { ProcessFailure, runProcess, type ProcessStreams } from './process';
 
 type Result = Record<string, unknown>;
 type Runnable = ActionItem & { action: Action };
@@ -51,6 +51,20 @@ interface Execution {
     captureOutput: boolean;
     signal: AbortSignal;
     log: ActionRunLogCollector;
+}
+
+function commandLogOutput(streams: ProcessStreams, exec: Execution): TaskRunLogOutput {
+    // Inspect complete streams before exposing them, including secrets split across chunks.
+    for (const secret of exec.secrets) {
+        const value = secret.trim();
+        if (value && (streams.output.includes(value) || streams.stderr.includes(value))) {
+            exec.sensitive = true;
+            break;
+        }
+    }
+    return exec.captureOutput && !exec.sensitive
+        ? { availability: 'captured', stdout: streams.output, stderr: streams.stderr }
+        : { availability: 'redacted' };
 }
 
 async function executeBody(task: Task, context: Result, exec: Execution): Promise<Result> {
@@ -107,14 +121,13 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         const command = raw ? expand(template) : interpolateCommandPreservingTokens(template, context);
         const args = (task.args ?? []).flatMap(arg => expandArgTemplate(arg, context));
         const recordOutput = exec.captureOutput && !exec.sensitive;
-        const streams = await processTask(raw, command, args, task.passTheResultToNextTask === true || recordOutput);
-        // Scripts can print ambient credentials without using a TaskHub variable.
-        // Inspect complete streams so a secret split across chunks stays hidden.
-        for (const secret of exec.secrets) {
-            if (streams.output.includes(secret) || streams.stderr.includes(secret)) { exec.sensitive = true; break; }
-        }
-        output = recordOutput && !exec.sensitive ? { availability: 'captured', stdout: streams.output, stderr: streams.stderr }
-            : { availability: 'redacted' };
+        const streams = await processTask(raw, command, args, task.passTheResultToNextTask === true || recordOutput).catch(error => {
+            if (exec.captureOutput && error instanceof ProcessFailure) {
+                exec.log.recordOutput(task.id, commandLogOutput(error.streams, exec));
+            }
+            throw error;
+        });
+        output = commandLogOutput(streams, exec);
         result = task.passTheResultToNextTask ? streams : {};
     } else if (task.type === 'stringManipulation') {
         result = transformString({ ...task, input: task.input === undefined ? undefined : expand(task.input) }, t);

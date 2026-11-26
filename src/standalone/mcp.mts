@@ -51,7 +51,7 @@ export async function serve(workspace: Workspace, signal: AbortSignal, version: 
                     data = await workspace.run(actionId, parseInputs(args.inputs ?? {}), extra.signal);
                     isError = data.exitCode !== 0;
                     break;
-                case 'list_run_history': data = { runs: await workspace.history() }; break;
+                case 'list_run_history': data = await workspace.history(); break;
                 case 'get_run_log': data = await workspace.log(args.runId as string); break;
             }
         } catch (error) {
