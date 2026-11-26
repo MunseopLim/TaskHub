@@ -1,0 +1,7 @@
+*
+!bin/
+!bin/taskhub.cjs
+!dist/
+dist/*
+!dist/cli.js
+!dist/actionsValidator.js

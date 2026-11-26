@@ -1819,3 +1819,19 @@ print(f"{os.environ['TASKHUB_SCHEDULE_NAME']} @ {os.environ['TASKHUB_SCHEDULED_A
 ```
 
 저장된 예약 데이터가 손상돼도 명령은 사용할 수 있습니다. 뷰 제목이나 명령 팔레트의 **AI: 예약 데이터 초기화**에서 확인하면 기존 데이터를 확장 저장소에 백업한 후 빈 목록으로 복구합니다. 정상 데이터는 이 명령으로 초기화하지 않습니다.
+
+## Standalone CLI
+
+저장소에서 Node.js 22로 `npm ci`와 `npm run package`를 실행한 뒤 `npm link`로
+`taskhub` 명령을 설치할 수 있다. 설치 없이 쓰려면 `node bin/taskhub.cjs`에 같은 인자를 전달한다.
+
+```sh
+taskhub list --workspace /path/to/project
+taskhub doctor --workspace /path/to/project --json
+taskhub preview build --workspace /path/to/project
+```
+
+현재 디렉터리가 기본 워크스페이스이며 `.vscode/actions.json`의 폴더 아래 액션까지 ID로 찾는다.
+`doctor`는 파일 전체의 스키마와 의미 오류 위치를, `preview`는 확장의 Preview Run과 같은 보고서를 제공한다.
+`--json`은 성공과 오류 모두 표준 출력에 JSON 한 건을 쓴다.
+종료 코드 0은 성공, 1은 실행 오류, 2는 인자·설정·입력 오류다.

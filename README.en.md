@@ -202,3 +202,5 @@ The detailed guides below are currently available in Korean.
 ## License
 
 [MIT](LICENSE)
+
+[Use TaskHub from the terminal](docs/features.md#standalone-cli)

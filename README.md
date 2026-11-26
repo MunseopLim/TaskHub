@@ -196,3 +196,5 @@ VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전
 ## 라이선스
 
 [MIT](LICENSE)
+
+[터미널에서 TaskHub 사용하기](docs/features.md#standalone-cli)

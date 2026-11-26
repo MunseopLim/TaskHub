@@ -13,6 +13,8 @@ TaskHub/
 │   │                                  # - 재-export 범위는 제한적: 일부 pipelineUtils 헬퍼 +
 │   │                                  #   MainViewProvider / Folder / Action 3개 심볼만 (기존 import 호환용)
 │   │                                  #   상세는 §주요 컴포넌트 > 1. TreeDataProvider 참조
+│   ├── actionCatalog.ts              # 공유 액션 스키마 검증·중복 검사·트리 순회
+│   ├── standalone/                   # core.ts 워크스페이스 조회, cli.ts 터미널 진입점, language.ts 로케일
 │   ├── providers/                     # TreeDataProvider 분리 모듈 (Phase 2 split)
 │   │   ├── mainViewProvider.ts        # Actions 패널 (폴더 트리)
 │   │   ├── linkViewProvider.ts        # 워크스페이스 링크 패널 (.vscode/links.json)
