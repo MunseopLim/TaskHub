@@ -4,7 +4,7 @@ import { attachPipelineTaskIds, buildBuiltinVariableContext } from '../builtinVa
 import { applyDiagnosticMatchers } from '../diagnosticMatcher';
 import { applyOutputCapture, buildForEachValue, buildTaskGraph, evaluateTaskCondition, expandArgTemplate, formatGraphIssue,
     getCommandString, inferTaskDependencies, INTERACTIVE_TASK_TYPES, interpolateCommandPreservingTokens,
-    interpolatePipelineVariables, interpolateToolValue, materializeSwitchBranchTask,
+    interpolatePipelineVariables, interpolateToolValue, materializeSwitchBranchTask, PipelineBuiltinUnavailableError,
     quickPickUsesItemsFromCommand, resolveForEachItems, resolveTaskWorkingDirectory, referencesSkippedTask,
     taskReferencesSensitiveBuiltin, TaskScheduler, validateTaskGraph, writeWorkspaceFileSync } from '../pipelineUtils';
 import { mergeProcessEnvironment } from '../processEnvironment';
@@ -15,7 +15,7 @@ import { aggregateForEachResults, transformString, writeTaskFile } from '../task
 import { TaskHubError } from './errors';
 import { inputResult, missingInput, type Inputs } from './inputs';
 import { t } from './language';
-import { ProcessFailure, runProcess, type ProcessStreams } from './process';
+import { ProcessFailure, ProcessInterrupted, runProcess, type ProcessStreams } from './process';
 
 type Result = Record<string, unknown>;
 type Runnable = ActionItem & { action: Action };
@@ -51,6 +51,33 @@ interface Execution {
     captureOutput: boolean;
     signal: AbortSignal;
     log: ActionRunLogCollector;
+    /** Set while a forEach runs so the iterations' outputs are logged once, as the extension does. */
+    outputSink?: IterationSink;
+}
+
+/** Logged outputs of a forEach's iterations, and their streams for a secret scan of the joined text. */
+interface IterationSink {
+    outputs: TaskRunLogOutput[];
+    streams: ProcessStreams[];
+    bytes: number;
+}
+
+/** Upper bound for the iterations' logged output that a forEach keeps in memory. */
+const ITERATION_LOG_LIMIT = 32 * 1024 * 1024;
+
+/**
+ * The extension logs a forEach task's aggregate result, whose streams join the iterations with newlines.
+ * The joined text is checked for secrets again: a multi-line credential printed one line per iteration
+ * appears only once the iterations are joined.
+ */
+function mergeIterationOutputs(sink: IterationSink, exec: Execution): TaskRunLogOutput | undefined {
+    // Scan even when nothing is logged: the sensitive mark also guards the results passed to later tasks.
+    const scanned = commandLogOutput({ output: sink.streams.map(streams => streams.output).join('\n'),
+        stderr: sink.streams.map(streams => streams.stderr).join('\n') }, exec);
+    const { outputs } = sink;
+    if (!outputs.length) { return undefined; }
+    if (exec.sensitive || outputs.some(output => output.availability === 'redacted')) { return { availability: 'redacted' }; }
+    return outputs.find(output => output.availability !== 'captured') ?? scanned;
 }
 
 function commandLogOutput(streams: ProcessStreams, exec: Execution): TaskRunLogOutput {
@@ -71,6 +98,9 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
     exec.signal.throwIfAborted();
     const expand = (v: string) => interpolatePipelineVariables(v, context);
     if (task.type === 'switch') {
+        if (task.forEach !== undefined) {
+            throw new TaskConfigError(t(`태스크 '${task.id}'에서 'switch'와 'forEach'를 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'switch' with 'forEach'.`));
+        }
         const selected = expand(task.on!);
         const matched = Object.hasOwn(task.cases!, selected);
         const branch = matched ? task.cases![selected] : task.defaultCase;
@@ -81,13 +111,19 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         const items = resolveForEachItems(task.forEach, context);
         const values: Result[] = [];
         let size = 0;
-        for (const [index, item] of items.entries()) {
-            const local = Object.assign(Object.create(null), context, { each: buildForEachValue(item, index, items.length) });
-            const value = await executeBody({ ...task, forEach: undefined }, local, exec);
-            size += Buffer.byteLength(JSON.stringify(value));
-            if (size > 32 * 1024 * 1024) { throw new Error(t('반복 결과 한도 초과', 'Iteration result limit exceeded')); }
-            values.push(value);
-        }
+        const outerSink = exec.outputSink;
+        const sink: IterationSink = { outputs: [], streams: [], bytes: 0 };
+        exec.outputSink = sink;
+        try {
+            for (const [index, item] of items.entries()) {
+                const local = Object.assign(Object.create(null), context, { each: buildForEachValue(item, index, items.length) });
+                const value = await executeBody({ ...task, forEach: undefined }, local, exec);
+                size += Buffer.byteLength(JSON.stringify(value));
+                if (size > 32 * 1024 * 1024) { throw new Error(t('반복 결과 한도 초과', 'Iteration result limit exceeded')); }
+                values.push(value);
+            }
+        } finally { exec.outputSink = outerSink; }
+        recordTaskOutput(task, exec, mergeIterationOutputs(sink, exec));
         return aggregateForEachResults(values);
     }
 
@@ -110,7 +146,8 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         if (quickPickUsesItemsFromCommand(task)) {
             const command = expand(getCommandString(task.itemsFromCommand));
             const { output: text } = await processTask(true, command, [], true);
-            const exclude = [task.itemsExclude ?? []].flat().map(expand);
+            // itemsExclude is a literal field (docs/actions.md), as in the extension.
+            const exclude = [task.itemsExclude ?? []].flat();
             dynamicItems = parsePickLines(text.split(/\r?\n/).map(line => line.trim()).filter(Boolean), task.itemsFromCommandFormat ?? 'lines', exclude, t);
         }
         result = { ...inputResult(task, exec.inputs, context, exec.root, dynamicItems) };
@@ -122,11 +159,18 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         const args = (task.args ?? []).flatMap(arg => expandArgTemplate(arg, context));
         const recordOutput = exec.captureOutput && !exec.sensitive;
         const streams = await processTask(raw, command, args, task.passTheResultToNextTask === true || recordOutput).catch(error => {
-            if (exec.captureOutput && error instanceof ProcessFailure) {
-                exec.log.recordOutput(task.id, commandLogOutput(error.streams, exec));
+            if (error instanceof ProcessFailure && error.captured) {
+                const logged = commandLogOutput(error.streams, exec);
+                if (exec.captureOutput) { exec.log.recordOutput(task.id, logged); }
+                // The extension also reports diagnostics of a failed build, the case where they matter most.
+                recordDiagnostics(task, exec, error.streams.output, error.streams.stderr);
+            } else if (error instanceof ProcessInterrupted && exec.captureOutput) {
+                // The extension keeps the capture state without content for a stopped command.
+                exec.log.recordOutput(task.id, { availability: exec.sensitive ? 'redacted' : 'captured' });
             }
             throw error;
         });
+        if (exec.outputSink && exec.outputSink.bytes <= ITERATION_LOG_LIMIT) { exec.outputSink.streams.push(streams); }
         output = commandLogOutput(streams, exec);
         result = task.passTheResultToNextTask ? streams : {};
     } else if (task.type === 'stringManipulation') {
@@ -166,13 +210,7 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
 
     if (typeof result.output === 'string') {
         Object.assign(result, applyOutputCapture(result.output, task.output?.capture));
-        if (task.output?.diagnostics && !exec.sensitive) {
-            const totals = { error: 0, warning: 0, info: 0, hint: 0 };
-            for (const d of applyDiagnosticMatchers([result.output, result.stderr].filter(Boolean).join('\n'), task.output.diagnostics)) {
-                totals[d.severity]++;
-            }
-            exec.log.recordDiagnostics(task.id, totals);
-        }
+        recordDiagnostics(task, exec, result.output, typeof result.stderr === 'string' ? result.stderr : '');
     }
     if (task.passTheResultToNextTask && task.output?.mode) {
         const content = task.output.content ? expand(task.output.content)
@@ -188,8 +226,44 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
             output = { availability: 'captured', stdout: content, stderr: output?.stderr };
         }
     }
-    if (output) { exec.log.recordOutput(task.id, output); }
+    recordTaskOutput(task, exec, output);
     return result;
+}
+
+function recordDiagnostics(task: Task, exec: Execution, stdout: string, stderr: string) {
+    if (!task.output?.diagnostics || exec.sensitive) { return; }
+    const totals = { error: 0, warning: 0, info: 0, hint: 0 };
+    for (const d of applyDiagnosticMatchers([stdout, stderr].filter(Boolean).join('\n'), task.output.diagnostics)) {
+        totals[d.severity]++;
+    }
+    exec.log.recordDiagnostics(task.id, totals);
+}
+
+function recordTaskOutput(task: Task, exec: Execution, output: TaskRunLogOutput | undefined) {
+    if (!output) { return; }
+    const sink = exec.outputSink;
+    if (!sink) { exec.log.recordOutput(task.id, output); return; }
+    sink.bytes += Buffer.byteLength(output.stdout ?? '') + Buffer.byteLength(output.stderr ?? '');
+    // Past the limit the content is dropped, so the log reports a truncated capture instead of growing without bound.
+    sink.outputs.push(sink.bytes > ITERATION_LOG_LIMIT && output.availability === 'captured'
+        ? { availability: 'capture-truncated', truncated: true } : output);
+}
+
+/** A task definition the executor rejects at run time. Like the extension, continueOnError still applies. */
+class TaskConfigError extends TaskHubError {
+    constructor(message: string) { super(2, message); }
+}
+
+/** Names the missing variable without its value. IDE-only values (editor, selection, clipboard) never exist here. */
+function unavailableBuiltinMessage(error: PipelineBuiltinUnavailableError): string {
+    const variable = error.variable;
+    if (variable?.startsWith('env:')) {
+        const name = variable.slice('env:'.length);
+        return t(`환경변수 ${name}이(가) 정의되지 않았습니다.`, `Environment variable ${name} is not defined.`);
+    }
+    return variable
+        ? t(`독립 실행에서는 IDE 내장 변수 \${${variable}}를 사용할 수 없습니다.`, `IDE built-in variable \${${variable}} is unavailable in standalone execution.`)
+        : t('사용할 수 없는 내장 변수를 참조합니다.', 'References an unavailable built-in variable.');
 }
 
 function addCredentialValues(secrets: Set<string>, environment: NodeJS.ProcessEnv) {
@@ -232,7 +306,8 @@ export async function runPipeline(item: Runnable, root: string, extensionPath: s
     let resultBytes = 0;
 
     const execute = async (task: Task) => {
-        const hidden = task.password === true || task.type === 'envPick' || taskReferencesSensitiveBuiltin(task, ids)
+        // Like the extension, envPick yields a variable name, not its value; `${env:...}` references stay sensitive.
+        const hidden = task.password === true || taskReferencesSensitiveBuiltin(task, ids)
             || inferTaskDependencies(task, sensitive).size > 0;
         const timeout = new AbortController();
         const taskSignal = AbortSignal.any([runSignal, timeout.signal]);
@@ -260,10 +335,18 @@ export async function runPipeline(item: Runnable, root: string, extensionPath: s
             const cancelled = runSignal.aborted || (err instanceof TaskHubError && err.exitCode === 130);
             const detail = cancelled ? t('실행 취소', 'Cancelled') : timeout.signal.aborted ? t('시간 초과', 'Timed out')
                 : err instanceof TaskHubError || err instanceof ProcessFailure ? err.message
+                : err instanceof PipelineBuiltinUnavailableError ? unavailableBuiltinMessage(err)
                 : hidden ? t('민감한 태스크 실패', 'Sensitive task failed') : t('태스크 실행 실패', 'Task execution failed');
-            const error = new TaskHubError(cancelled ? 130 : err instanceof TaskHubError ? err.exitCode : 1, task.id + ': ' + detail);
-            const continued = task.continueOnError && !cancelled && error.exitCode !== 2;
+            const exitCode = cancelled ? 130 : err instanceof TaskHubError ? err.exitCode : err instanceof PipelineBuiltinUnavailableError ? 2 : 1;
+            const error = new TaskHubError(exitCode, task.id + ': ' + detail);
+            // Missing or invalid CLI input must not be skipped silently. Configuration errors the extension
+            // continues past (an unavailable built-in, a rejected task shape) keep continueOnError.
+            const continued = task.continueOnError === true && !cancelled
+                && (error.exitCode !== 2 || err instanceof PipelineBuiltinUnavailableError || err instanceof TaskConfigError);
+            // Like the extension, a failed command that used sensitive data never reports its output.
+            if (hidden && (task.type === 'command' || task.type === 'shell')) { log.recordOutput(task.id, { availability: 'redacted' }); }
             log.finishTask(task.id, { status: continued ? 'continued' : 'failure', finishedAt: Date.now(), error: detail,
+                ...(hidden && !(err instanceof TaskHubError) ? { errorCode: 'sensitive-hidden' as const } : {}),
                 ...(err instanceof ProcessFailure ? { exitCode: err.code, signal: err.signal } : {}) });
             if (continued) {
                 context[task.id] = {};

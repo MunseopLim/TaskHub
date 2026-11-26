@@ -4,13 +4,37 @@ import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { Workspace } from './core';
 import { TaskHubError } from './errors';
-import { parseInputs } from './inputs';
+import { parseInputs, type Inputs } from './inputs';
 import { t } from './language';
 
 const usage = `taskhub <list | doctor [ACTION] | preview ACTION | run ACTION | history | logs RUN_ID | mcp>
   [--workspace DIR] [--actions FILE] [--preset FILE] [--json]
-  run: [--trust] [--inputs-file FILE|-] [--non-interactive] [--capture-output]
+  run: [--trust] [--input TASK_ID=VALUE]... [--inputs-file FILE|-] [--non-interactive] [--capture-output]
+  history: [--limit N]
   mcp: [--trust] [--capture-output]`;
+
+/**
+ * `--input TASK_ID=VALUE`를 입력 객체에 더한다. 같은 ID를 반복하면 배열이 되고(다중 선택),
+ * 입력 파일의 같은 키보다 우선한다. 오류에 원문을 담지 않는다 — 값이 비밀번호일 수 있다.
+ */
+function applyInputPairs(base: Inputs, pairs: readonly string[] | undefined): Inputs {
+    if (!pairs?.length) { return base; }
+    const flags: Record<string, string | string[]> = Object.create(null);
+    for (const pair of pairs) {
+        const at = pair.indexOf('=');
+        if (at <= 0) { throw new TaskHubError(2, t('--input은 TASK_ID=VALUE 형식이어야 합니다.', '--input must be TASK_ID=VALUE.')); }
+        const key = pair.slice(0, at);
+        const previous = flags[key];
+        flags[key] = previous === undefined ? pair.slice(at + 1) : [previous].flat().concat(pair.slice(at + 1));
+    }
+    return parseInputs(Object.assign(Object.create(null), base, flags));
+}
+
+function parseLimit(value: string | undefined): number | undefined {
+    if (value === undefined) { return undefined; }
+    if (!/^[1-9]\d{0,5}$/.test(value)) { throw new TaskHubError(2, t('--limit에는 1 이상의 정수가 필요합니다.', '--limit requires a positive integer.')); }
+    return Number(value);
+}
 
 async function readInputs(file: string | undefined, signal: AbortSignal) {
     if (!file) { return parseInputs({}); }
@@ -54,7 +78,8 @@ async function main(argv: string[]): Promise<void> {
             args = parseArgs({ args: argv, allowPositionals: true, options: {
                 workspace: { type: 'string', short: 'w' }, actions: { type: 'string' }, preset: { type: 'string' },
                 json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' }, trust: { type: 'boolean' },
-                'inputs-file': { type: 'string' }, 'non-interactive': { type: 'boolean' }, 'capture-output': { type: 'boolean' },
+                'inputs-file': { type: 'string' }, input: { type: 'string', multiple: true }, limit: { type: 'string' },
+                'non-interactive': { type: 'boolean' }, 'capture-output': { type: 'boolean' },
             } });
         } catch { throw new TaskHubError(2, usage); }
         const { values, positionals } = args;
@@ -64,7 +89,8 @@ async function main(argv: string[]): Promise<void> {
         if (values.help) { process.stdout.write(usage + '\n'); return; }
         if (!['list', 'doctor', 'preview', 'run', 'history', 'logs', 'mcp'].includes(command) ||
             (command === 'doctor' ? positionals.length > 2 : positionals.length !== (['run', 'preview', 'logs'].includes(command) ? 2 : 1)) ||
-            (values['inputs-file'] !== undefined && command !== 'run')) {
+            ((values['inputs-file'] !== undefined || values.input !== undefined) && command !== 'run') ||
+            (values.limit !== undefined && command !== 'history')) {
             throw new TaskHubError(2, usage);
         }
         const workspace = new Workspace(values.workspace ?? process.cwd(), { trusted: values.trust, actionsFile: values.actions,
@@ -93,12 +119,12 @@ async function main(argv: string[]): Promise<void> {
                 break;
             case 'run':
                 workspace.requireTrust();
-                result = await workspace.run(id, await readInputs(values['inputs-file'], abort.signal), abort.signal);
+                result = await workspace.run(id, applyInputPairs(await readInputs(values['inputs-file'], abort.signal), values.input), abort.signal);
                 process.exitCode = result.exitCode;
                 display = [result.actionId, result.outcome, result.error, result.runId, result.warning].filter(Boolean).join('\n');
                 break;
             case 'history': {
-                result = await workspace.history();
+                result = await workspace.history(parseLimit(values.limit));
                 const { runs, skippedLogs } = result;
                 display = runs.map(run => `${new Date(run.startedAt).toISOString()}\t${run.outcome}\t${run.actionId}\t${run.runId}`).join('\n')
                     || t('실행 이력이 없습니다.', 'No run history.');

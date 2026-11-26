@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
 import { listActionRunHistory, RUN_LOG_MAX_FILE_BYTES } from '../runLogStore';
+import { Workspace } from '../standalone/core';
 import { parseInputs } from '../standalone/inputs';
 import { launchPlan } from '../standalone/process';
 import { executionIssues } from '../standalone/runner';
@@ -269,6 +270,149 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         }
     });
 
+    test('keeps history when a log or action folder disappears while it is listed', async () => {
+        // Rotation and concurrent runs remove entries between the directory listing and the stat.
+        const run = invoke(['run', 'build', '--trust'], { slot: 'debug' });
+        assert.equal(run.code, 0);
+        const logs = path.join(root, path.posix.dirname(path.posix.dirname(run.data.runId)));
+        fs.writeFileSync(path.join(root, path.posix.dirname(run.data.runId), 'vanished.log'), '{}');
+        fs.mkdirSync(path.join(logs, 'gone-0000000000000000'));
+        const promises = fs.promises as { lstat: typeof fs.promises.lstat; readdir: typeof fs.promises.readdir };
+        const { lstat, readdir } = promises;
+        const vanished = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        promises.lstat = (async (target: fs.PathLike, ...rest: unknown[]) => {
+            if (String(target).endsWith('vanished.log')) { throw vanished(); }
+            return (lstat as (...args: unknown[]) => unknown)(target, ...rest);
+        }) as typeof lstat;
+        promises.readdir = (async (target: fs.PathLike, ...rest: unknown[]) => {
+            if (String(target).endsWith('gone-0000000000000000')) { throw vanished(); }
+            return (readdir as (...args: unknown[]) => unknown)(target, ...rest);
+        }) as typeof readdir;
+        try {
+            assert.deepEqual((await listActionRunHistory(root)).runs.map(entry => entry.runId), [run.data.runId]);
+        } finally {
+            promises.lstat = lstat;
+            promises.readdir = readdir;
+        }
+    });
+
+    test('limits history in CLI and MCP and rejects an invalid limit', async () => {
+        const first = invoke(['run', 'build', '--trust'], { slot: 'debug' });
+        const second = invoke(['run', 'build', '--trust'], { slot: 'debug' });
+        assert.equal(first.code, 0);
+        assert.equal(second.code, 0);
+        const limited = invoke(['history', '--limit', '1']);
+        assert.equal(limited.code, 0);
+        assert.deepEqual(limited.data.runs.map((entry: { runId: string }) => entry.runId), [second.data.runId]);
+        assert.equal(invoke(['history']).data.runs.length, 2);
+        for (const value of ['0', '-1', 'x', '1.5']) {
+            assert.equal(spawnSync('node', [cli, 'history', '--limit', value, '--workspace', root, '--json'], { encoding: 'utf8', env }).status, 2, value);
+        }
+        assert.equal(spawnSync('node', [cli, 'list', '--limit', '1', '--workspace', root], { encoding: 'utf8', env }).status, 2);
+        const client = mcp();
+        try {
+            await client.init();
+            const listing = await client.call('list_run_history', { limit: 1 });
+            assert.equal(listing.error, false);
+            assert.deepEqual(listing.data, limited.data);
+            for (const limit of [0, 1.5, '1']) {
+                const rejected = await client.request('tools/call', { name: 'list_run_history', arguments: { limit } });
+                assert.equal(rejected.error?.code, -32602, JSON.stringify(rejected));
+            }
+        } finally { await client.close(); }
+    });
+
+    test('accepts --input pairs, repeated keys as lists, and keeps values out of errors', () => {
+        fs.writeFileSync(config, JSON.stringify([action('pairs', [
+            { id: 'name', type: 'inputBox' },
+            { id: 'many', type: 'quickPick', canPickMany: true, items: ['a', 'b', 'c'] },
+            { id: 'save', type: 'writeFile', path: 'pairs.txt', content: '${name.value}|${many.values}' },
+        ])]));
+        const run = (...pairs: string[]) => spawnSync('node', [cli, 'run', 'pairs', '--trust', '--json', '--workspace', root,
+            ...pairs.flatMap(pair => ['--input', pair])], { encoding: 'utf8', env });
+        const ok = run('name=x=y', 'many=a', 'many=c');
+        assert.equal(ok.status, 0, ok.stdout);
+        assert.equal(fs.readFileSync(path.join(root, 'pairs.txt'), 'utf8'), 'x=y|a,c');
+        const malformed = run(secret);
+        assert.equal(malformed.status, 2);
+        assert.ok(!malformed.stdout.includes(secret), malformed.stdout);
+        assert.equal(run('=x').status, 2);
+        // --input wins over the same key from --inputs-file.
+        const overridden = spawnSync('node', [cli, 'run', 'pairs', '--trust', '--json', '--workspace', root, '--inputs-file', '-',
+            '--input', 'name=flag'], { encoding: 'utf8', env, input: JSON.stringify({ name: 'file', many: ['b'] }) });
+        assert.equal(overridden.status, 0, overridden.stdout);
+        assert.equal(fs.readFileSync(path.join(root, 'pairs.txt'), 'utf8'), 'flag|b');
+        assert.equal(spawnSync('node', [cli, 'preview', 'pairs', '--input', 'name=x', '--workspace', root], { encoding: 'utf8', env }).status, 2);
+    });
+
+    test('names an IDE-only built-in variable that standalone execution cannot provide', () => {
+        fs.writeFileSync(config, JSON.stringify([action('editor', [
+            { id: 'open', type: 'command', command: 'node', args: ['probe.cjs', '${file}'] },
+        ])]));
+        const run = invoke(['run', 'editor', '--trust']);
+        assert.equal(run.code, 2);
+        assert.match(run.data.error, /\$\{file\}/);
+    });
+
+    test('redacts a credential that forEach iterations print in parts', () => {
+        // A multi-line credential printed one line per iteration only appears once the iterations are joined.
+        fs.writeFileSync(path.join(root, 'print.cjs'), 'console.log(process.argv[2]);');
+        fs.writeFileSync(config, JSON.stringify([action('parts', [{
+            id: 'part', type: 'command', command: 'node', args: ['print.cjs', '${each.value}'],
+            forEach: ['first-half', 'second-half'], env: { SERVICE_TOKEN: 'first-half\nsecond-half' },
+        }])]));
+        const run = invoke(['run', 'parts', '--trust', '--capture-output']);
+        assert.equal(run.code, 0);
+        const log = invoke(['logs', run.data.runId]);
+        assert.equal(log.data.tasks[0].output.availability, 'redacted');
+        assert.ok(!log.stdout.includes('second-half'));
+    });
+
+    test('marks a credential split across forEach iterations before later tasks use it, without capture', () => {
+        // The default run logs nothing, but the joined iteration results still reach later tasks.
+        fs.writeFileSync(path.join(root, 'print.cjs'), 'console.log(process.argv[2]);');
+        fs.writeFileSync(config, JSON.stringify([action('parts', [
+            { id: 'part', type: 'command', command: 'node', args: ['print.cjs', '${each.value}'], passTheResultToNextTask: true,
+                forEach: ['first-half', 'second-half'], env: { SERVICE_TOKEN: 'first-half\nsecond-half' } },
+            { id: 'save', type: 'writeFile', path: 'joined.txt', content: '${part.output}' },
+        ])]));
+        const run = invoke(['run', 'parts', '--trust']);
+        assert.equal(run.code, 2, JSON.stringify(run.data));
+        assert.match(run.data.error, /allowSecretContent/);
+        assert.equal(fs.existsSync(path.join(root, 'joined.txt')), false);
+    });
+
+    test('records diagnostics of a failed command only when its output was collected', () => {
+        fs.writeFileSync(path.join(root, 'cc.cjs'), 'console.error("main.c:3:1: error: boom"); process.exit(2);');
+        const build: Task = { id: 'build', type: 'command', command: 'node', args: ['cc.cjs'], output: { diagnostics: '$gcc' } } as Task;
+        fs.writeFileSync(config, JSON.stringify([action('build', [build])]));
+        const quiet = invoke(['run', 'build', '--trust']);
+        assert.equal(quiet.code, 1);
+        assert.equal(invoke(['logs', quiet.data.runId]).data.tasks[0].diagnostics, undefined);
+        const captured = invoke(['run', 'build', '--trust', '--capture-output']);
+        assert.deepEqual(invoke(['logs', captured.data.runId]).data.tasks[0].diagnostics, { error: 1, warning: 0, info: 0, hint: 0 });
+    });
+
+    test('reports a truncated capture when forEach output exceeds the log limit', function () {
+        this.timeout(60_000);
+        fs.writeFileSync(path.join(root, 'big.cjs'), 'process.stdout.write("x".repeat(7 * 1024 * 1024));');
+        fs.writeFileSync(config, JSON.stringify([action('big', [{
+            id: 'big', type: 'command', command: 'node', args: ['big.cjs', '${each.value}'], forEach: ['1', '2', '3', '4', '5'],
+        }])]));
+        const run = invoke(['run', 'big', '--trust', '--capture-output']);
+        assert.equal(run.code, 0);
+        assert.deepEqual(invoke(['logs', run.data.runId]).data.tasks[0].output, { availability: 'capture-truncated', truncated: true });
+    });
+
+    test('canonicalizes the workspace root with the native realpath', () => {
+        // On Windows runners the temp directory is an 8.3 short name that only the native realpath expands.
+        assert.equal(new Workspace(root).root, fs.realpathSync.native(root));
+        const alias = root + ' alias';
+        fs.symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+        try { assert.equal(new Workspace(alias).root, fs.realpathSync.native(root)); }
+        finally { fs.unlinkSync(alias); }
+    });
+
     test('lists history through a non-canonical workspace path', async () => {
         // Windows runners expose temp as an 8.3 short name (RUNNER~1) that only the native realpath
         // expands; a junction or symlink to the workspace reproduces the same mismatch on every OS.
@@ -393,7 +537,8 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         ]));
         const run = invoke(['run', 'fail', '--trust', '--capture-output']);
         assert.equal(run.code, 1);
-        const expected = { availability: 'captured', stdout: 'build output', stderr: 'build diagnostic' };
+        // A failed command's log keeps its streams as printed, matching the extension.
+        const expected = { availability: 'captured', stdout: 'build output\n', stderr: 'build diagnostic\n' };
         const logged = invoke(['logs', run.data.runId]).data.tasks[0];
         assert.equal(logged.exitCode, 7);
         assert.deepEqual(logged.output, expected);

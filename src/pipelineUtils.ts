@@ -35,7 +35,8 @@ export const INTERPOLATED_VALUE_MAX_LENGTH = 32 * 1024;
 
 /** 없는 실행 문맥 내장값. `??` 체인은 이 오류를 다음 대안으로 넘길 수 있다. */
 export class PipelineBuiltinUnavailableError extends Error {
-    constructor(message: string) {
+    /** `file`·`selectedText` 같은 내장 이름 또는 `env:NAME`. 값이 아니라 이름만 담는다. */
+    constructor(message: string, readonly variable?: string) {
         super(message);
         this.name = 'PipelineBuiltinUnavailableError';
     }
@@ -821,7 +822,7 @@ export function resolvePipelineReference(expression: string, context: any): unkn
         const value = lookupEnvironmentVariable(context, name);
         if (value !== undefined) { return value; }
         if (hasEnvironmentSnapshot(context) && usesStrictBuiltinVariables(context)) {
-            throw new PipelineBuiltinUnavailableError(`Environment variable '${name}' is not defined.`);
+            throw new PipelineBuiltinUnavailableError(`Environment variable '${name}' is not defined.`, `env:${name}`);
         }
         return undefined;
     }
@@ -871,7 +872,7 @@ export function resolvePipelineReference(expression: string, context: any): unkn
         if (usesStrictBuiltinVariables(context)) {
             throw new PipelineBuiltinUnavailableError(describeUnavailableBuiltin(
                 expression as BuiltinVariableName
-            ));
+            ), expression);
         }
         return undefined;
     }
@@ -880,7 +881,7 @@ export function resolvePipelineReference(expression: string, context: any): unkn
     if (isBare && RESERVED_VARIABLE_HEADS.has(expression) && usesStrictBuiltinVariables(context)) {
         throw new PipelineBuiltinUnavailableError(describeUnavailableBuiltin(
             expression as BuiltinVariableName
-        ));
+        ), expression);
     }
     return undefined;
 }

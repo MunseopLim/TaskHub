@@ -171,6 +171,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 *   **장시간 완료 피드백**: `executeAction()`이 성공·실패·명시적 중지의 `durationMs`와 완료 시점 창 포커스를 확정하고, [executionFeedback.ts](../src/executionFeedback.ts)가 Actions 상태 표시와 실행 알림의 호환 정책을, [backgroundCompletion.ts](../src/backgroundCompletion.ts)가 임계값·대상 결과·알림 정책과 750ms 묶음을 판정합니다. 성공·중지 알림만 묶고 실패는 원인이 있는 기존 오류 알림을 개별 유지하며, 상태 표시줄은 모든 대상 결과를 요약합니다. `taskhub.executionNotifications`가 완료 피드백의 마스터 게이트이며 비밀번호 파생 실패의 민감 디버그 알림은 대체하지 않습니다.
 *   **실행 로그·보고서**: `executeAction()`이 옵션으로 `ActionRunLogCollector`를 생성하고, 파이프라인이 태스크 전이·이미 마스킹된 명령·캡처 출력·진단 개수·확정된 파일 결과를 넣습니다. [runLogStore.ts](../src/runLogStore.ts)는 VS Code에 의존하지 않고 JSON 상한, 원자 쓰기와 워크스페이스별 직렬 회전을 담당합니다. 쓰기 성공 뒤 History에는 워크스페이스 URI와 상대 경로만 연결하며, [actionRunReport.ts](../src/actionRunReport.ts)는 스크립트 없는 CSP로 액션 요약과 접힌 태스크 상세를 렌더링합니다. 저장 실패는 실행 결과와 분리합니다.
 *   **파일 감시**: debounce({ run, cancel }) 패턴으로 JSON 변경 감지
+*   **독립 실행기와의 동등성**: CLI·MCP는 아직 [standalone/runner.ts](../src/standalone/runner.ts)의 별도 실행기를 쓴다. 두 실행기가 공유하는 것은 vscode에 의존하지 않는 하위 모듈(그래프·스케줄러·치환·Doctor·실행 로그·압축)이다. [executorParity.test.ts](../src/test/executorParity.test.ts)가 같은 액션을 두 실행기로 돌려 액션 결과·태스크 상태·캡처 출력·생성 파일을 비교한다. 확장의 동작을 기준으로 삼으며, 터미널 표시와 오류 문구처럼 호스트마다 다른 부분은 비교하지 않는다.
 
 ### 2.1. 동적 커맨드 등록 (`syncActionCommands`)
 

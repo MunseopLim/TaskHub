@@ -1839,14 +1839,15 @@ taskhub --help
 - 기본 작업 폴더는 현재 디렉터리다. `--workspace DIR`의 `.vscode/actions.json`을 직접 읽고 중첩 폴더 안의 액션도 기존 ID로 찾는다. CLI 명령이나 MCP 도구를 호출할 때마다 파일을 다시 읽는다.
 - `--actions FILE`로 다른 위치의 액션 배열을 선택할 수 있다. `--preset FILE`은 기존 프리셋을 함께 읽는다. 확장에서처럼 워크스페이스 항목이 같은 ID의 프리셋 항목보다 우선한다. 상대 경로는 워크스페이스 기준이며 개인 프리셋은 절대 경로로 지정한다. 프리셋만 있는 워크스페이스도 지원한다.
 - 확장의 선택 프리셋, 입력 프로필, 최근 선택은 VS Code 설정이나 저장 상태에 속한다. 독립 실행에서는 프리셋을 명시하고 재사용할 입력을 별도 JSON 객체로 전달한다. 키는 액션 안의 **태스크 ID**다. `links.json`과 `favorites.json`은 확장의 탐색 패널에서 계속 사용한다.
-- `inputBox`는 접두사·접미사를 붙이기 전 문자열, `quickPick`은 항목 ID 또는 표시 이름(다중이면 배열), `envPick`은 변수 이름, 경로 선택은 경로 또는 경로 배열, `confirm`은 `true`를 받는다. 필수 입력을 생략하면 해당 태스크 ID를 반환한다. 실행은 항상 비대화형이며 `--non-interactive`로 명시할 수 있다.
+- `inputBox`는 접두사·접미사를 붙이기 전 문자열, `quickPick`은 항목 ID 또는 표시 이름(다중이면 배열), `envPick`은 변수 이름, 경로 선택은 경로 또는 경로 배열, `confirm`은 `true`를 받는다. 간단한 값은 `--input TASK_ID=VALUE`로 바로 전달하며, 같은 ID를 반복하면 배열(다중 선택·여러 경로)이 된다. `--input`은 `--inputs-file`의 같은 키보다 우선한다. `-`로 시작하는 값은 `--input=TASK_ID=-값`처럼 붙여 쓴다. `--input`의 값은 셸 이력과 프로세스 목록에 남으므로 비밀번호는 `--inputs-file -`로 전달한다. 필수 입력을 생략하면 해당 태스크 ID를 반환한다. 실행은 항상 비대화형이며 `--non-interactive`로 명시할 수 있다.
 
 ```sh
 taskhub list --workspace /work/project
 taskhub doctor --workspace /work/project --json
 taskhub preview build --workspace /work/project
+taskhub run build --workspace /work/project --trust --input target=debug
 taskhub run build --workspace /work/project --trust --inputs-file inputs.json --json
-taskhub history --workspace /work/project --json
+taskhub history --workspace /work/project --limit 10 --json
 taskhub logs <runId> --workspace /work/project --json
 ```
 
@@ -1860,7 +1861,7 @@ PowerShell에서는 `'{"slot":"array"}' | node bin/taskhub.cjs run demo.quickPic
 
 ### 실행과 로그
 
-조회·검증·미리보기는 읽기 전용이다. `--trust`는 **해당 실행 또는 MCP 프로세스 수명 동안** 지정한 폴더의 액션이 사용자 권한으로 명령을 실행하도록 허용한다. 신뢰 설정은 저장하지 않는다. 명령·셸·파일·압축·문자열 처리와 태스크 그래프를 실행하며, IDE 브라우저·대화형 터미널·분리 실행(`isOneShot`)은 사전 검사에서 거부한다. 에디터·클립보드 내장값을 요구하는 단계는 해당 값이 없으면 실패한다.
+조회·검증·미리보기는 읽기 전용이다. `--trust`는 **해당 실행 또는 MCP 프로세스 수명 동안** 지정한 폴더의 액션이 사용자 권한으로 명령을 실행하도록 허용한다. 신뢰 설정은 저장하지 않는다. 명령·셸·파일·압축·문자열 처리와 태스크 그래프를 실행하며, IDE 브라우저·대화형 터미널·분리 실행(`isOneShot`)은 사전 검사에서 거부한다. 에디터·선택 텍스트·클립보드 내장값이나 정의되지 않은 `${env:...}`를 요구하는 단계는 그 변수 이름을 알리고 종료 코드 2로 실패한다.
 
 `history`는 해당 폴더에 남아 있는 구조화 로그를 조회하므로 확장에서 실행 로그를 켜고 생성한 보고서도 읽을 수 있다. 손상되거나 8 MiB를 넘긴 로그와 다른 계정이 남겨 읽을 권한이 없는 로그·액션 로그 폴더는 건너뛴다. 읽을 수 없는 폴더는 안의 파일 수를 알 수 없으므로 1건으로 센다. CLI의 일반 출력에서는 표준 오류에 경고를 표시하고, JSON과 MCP 이력 응답에서는 건너뛴 수를 `skippedLogs`로 반환한다. 기존 VS Code History 패널의 항목은 VS Code가 관리한다. `runId`는 응답의 워크스페이스 상대 로그 경로다.
 
@@ -1891,4 +1892,4 @@ MCP 클라이언트의 로컬 서버 설정 예시다. `command`에는 실제 �
 }
 ```
 
-`list_actions`, `validate_action`, `preview_action`, `list_run_history`, `get_run_log`로 조회한다. `run_action`을 허용하려면 운영자가 시작 인자에 `--trust`를 추가한다. 도구 인자는 `actionId`, 선택적 `inputs` 또는 로그 조회용 `runId`다. 워크스페이스·프리셋·신뢰 여부는 도구 인자로 바꿀 수 없다. `notifications/cancelled`, 클라이언트 연결 종료, CLI의 Ctrl+C 및 POSIX의 `SIGHUP`은 실행 중인 프로세스 트리 종료를 요청한다. 자식 프로세스는 MCP의 표준 입출력을 상속하지 않는다.
+`list_actions`, `validate_action`, `preview_action`, `list_run_history`, `get_run_log`로 조회한다. `run_action`을 허용하려면 운영자가 시작 인자에 `--trust`를 추가한다. 도구 인자는 `actionId`, 선택적 `inputs`, 로그 조회용 `runId`, 이력 개수를 줄이는 선택적 `limit`이다. 워크스페이스·프리셋·신뢰 여부는 도구 인자로 바꿀 수 없다. `notifications/cancelled`, 클라이언트 연결 종료, CLI의 Ctrl+C 및 POSIX의 `SIGHUP`은 실행 중인 프로세스 트리 종료를 요청한다. 자식 프로세스는 MCP의 표준 입출력을 상속하지 않는다.

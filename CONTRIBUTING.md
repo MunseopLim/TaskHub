@@ -116,6 +116,7 @@ npm run test:cli-package
 | **사용자에게 보이는 문자열** 추가 | `src/i18n.ts`의 `t(ko, en)` 헬퍼 사용 ([CLAUDE.md 다국어 지원](CLAUDE.md#다국어-지원-i18n) 참조) |
 | **`package.json` `contributes.*`의 문자열** (명령 title, 뷰 name, `viewsWelcome`, 설정 설명) 추가·변경 | package.json에는 `%key%`만 두고 `package.nls.json` + `package.nls.ko.json` **양쪽**에 문구 추가 ([CLAUDE.md](CLAUDE.md#packagejson-안의-문자열-manifest)) · 한쪽만 넣으면 오류 없이 영어로 폴백한다 |
 | **실험적 기능** 추가 / 안정화(graduation) | 본 문서 [실험적 기능 추가 가이드](#실험적-기능-추가-가이드) 전체 절차 · [docs/features.md §16](docs/features.md#16-experimental-features) |
+| **태스크 실행 동작** (태스크 타입·입력 변환·조건·실행 로그 기록) 변경 | 확장 실행기와 [독립 실행기](src/standalone/runner.ts)에 함께 반영하고 [src/test/executorParity.test.ts](src/test/executorParity.test.ts)에 fixture를 추가한다. 한쪽만 바꾸면 CLI·MCP와 VS Code의 결과가 조용히 달라진다 |
 | **보안 가드** (파서 한도·CSP·경로 검증) 변경 | [docs/architecture.md 보안 가드](docs/architecture.md#보안-가드) · 관련 유닛 테스트 (`defensive limits` 등) |
 | **`IT-XXX` 통합 테스트** 추가 / suite 신설 | [docs/integration-tests.md](docs/integration-tests.md) "시나리오 그룹" 에 항목 한 줄 (+ 비자명한 제약은 상세 섹션) · `src/test/docConsistency.test.ts` 가 `test('IT-XXX` 제목과 대장을 대조하므로 빠뜨리면 CI 에서 실패 |
 | **공용 커밋 메시지 형식**이 필요한 PR | [버전 관리](AGENTS.md#버전-관리)와 [버전 검사](#버전-검사)를 적용한다. 자세한 제목 형식은 [CLAUDE.md 커밋 메시지](CLAUDE.md#커밋-메시지). |
@@ -321,16 +322,16 @@ API나 동작이 바뀔 수 있고 사용자 피드백이 필요한 기능만 ex
 ## npm overrides
 
 보안 취약점 해결을 위해 다음 패키지에 override 적용 중:
-- `minimatch`: mocha/eslint 내부 의존성
+- `minimatch`: mocha/eslint/vsce 내부 의존성 (11.0.1 미만의 globparts 서비스 거부 취약점)
 - `diff`: mocha 내부 의존성
-- `serialize-javascript`: mocha 내부 의존성 (RCE 취약점)
-- `glob`: mocha 내부의 지원 종료된 glob 10 설치 경고 제거
+- `serialize-javascript`: mocha 내부 의존성 (RCE 취약점, 7.1.3 미만의 XSS 취약점)
+- `glob`: mocha·test-cli 내부 의존성 (14.0.1 이하의 AbortSignal 취소 우회 취약점)
 
 override 제거 전에 `npm audit`으로 취약점 상태 확인 필요.
 
-VSIX 패키징 도구 `@vscode/vsce`는 `minimatch` 10 API를 사용하는 버전으로 고정한다.
+VSIX 패키징 도구 `@vscode/vsce`는 `minimatch` 11의 named export API로 동작하는 버전으로 고정한다.
 3.9.0처럼 callable default export를 요구하는 버전은 전역 override와 충돌하므로,
-도구 버전을 바꾸면 실제 VSIX 생성까지 검증한다.
+도구나 override 버전을 바꾸면 실제 VSIX 생성까지 검증한다.
 
 ### `@types/vscode` 잠금 정책
 

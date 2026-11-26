@@ -25,7 +25,9 @@ export class Workspace {
     private readonly logs: RunLogStore;
     constructor(directory: string, private readonly options: WorkspaceOptions = {}) {
         try {
-            this.root = fs.realpathSync(directory);
+            // The native realpath also expands Windows 8.3 short names (RUNNER~1), so every
+            // later workspace-boundary check compares the same canonical spelling.
+            this.root = fs.realpathSync.native(directory);
             if (!fs.statSync(this.root).isDirectory()) { throw new Error(); }
         } catch {
             throw new TaskHubError(2, t('워크스페이스 디렉터리를 열 수 없습니다.', 'Cannot open workspace directory.'));
@@ -117,7 +119,11 @@ export class Workspace {
         }
     }
 
-    history() { return listActionRunHistory(this.root); }
+    /** 최신 실행부터 반환한다. `limit`은 건너뛴 로그 수에 영향을 주지 않는다. */
+    async history(limit?: number) {
+        const history = await listActionRunHistory(this.root);
+        return limit === undefined ? history : { ...history, runs: history.runs.slice(0, limit) };
+    }
 
     async log(runId: string) {
         try { return await readActionRunLog(this.root, runId); }
