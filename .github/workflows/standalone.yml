@@ -79,4 +79,7 @@ jobs:
           path: dist
 
       - name: Test offline install, CLI and stdio MCP
+        env:
+          # This job reaches the runner's administrative share, so the UNC workspace test must not skip.
+          TASKHUB_REQUIRE_UNC: '1'
         run: npm run test:cli-package

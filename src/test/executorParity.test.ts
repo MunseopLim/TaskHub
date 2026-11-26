@@ -185,6 +185,14 @@ function installPromptStubs() {
     // envPick과 일반 quickPick은 showQuickPick을, 직접 입력·기본값이 있는 quickPick은 createQuickPick을 쓴다.
     window.showQuickPick = async (items: unknown, options?: { canPickMany?: boolean }) => {
         const list = await (items as Promise<any[]>);
+        // Off macOS the extension asks whether a `both` pathDialog selects a file or a folder before the
+        // dialog. Answer from the path the next input names, leaving that input for the dialog itself.
+        if (list.some(item => item?.taskHubPathMode)) {
+            const next = session?.queue[0];
+            if (!next || next.task.type !== 'pathDialog') { session?.errors.push('unexpected path kind prompt'); return undefined; }
+            const folder = fs.statSync(path.resolve(session!.root, String([next.value].flat()[0]))).isDirectory();
+            return list.find(item => item.taskHubPathMode === (folder ? 'folder' : 'file'));
+        }
         const entry = nextInput('envPick', 'quickPick');
         if (!entry) { return undefined; }
         const matched = pick(list, entry.value);

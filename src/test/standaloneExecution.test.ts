@@ -573,10 +573,11 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         assert.equal(spawnSync('cmd.exe', ['/d', '/c', 'subst', letter, root]).status, 0);
         try { run(letter + '\\'); }
         finally { spawnSync('cmd.exe', ['/d', '/c', 'subst', letter, '/d']); }
-        // The administrative share exists on hosted runners, so CI must exercise the UNC half; elsewhere it may be off.
+        // The administrative share is reachable from the CLI package job, which sets TASKHUB_REQUIRE_UNC so the UNC
+        // half cannot be skipped there unnoticed. Elsewhere (the VS Code test host, local machines) it may be off.
         const unc = '\\\\localhost\\' + canonical[0] + '$' + canonical.slice(2);
         if (fs.existsSync(unc)) { run(unc); }
-        else { assert.ok(!process.env.GITHUB_ACTIONS, `UNC path unavailable on CI: ${unc}`); }
+        else { assert.ok(!process.env.TASKHUB_REQUIRE_UNC, `UNC path unavailable: ${unc}`); }
     });
 
     test('names an IDE-only built-in variable that standalone execution cannot provide', () => {
