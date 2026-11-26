@@ -671,9 +671,12 @@ export async function listActionRunHistory(root: string) {
     // An unreadable folder counts as one skipped entry because its file count is unknown.
     let skippedLogs = 0;
     try {
+        // Compare canonical paths, as readActionRunLog does. A caller's root may be a link
+        // or, on Windows, an 8.3 short name (`RUNNER~1`) that only the native realpath expands.
+        const realRoot = await fs.realpath(root);
         for (const directory of [path.dirname(logsRoot), logsRoot]) {
             const stat = await fs.lstat(directory);
-            if (!stat.isDirectory() || isOutside(root, await fs.realpath(directory))) {
+            if (!stat.isDirectory() || isOutside(realRoot, await fs.realpath(directory))) {
                 throw new RunLogReadError('unsafe-path', 'Unsafe run log directory.');
             }
         }

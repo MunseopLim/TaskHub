@@ -5,7 +5,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
-import { RUN_LOG_MAX_FILE_BYTES } from '../runLogStore';
+import { listActionRunHistory, RUN_LOG_MAX_FILE_BYTES } from '../runLogStore';
 import { parseInputs } from '../standalone/inputs';
 import { launchPlan } from '../standalone/process';
 import { executionIssues } from '../standalone/runner';
@@ -267,6 +267,19 @@ suite('Standalone Core, CLI and stdio MCP', function () {
             fs.chmodSync(deniedFolder, 0o700);
             fs.chmodSync(deniedFile, 0o600);
         }
+    });
+
+    test('lists history through a non-canonical workspace path', async () => {
+        // Windows runners expose temp as an 8.3 short name (RUNNER~1) that only the native realpath
+        // expands; a junction or symlink to the workspace reproduces the same mismatch on every OS.
+        const run = invoke(['run', 'build', '--trust'], { slot: 'debug' });
+        assert.equal(run.code, 0);
+        const alias = root + ' link';
+        fs.symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+        try {
+            const history = await listActionRunHistory(alias);
+            assert.deepEqual(history.runs.map(entry => entry.runId), [run.data.runId]);
+        } finally { fs.unlinkSync(alias); }
     });
 
     test('returns cancellation code 130 and records a declined confirmation', () => {
