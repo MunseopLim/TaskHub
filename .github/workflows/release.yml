@@ -9,6 +9,9 @@ permissions:
   contents: read
 
 jobs:
+  standalone:
+    uses: ./.github/workflows/standalone.yml
+
   build:
     name: Verify and build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -55,31 +58,31 @@ jobs:
         if: runner.os == 'Linux'
         run: npm exec --no -- vsce package --out "taskhub-${VSIX_VERSION}.vsix"
 
-      - name: Package standalone CLI (Linux)
-        if: runner.os == 'Linux'
-        run: npm run package:cli
-
-      - name: Upload verified packages
+      - name: Upload verified VSIX
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-packages
-          path: |
-            taskhub-*.vsix
-            dist/taskhub-cli-*.tgz
+          name: release-vsix
+          path: taskhub-*.vsix
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [build, standalone]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download verified packages
+      - name: Download verified VSIX
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: release-packages
+          name: release-vsix
           path: artifacts
+
+      - name: Download verified CLI package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: standalone-cli
+          path: artifacts/dist
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

@@ -10,7 +10,7 @@ import { launchPlan } from '../standalone/process';
 import { executionIssues } from '../standalone/runner';
 import type { Task } from '../schema';
 
-const cli = path.resolve(__dirname, '../../bin/taskhub.cjs');
+const cli = process.env.TASKHUB_TEST_CLI ?? path.resolve(__dirname, '../../bin/taskhub.cjs');
 const arg = '두 단어 & $NAME | >';
 const secret = 'synthetic-private-input';
 const pipeline: Task[] = [
@@ -124,6 +124,57 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         assert.equal(invoke(['doctor', 'ui']).data.valid, false);
         assert.equal(invoke(['run', 'ui', '--trust']).code, 2);
         assert.equal(fs.existsSync(path.join(root, 'marker')), false);
+    });
+
+    test('resolves explicit actions and preset-only workspaces for both clients', async () => {
+        const custom = '사내 actions.json';
+        fs.renameSync(config, path.join(root, custom));
+        assert.equal(invoke(['list']).code, 2);
+        const expected = invoke(['list', '--actions', custom]);
+        assert.equal(expected.code, 0);
+        assert.equal(expected.data.actions[0].id, 'build');
+        assert.deepEqual(invoke(['list', '--preset', path.join(root, custom)]).data, expected.data);
+        assert.equal(invoke(['list', '--actions', 'absent.json', '--preset', custom]).code, 2);
+        const client = mcp('--actions', custom);
+        try {
+            await client.init();
+            assert.deepEqual((await client.call('list_actions')).data, expected.data);
+        } finally { await client.close(); }
+    });
+
+    test('reads BOM input files and rejects unreadable, malformed and oversized files before execution', () => {
+        const file = path.join(root, '빌드 입력.json');
+        const args = ['run', 'build', '--trust', '--non-interactive', '--inputs-file', file];
+        assert.equal(invoke(args).code, 2);
+        for (const content of ['{', JSON.stringify({ slot: 'x'.repeat(8 * 1024 * 1024) })]) {
+            fs.writeFileSync(file, content);
+            assert.equal(invoke(args).code, 2);
+        }
+        assert.equal(fs.existsSync(path.join(root, '.taskhub')), false);
+        fs.writeFileSync(file, '\uFEFF' + JSON.stringify({ slot: 'debug' }));
+        assert.equal(invoke(args).code, 0);
+        assert.equal(fs.readFileSync(path.join(root, 'result'), 'utf8'), JSON.stringify(['--debug', arg]));
+    });
+
+    test('returns cancellation code 130 and records a declined confirmation', () => {
+        fs.writeFileSync(config, JSON.stringify([action('deploy', [
+            { id: 'accept', type: 'confirm', message: 'Continue?' },
+            { id: 'save', type: 'writeFile', dependsOn: ['accept'], path: 'deployed', content: 'yes' },
+        ])]));
+        const run = invoke(['run', 'deploy', '--trust'], { accept: false });
+        assert.equal(run.code, 130, run.stdout);
+        assert.equal(run.data.outcome, 'cancelled');
+        assert.equal(invoke(['logs', run.data.runId]).data.outcome, 'cancelled');
+        assert.equal(fs.existsSync(path.join(root, 'deployed')), false);
+    });
+
+    test('keeps MCP stdout empty when its workspace cannot be opened', () => {
+        const failed = spawnSync('node', [cli, 'mcp', '--workspace', path.join(root, 'absent'), '--json'],
+            { encoding: 'utf8', timeout: 10_000 });
+        assert.ifError(failed.error);
+        assert.equal(failed.status, 2);
+        assert.equal(failed.stdout, '');
+        assert.ok(failed.stderr.trim());
     });
 
     test('uses the same definitions, argv, outputs, history and logs through both processes', async () => {

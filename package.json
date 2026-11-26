@@ -1476,6 +1476,7 @@
     "check-types": "tsc --noEmit",
     "lint": "eslint src --max-warnings 0",
     "test": "vscode-test",
+    "test:cli-package": "node .github/scripts/test-cli-package.cjs",
     "clean-tests": "node -e \"require('fs').rmSync('out', { recursive: true, force: true })\""
   },
   "devDependencies": {

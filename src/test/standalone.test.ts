@@ -8,7 +8,7 @@ suite('Standalone CLI', function () {
     this.timeout(30_000);
     let root: string;
     let config: string;
-    const cli = path.resolve(__dirname, '../../bin/taskhub.cjs');
+    const cli = process.env.TASKHUB_TEST_CLI ?? path.resolve(__dirname, '../../bin/taskhub.cjs');
     const invoke = (...args: string[]) => spawnSync('node', [cli, ...args, '--workspace', root, '--json'],
         { encoding: 'utf8', timeout: 10_000 });
     setup(() => {
