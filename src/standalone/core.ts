@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getActionsValidator, mergeActions, taskHubRoot, parseAndValidateActionsContent, traverseActionItems } from '../actionCatalog';
-import { locateJsonPointer, runDoctorPerSource } from '../doctor';
+import { locateActionSpans, runDoctorPerSource } from '../doctor';
 import { resolveWithinWorkspace } from '../pipelineUtils';
 import { buildPreviewReport } from '../previewRun';
 import type { Action, ActionItem } from '../schema';
@@ -10,66 +10,29 @@ import { listActionRunHistory, readActionRunLog, RunLogStore, RUN_LOG_DEFAULT_MA
 import { t } from './language';
 import { TaskHubError } from './errors';
 import type { Inputs } from './inputs';
-import type { OutputListener } from './process';
-import { executionIssues, runPipeline } from './runner';
-
-/** Offset just past the JSON value that starts at `start` (an object or array), or -1. */
-function valueEnd(text: string, start: number): number {
-    let depth = 0;
-    for (let index = start; index < text.length; index++) {
-        const char = text[index];
-        if (char === '"') {
-            for (index++; index < text.length && text[index] !== '"'; index++) {
-                if (text[index] === '\\') { index++; }
-            }
-        } else if (char === '{' || char === '[') {
-            depth++;
-        } else if (char === '}' || char === ']') {
-            if (--depth === 0) { return index + 1; }
-        }
-    }
-    return -1;
-}
+import { executionIssues, runPipeline, type ConsoleListener } from './runner';
 
 /**
  * The actions file reduced to one action, with every other character blanked so lines and columns
- * stay those of the original file. Doctor then reports only this action's findings at their real
- * positions — filtering whole-file findings by position would not work, because Doctor places a
- * task's finding at the first `"id"` with that task id in the file, which may belong to another action.
+ * stay those of the original file. Doctor then reports only this action's findings, at their real positions.
  */
 export function isolateAction(rawText: string, id: string): string | undefined {
     const text = rawText.replace(/^\uFEFF/, '');
-    let parsed: unknown;
-    try { parsed = JSON.parse(text); } catch { return undefined; }
-    let pointer: string | undefined;
-    const walk = (items: unknown, base: string) => {
-        if (!Array.isArray(items)) { return; }
-        items.forEach((item: { id?: unknown; action?: unknown; children?: unknown } | null, index) => {
-            if (pointer !== undefined || !item || typeof item !== 'object') { return; }
-            if (item.id === id && item.action) { pointer = `${base}/${index}`; return; }
-            walk(item.children, `${base}/${index}/children`);
-        });
-    };
-    walk(parsed, '');
-    if (pointer === undefined) { return undefined; }
-    const lineStarts = [0];
-    for (let index = 0; index < text.length; index++) {
-        if (text[index] === '\n') { lineStarts.push(index + 1); }
-    }
-    const location = locateJsonPointer(text, parsed, pointer);
-    const start = lineStarts[location.startLine - 1] + location.startColumn - 1;
-    const end = valueEnd(text, start);
+    const span = locateActionSpans(text).get(id);
     const open = text.indexOf('[');
     const close = text.lastIndexOf(']');
-    if (end < 0 || open < 0 || close < end) { return undefined; }
+    if (!span || open < 0 || open > span.start || close < span.end) { return undefined; }
     let isolated = '';
     for (let index = 0; index < text.length; index++) {
         const char = text[index];
-        const kept = (index >= start && index < end) || index === open || index === close || char === '\n' || char === '\r';
+        const kept = (index >= span.start && index < span.end) || index === open || index === close || char === '\n' || char === '\r';
         isolated += kept ? char : ' ';
     }
     return isolated;
 }
+
+/** The action files exist but cannot be parsed or fail the schema. */
+class InvalidActionsError extends TaskHubError {}
 
 interface WorkspaceOptions {
     trusted?: boolean;
@@ -128,7 +91,7 @@ export class Workspace {
                 if (!item.type && item.action) { actions.set(item.id, { ...item, action: item.action }); }
             });
         } catch {
-            throw new TaskHubError(2, t('actions.json 오류를 doctor로 확인하세요.', 'Invalid actions.json. Run doctor for diagnostics.'));
+            throw new InvalidActionsError(2, t('actions.json 오류를 doctor로 확인하세요.', 'Invalid actions.json. Run doctor for diagnostics.'));
         }
         return actions;
     }
@@ -151,7 +114,17 @@ export class Workspace {
 
     /** Doctor findings inside the action's definition, with their positions in the actions file. */
     validate(id: string) {
-        const item = this.action(id);
+        let item;
+        try {
+            item = this.action(id);
+        } catch (error) {
+            if (!(error instanceof InvalidActionsError)) { throw error; }
+            // Without a valid file the action cannot be isolated; the whole-file findings explain why.
+            return { actionId: id, valid: false, findings: this.doctor(), issues: [t(
+                'actions.json에 오류가 있어 액션을 읽지 못했습니다. 파일 전체 진단을 표시합니다.',
+                'Could not read the action because actions.json has errors. Showing the diagnostics of the whole file.'
+            )] };
+        }
         // Like the merged catalog, the first source that defines the id provides the action.
         const source = this.sources().map(candidate => ({ candidate, isolated: isolateAction(candidate.rawText, id) }))
             .find(entry => entry.isolated !== undefined);
@@ -167,11 +140,17 @@ export class Workspace {
     }
 
     /** `onOutput` shows command output while it runs; the run log still follows `captureOutput`. */
-    async run(id: string, inputs: Inputs, signal: AbortSignal, onOutput?: OutputListener) {
+    async run(id: string, inputs: Inputs, signal: AbortSignal, onOutput?: ConsoleListener) {
         this.requireTrust();
         const result = await runPipeline(this.action(id), this.root, this.extensionPath, inputs, signal, !!this.options.captureOutput, onOutput);
         const { actionId, startedAt, finishedAt, outcome, error } = result.log;
-        const summary = { actionId, startedAt, finishedAt, outcome, exitCode: result.exitCode, error };
+        // Tasks a condition turned off, with the (already redacted) reason, so a skipped step is visible without the log.
+        const skipped = result.log.tasks.filter(task => task.status === 'condition-skipped')
+            .map(task => ({ taskId: task.taskId, reason: task.error ?? '' }));
+        // Failures `continueOnError` carried past; without them a successful summary would hide a broken step.
+        const continued = result.log.tasks.filter(task => task.status === 'continued')
+            .map(task => ({ taskId: task.taskId, error: task.error ?? '' }));
+        const summary = { actionId, startedAt, finishedAt, outcome, exitCode: result.exitCode, error, skipped, continued };
         try {
             const saved = await this.logs.write(result.log, { maxFiles: RUN_LOG_DEFAULT_MAX_FILES,
                 retentionDays: RUN_LOG_DEFAULT_RETENTION_DAYS, maxTotalBytes: RUN_LOG_DEFAULT_MAX_TOTAL_BYTES });

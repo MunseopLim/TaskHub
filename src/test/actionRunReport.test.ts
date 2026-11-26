@@ -61,6 +61,14 @@ suite('Action Run Report', () => {
         assert.ok(!html.includes('compiler <failed>'));
     });
 
+    test('CLI가 출력 저장 없이 남긴 명령은 가림이 아니라 저장하지 않음으로 보여 준다', () => {
+        const log = sampleLog();
+        log.tasks[1].output = { availability: 'not-applicable', notCaptured: true };
+        const html = buildActionRunReportHtml(log, 'n');
+        assert.ok(html.includes('--capture-output'), html);
+        assert.ok(!html.includes('Hidden because it used sensitive runtime data') && !html.includes('민감한 실행 문맥 때문에 숨김'));
+    });
+
     test('성공한 실행에서는 태스크 상세를 접어 둔다', () => {
         const log = sampleLog();
         log.outcome = 'success';

@@ -36,6 +36,22 @@ function parseLimit(value: string | undefined): number | undefined {
     return Number(value);
 }
 
+/** The human-readable result of `run`: labeled lines that stand out after live command output. */
+function formatRunSummary(result: { actionId: string; outcome: string; error?: string; runId: string | null; warning?: string;
+    skipped: { taskId: string; reason: string }[]; continued: { taskId: string; error: string }[] }): string {
+    const cancelled = result.outcome === 'cancelled';
+    const outcome = result.outcome === 'success' ? t('성공', 'success') : cancelled ? t('취소됨', 'cancelled') : t('실패', 'failure');
+    return [
+        `== ${result.actionId}: ${outcome} ==`,
+        ...result.continued.map(entry => t(`실패 후 계속: ${entry.taskId} — ${entry.error}`, `Continued after failure: ${entry.taskId} — ${entry.error}`)),
+        ...result.skipped.map(entry => t(`건너뜀: ${entry.taskId} — ${entry.reason}`, `Skipped: ${entry.taskId} — ${entry.reason}`)),
+        // The heading already says the run was cancelled.
+        !cancelled && result.error && t(`오류: ${result.error}`, `Error: ${result.error}`),
+        result.runId && t(`실행 로그: ${result.runId}`, `Run log: ${result.runId}`),
+        result.warning && t(`경고: ${result.warning}`, `Warning: ${result.warning}`),
+    ].filter(Boolean).join('\n');
+}
+
 async function readInputs(file: string | undefined, signal: AbortSignal) {
     if (!file) { return parseInputs({}); }
     const chunks: Buffer[] = [];
@@ -108,8 +124,10 @@ async function main(argv: string[]): Promise<void> {
                 const validation = id === undefined ? undefined : workspace.validate(id);
                 const findings = validation?.findings ?? workspace.doctor();
                 result = validation ?? { findings };
-                display = [...findings.map(f => `${f.sourceLabel}:${f.range.startLine}:${f.range.startColumn} ${f.severity} ${t(f.messageKo ?? f.message, f.message)}`),
-                    ...(validation?.issues ?? [])].join('\n') || t('문제가 없습니다.', 'No findings.');
+                // Execution constraints (or why the whole file is shown) come first, before the findings they explain.
+                display = [...(validation?.issues ?? []),
+                    ...findings.map(f => `${f.sourceLabel}:${f.range.startLine}:${f.range.startColumn} ${f.severity} ${t(f.messageKo ?? f.message, f.message)}`)]
+                    .join('\n') || t('문제가 없습니다.', 'No findings.');
                 if (validation?.valid === false || findings.some(f => f.severity === 'error')) { process.exitCode = 2; }
                 break;
             }
@@ -120,22 +138,40 @@ async function main(argv: string[]): Promise<void> {
             case 'run':
                 workspace.requireTrust();
                 // Command output is shown live as in the extension's terminal; `--json` keeps stdout to one JSON document.
-                let lastStdout: number | undefined;
                 // A reader that closes early (`| head`, a stopped pager) must not crash the run mid-way:
                 // the command would keep running detached and no run log would be written.
                 const closed = new Set<NodeJS.WriteStream>();
                 for (const stream of [process.stdout, process.stderr]) { stream.on('error', () => { closed.add(stream); }); }
+                // Each line carries its task, on the stream it was printed to, so interleaved parallel output
+                // and separately saved stdout/stderr both keep their origin (as docker compose does).
+                const atLineStart = new Map<NodeJS.WriteStream, boolean>([[process.stdout, true], [process.stderr, true]]);
+                const lastTask = new Map<NodeJS.WriteStream, string>();
+                const endsLine = new Map<NodeJS.WriteStream, boolean>([[process.stdout, true], [process.stderr, true]]);
+                const write = (stream: NodeJS.WriteStream, text: string) => {
+                    if (closed.has(stream) || !text) { return; }
+                    stream.write(text);
+                    atLineStart.set(stream, /[\r\n]$/.test(text));
+                    endsLine.set(stream, text.endsWith('\n'));
+                };
                 result = await workspace.run(id, applyInputPairs(await readInputs(values['inputs-file'], abort.signal), values.input), abort.signal,
-                    json ? undefined : (chunk, stream) => {
+                    json ? undefined : (text, stream, taskId) => {
                         const target = stream === 'stdout' ? process.stdout : process.stderr;
-                        if (closed.has(target)) { return; }
-                        if (stream === 'stdout') { lastStdout = chunk.at(-1); }
-                        target.write(chunk);
+                        const prefix = `[${taskId}] `;
+                        // Another task's unfinished line ends here, so this task's output starts on a line of its own.
+                        if (!atLineStart.get(target) && lastTask.get(target) !== taskId) { write(target, '\n'); }
+                        lastTask.set(target, taskId);
+                        // A carriage return starts a redrawn progress line, which keeps its prefix too.
+                        const lines = text.split(/(?<=\n|\r(?!\n))/);
+                        write(target, lines.map((line, index) =>
+                            index === 0 && !atLineStart.get(target) ? line : prefix + line).join(''));
                     });
-                // Start the summary on its own line after output that did not end with a newline.
-                if (lastStdout !== undefined && lastStdout !== 0x0a) { process.stdout.write('\n'); }
+                // Close lines left open on either stream so the summary starts on its own line.
+                // A progress line ended by `\r` is kept rather than overwritten by the summary.
+                for (const stream of [process.stdout, process.stderr]) {
+                    if (!endsLine.get(stream)) { write(stream, '\n'); }
+                }
                 process.exitCode = result.exitCode;
-                display = [result.actionId, result.outcome, result.error, result.runId, result.warning].filter(Boolean).join('\n');
+                display = formatRunSummary(result);
                 break;
             case 'history': {
                 result = await workspace.history(parseLimit(values.limit));

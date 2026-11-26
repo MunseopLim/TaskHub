@@ -40,8 +40,12 @@ export interface PipelineTaskAttempt {
      * rejects with that error from inside its own execution scope so the shared failure handling applies.
      */
     start(conditionFailure: { error: unknown } | undefined): Promise<unknown>;
-    /** The task exceeded `timeoutSeconds`; stop its work. The body keeps running, but its result is discarded. */
-    onTimeout(): void;
+    /**
+     * The task exceeded `timeoutSeconds`; stop its work. Its result is discarded. When this returns a
+     * promise, the task settles only after it does, so tasks that follow (with `continueOnError`) do not
+     * start while the stopped work is still exiting. A host that cannot wait (an undismissable dialog) returns nothing.
+     */
+    onTimeout(): void | Promise<unknown>;
     /** The task succeeded. Returns its run-log output, if the engine should record one. */
     succeeded(result: unknown): TaskRunLogOutput | undefined;
     failed(error: Error): PipelineTaskFailure;
@@ -166,7 +170,11 @@ export async function runPipelineEngine(host: PipelineEngineHost): Promise<Pipel
         } catch (error) {
             underlying = Promise.reject(error);
         }
-        return withTaskTimeout(underlying, task.timeoutSeconds, taskId, () => attempt.onTimeout()).then(
+        let stopping: Promise<unknown> | void = undefined;
+        return withTaskTimeout(underlying, task.timeoutSeconds, taskId, () => { stopping = attempt.onTimeout(); }).catch(async (error: unknown) => {
+            if (stopping) { await stopping.catch(() => undefined); }
+            throw error;
+        }).then(
             (result): PipelineTaskOutcome => {
                 log?.finishTask(taskId, { status: 'success', finishedAt: Date.now(), output: attempt.succeeded(result) });
                 return { taskId, kind: 'success', result };

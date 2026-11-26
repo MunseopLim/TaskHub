@@ -17,6 +17,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { environmentValue, windowsPowerShellPath } from './processEnvironment';
+import type { Translate } from './language';
 import type { OutputCapture, SwitchTaskBranch, Task, TaskCondition } from './schema';
 import { USER_REGEX_HOST_THREAD_MAX_MS, regexBudgetForInput, runWithRegexBudget } from './regexBudget';
 import {
@@ -1030,6 +1031,22 @@ export function extractVariableReferences(text: string): string[][] {
         if (heads.length > 0) { refs.push(heads); }
     }
     return refs;
+}
+
+/**
+ * Why a `when` turned a task off, e.g. `Condition not met: ${mode} is "debug", expected equals "release"`.
+ * `shown` is the resolved value as it may be displayed (already redacted). With `hideOperand` the expected
+ * value is withheld: a condition on a secret could otherwise reveal what the secret was compared with.
+ */
+export function formatConditionNotMet(when: TaskCondition, shown: string, hideOperand: boolean, t: Translate): string {
+    const operator = typeof when.equals === 'string' ? ['equals', when.equals]
+        : typeof when.notEquals === 'string' ? ['notEquals', when.notEquals]
+        : typeof when.matches === 'string' ? ['matches', when.matches]
+        : Array.isArray(when.in) ? ['in', when.in] : undefined;
+    const expected = operator === undefined ? ''
+        : `${operator[0]} ${hideOperand ? t('(숨김)', '(hidden)') : JSON.stringify(operator[1])}`;
+    const value = JSON.stringify(shown);
+    return t(`조건이 맞지 않습니다: ${when.var} 값 ${value}, 조건 ${expected}`, `Condition not met: ${when.var} is ${value}, expected ${expected}`);
 }
 
 /**

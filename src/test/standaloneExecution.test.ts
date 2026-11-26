@@ -351,18 +351,88 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         ])]));
         const plain = spawnSync('node', [cli, 'run', 'show', '--trust', '--workspace', root], { encoding: 'utf8', env });
         assert.equal(plain.status, 0, plain.stderr);
-        assert.ok(plain.stdout.startsWith('["live"]'), plain.stdout);
-        assert.match(plain.stdout, /\nshow\nsuccess\n/);
-        assert.equal(plain.stderr, 'diagnostic\n');
+        assert.ok(plain.stdout.startsWith('[say] ["live"]\n'), plain.stdout);
+        assert.match(plain.stdout, /\n== show: success ==\nRun log: /);
+        assert.equal(plain.stderr, '[say] diagnostic\n');
         fs.writeFileSync(path.join(root, 'tail.cjs'), "process.stdout.write('no-newline');");
         fs.writeFileSync(config, JSON.stringify([action('show', [
             { id: 'say', type: 'command', command: 'node', args: ['tail.cjs'] },
         ])]));
         const tail = spawnSync('node', [cli, 'run', 'show', '--trust', '--workspace', root], { encoding: 'utf8', env });
-        assert.ok(tail.stdout.startsWith('no-newline\nshow\n'), tail.stdout);
-        const json = invoke(['run', 'show', '--trust']);
+        assert.ok(tail.stdout.startsWith('[say] no-newline\n== show: success =='), tail.stdout);
+        // Known secrets are masked in live output too, even when a chunk boundary splits them.
+        fs.writeFileSync(path.join(root, 'split.cjs'),
+            "const v = process.argv[2]; process.stdout.write(v.slice(0, 5)); setTimeout(() => process.stdout.write(v.slice(5) + '\\n'), 100);");
+        fs.writeFileSync(config, JSON.stringify([action('show', [
+            { id: 'pw', type: 'inputBox', password: true },
+            { id: 'leak', type: 'command', command: 'node', args: ['split.cjs', '${pw.value}'] },
+        ])]));
+        const masked = spawnSync('node', [cli, 'run', 'show', '--trust', '--workspace', root, '--inputs-file', '-'],
+            { encoding: 'utf8', env, input: JSON.stringify({ pw: secret }) });
+        assert.equal(masked.status, 0, masked.stderr);
+        assert.ok(masked.stdout.startsWith('[leak] ***\n'), masked.stdout);
+        assert.ok(!masked.stdout.includes(secret.slice(5)));
+        const json = invoke(['run', 'show', '--trust'], { pw: secret });
         assert.equal(json.code, 0);
         assert.equal(json.stdout.trim().split('\n').length, 1, json.stdout);
+    });
+
+    test('masks stderr, multi-line and overlapping secrets in live output and keeps progress lines live', () => {
+        fs.writeFileSync(path.join(root, 'noisy.cjs'), [
+            "const [pw, key] = [process.argv[2], process.env.DEPLOY_PRIVATE_KEY];",
+            "process.stderr.write('err ' + pw + '\\n');",
+            // The key is printed in two writes that split it across its own line break.
+            "process.stdout.write(key.slice(0, 7)); setTimeout(() => { process.stdout.write(key.slice(7) + '\\n');",
+            "  process.stdout.write('10%\\r20%\\r'); process.stdout.write('done ' + pw.slice(0, 4) + '\\n'); }, 100);",
+        ].join('\n'));
+        fs.writeFileSync(config, JSON.stringify([action('noisy', [
+            { id: 'pw', type: 'inputBox', password: true },
+            { id: 'n', type: 'command', command: 'node', args: ['noisy.cjs', '${pw.value}'] },
+        ])]));
+        const key = 'KEYLINE1\nKEYLINE2';
+        const result = spawnSync('node', [cli, 'run', 'noisy', '--trust', '--workspace', root, '--inputs-file', '-'],
+            { encoding: 'utf8', env: { ...env, DEPLOY_PRIVATE_KEY: key }, input: JSON.stringify({ pw: secret }) });
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stderr, '[n] err ***\n');
+        assert.ok(!result.stdout.includes('KEYLINE'), result.stdout);
+        assert.ok(result.stdout.startsWith('[n] ***\n[n] 10%\r[n] 20%\r[n] done synt\n'), result.stdout);
+    });
+
+    test('records commands without --capture-output as not stored, in a log older readers accept', async () => {
+        fs.writeFileSync(config, JSON.stringify([action('plain', [
+            { id: 'ok', type: 'command', command: 'node', args: ['probe.cjs', 'x'] },
+            { id: 'bad', type: 'command', command: 'node', args: ['-e', 'process.exit(4)'], dependsOn: ['ok'] },
+        ])]));
+        const run = invoke(['run', 'plain', '--trust']);
+        assert.equal(run.code, 1);
+        const log = await new Workspace(root).log(run.data.runId);
+        for (const task of log.tasks) {
+            assert.deepEqual(task.output, { availability: 'not-applicable', notCaptured: true }, task.taskId);
+        }
+    });
+
+    test('rejects a zip without its own archive, as the extension does', () => {
+        fs.writeFileSync(config, JSON.stringify([action('pack', [
+            { id: 'name', type: 'stringManipulation', function: 'trim', input: 'out.zip' },
+            { id: 'zip', type: 'zip', source: ['probe.cjs'], inputs: { archive: 'name' } },
+        ])]));
+        const run = invoke(['run', 'pack', '--trust']);
+        assert.equal(run.code, 2, run.stdout);
+        assert.equal(fs.existsSync(path.join(root, 'out.zip')), false);
+    });
+
+    test('lists failures continueOnError carried past and keeps the summary off an unfinished stderr line', () => {
+        fs.writeFileSync(path.join(root, 'die.cjs'), "process.stderr.write('fatal: broke'); process.exit(3);");
+        fs.writeFileSync(config, JSON.stringify([action('soft', [
+            { id: 'bad', type: 'command', command: 'node', args: ['die.cjs'], continueOnError: true },
+            { id: 'next', type: 'command', command: 'node', args: ['probe.cjs', 'ok'], dependsOn: ['bad'] },
+        ])]));
+        const plain = spawnSync('node', [cli, 'run', 'soft', '--trust', '--workspace', root], { encoding: 'utf8', env });
+        assert.equal(plain.status, 0, plain.stderr);
+        assert.equal(plain.stderr, '[bad] fatal: broke\n[next] diagnostic\n');
+        assert.match(plain.stdout, /\n== soft: success ==\nContinued after failure: bad — Process exited with code 3\n/);
+        const json = invoke(['run', 'soft', '--trust']);
+        assert.deepEqual(json.data.continued, [{ taskId: 'bad', error: 'Process exited with code 3' }]);
     });
 
     test('reports Doctor findings of one action at their positions in the actions file', () => {
@@ -389,6 +459,14 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         fs.writeFileSync(config, JSON.stringify(actions, null, 4));
         assert.equal(invoke(['doctor', 'other']).code, 0);
         assert.equal(invoke(['doctor', 'target']).code, 2);
+
+        // A file that fails the schema cannot be narrowed to one action; doctor ACTION shows the whole file.
+        fs.writeFileSync(config, JSON.stringify([{ id: 'target', title: 'T', action: { tasks: 'not-a-list' } }]));
+        const invalid = invoke(['doctor', 'target']);
+        assert.equal(invalid.code, 2);
+        assert.equal(invalid.data.valid, false);
+        assert.ok(invalid.data.findings.length > 0);
+        assert.match(invalid.data.issues[0], /whole file/);
     });
 
     test('keeps running and writes the log when the reader of live output closes early', async () => {
@@ -419,12 +497,18 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         assert.equal(run.code, 0, run.stdout);
         const log = await new Workspace(root).log(run.data.runId);
         const reasons = Object.fromEntries(log.tasks.map(task => [task.taskId, task.error]));
-        assert.match(reasons.secretGate!, /\(\*\*\*\)/);
-        assert.match(reasons.plainGate!, /\(shown\)/);
-        assert.match(reasons.derivedGate!, /\(\*\*\*\)/);
-        assert.match(reasons.envGate!, /\(\*\*\*\)/);
+        // A masked value hides what it was compared with as well.
+        assert.equal(reasons.secretGate, 'Condition not met: ${pw.value} is "***", expected equals (hidden)');
+        assert.equal(reasons.plainGate, 'Condition not met: ${plain.value} is "shown", expected equals "other"');
+        assert.match(reasons.derivedGate!, /is "\*\*\*", expected equals \(hidden\)$/);
+        assert.match(reasons.envGate!, /is "\*\*\*", expected equals \(hidden\)$/);
         assert.ok(!JSON.stringify(log).includes(secret));
         assert.ok(!JSON.stringify(log).includes('synthetic-env-token'));
+        assert.deepEqual(run.data.skipped.map((entry: { taskId: string }) => entry.taskId), ['secretGate', 'plainGate', 'derivedGate', 'envGate']);
+        const plain = spawnSync('node', [cli, 'run', 'gate', '--trust', '--workspace', root, '--inputs-file', '-'],
+            { encoding: 'utf8', env, input: JSON.stringify({ pw: secret, plain: 'shown' }) });
+        assert.ok(plain.stdout.includes('Skipped: plainGate — Condition not met: ${plain.value} is "shown", expected equals "other"'), plain.stdout);
+        assert.ok(!plain.stdout.includes(secret));
     });
 
     test('runs a Windows workspace opened through a subst drive and a UNC path', function () {
@@ -449,9 +533,10 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         assert.equal(spawnSync('cmd.exe', ['/d', '/c', 'subst', letter, root]).status, 0);
         try { run(letter + '\\'); }
         finally { spawnSync('cmd.exe', ['/d', '/c', 'subst', letter, '/d']); }
-        // The administrative share exists on hosted runners; elsewhere the UNC half is not checked.
+        // The administrative share exists on hosted runners, so CI must exercise the UNC half; elsewhere it may be off.
         const unc = '\\\\localhost\\' + canonical[0] + '$' + canonical.slice(2);
         if (fs.existsSync(unc)) { run(unc); }
+        else { assert.ok(!process.env.GITHUB_ACTIONS, `UNC path unavailable on CI: ${unc}`); }
     });
 
     test('names an IDE-only built-in variable that standalone execution cannot provide', () => {
@@ -741,6 +826,23 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         if (process.platform !== 'win32') { assert.ok(childGone(), 'the CLI returned while the timed-out process was still running'); }
         await until(childGone);
         assert.equal(fs.existsSync(path.join(root, 'after')), false);
+    });
+
+    test('a timed-out task with continueOnError lets the next task start only after its processes are gone', () => {
+        longAction(2);
+        fs.writeFileSync(path.join(root, 'check.cjs'), `
+            const fs = require('node:fs');
+            let state = 'gone';
+            try { process.kill(Number(fs.readFileSync('pid', 'utf8')), 0); state = 'alive'; } catch {}
+            fs.writeFileSync('state', state);
+        `);
+        const tasks = JSON.parse(fs.readFileSync(config, 'utf8'))[0].action.tasks;
+        tasks[0].continueOnError = true;
+        tasks[1] = { id: 'after', type: 'command', command: 'node', args: ['check.cjs'], dependsOn: ['long'] };
+        fs.writeFileSync(config, JSON.stringify([action('long', tasks)]));
+        const result = invoke(['run', 'long', '--trust']);
+        assert.equal(result.code, 0, result.stdout);
+        assert.equal(fs.readFileSync(path.join(root, 'state'), 'utf8'), 'gone');
     });
 
     for (const signal of ['SIGINT', 'SIGHUP'] as const) {

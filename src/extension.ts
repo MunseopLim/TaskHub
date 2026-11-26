@@ -1,6 +1,8 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import { profileToCliInputs } from './profileCliInputs';
+import { unzipLocations } from './archiveTaskPaths';
+import { formatConditionNotMet } from './pipelineUtils';
 import { approximateResultBytes, runPipelineEngine, type PipelineEngineHost, type PipelineTaskAttempt, type PipelineTaskOutcome } from './pipelineEngine';
 import { terminateProcessTree } from './processTree';
 import { mergeActions } from './actionCatalog';
@@ -4653,7 +4655,7 @@ async function confirmRunOutdatedInputProfile(
  * CLI가 직접 읽을 수 없으므로, 같은 값을 터미널과 AI 클라이언트에서 다시 쓰는 길은 이 파일이다.
  * 비밀번호 입력은 프로필에 애초에 저장되지 않는다.
  */
-async function exportInputProfileForCli(profile: NamedInputProfile, actionItem: ActionItem | undefined, actionsLoaded: boolean): Promise<void> {
+export async function exportInputProfileForCli(profile: NamedInputProfile, actionItem: ActionItem | undefined, actionsLoaded: boolean): Promise<void> {
     if (!actionItem?.action) {
         vscode.window.showErrorMessage(actionsLoaded
             ? t(
@@ -4693,9 +4695,12 @@ async function exportInputProfileForCli(profile: NamedInputProfile, actionItem: 
     }
 
     // 명령은 워크스페이스 폴더에서 실행한다고 보고, 그 안의 파일은 상대 경로로 쓴다.
-    // cmd·PowerShell은 큰따옴표, POSIX 셸은 작은따옴표로 감싼다.
-    const quote = (value: string) => /^[\w./:@=+-]+$/.test(value) ? value
-        : process.platform === 'win32' ? `"${value}"` : `'${value.replace(/'/g, `'\\''`)}'`;
+    // 작은따옴표 안에서는 PowerShell(VS Code의 Windows 기본 터미널)도 POSIX 셸도 `$`를 펼치지 않는다.
+    // 안의 작은따옴표는 PowerShell은 두 번 써서, POSIX 셸은 따옴표를 닫고 이어 붙여 나타낸다.
+    // 백슬래시는 Windows 경로 구분자일 때만 그대로 둔다 — POSIX 셸에서는 이스케이프 문자다.
+    const safe = process.platform === 'win32' ? /^[\w./:@=+\\-]+$/ : /^[\w./:@=+-]+$/;
+    const quote = (value: string) => safe.test(value) ? value
+        : process.platform === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, `'\\''`)}'`;
     const relative = workspaceRoot ? path.relative(workspaceRoot, target.fsPath) : '';
     const inputsPath = relative && !relative.startsWith('..') && !path.isAbsolute(relative)
         ? relative.split(path.sep).join('/') : target.fsPath;
@@ -6230,7 +6235,8 @@ async function executeActionPipelineForRun(
                 task.when!.var,
                 Object.assign(Object.create(null), redactSecretsInContext(executionRun, gateContext))
             );
-            return t(`조건이 맞지 않습니다 (${shown}).`, `Condition not met (${shown}).`);
+            // 가린 값과 비교한 상대는 보여 주지 않는다 — 비밀이 무엇과 비교됐는지도 단서다.
+            return formatConditionNotMet(task.when!, shown, shown !== interpolatePipelineVariables(task.when!.var, gateContext), t);
         },
         taskStarted: task => emitTransition(task.id, 'running'),
         taskSettled: (outcome, task) => {
@@ -9816,45 +9822,13 @@ async function handleUnzip(
     redactOutput: boolean,
     capturePasswordDebugOutput: boolean
 ): Promise<{ outputDir: string }> {
-    const inputs = task.inputs || {};
-
-    const resolveValue = (value: any, preferredKeys: string[]): string | undefined => {
-        if (!value) { return undefined; }
-        if (typeof value === 'string') { return value; }
-        for (const key of preferredKeys) {
-            if (typeof value[key] === 'string') { return value[key]; }
-        }
-        if (typeof value.output === 'string') { return value.output; }
-        if (value.output && typeof value.output === 'object') {
-            for (const key of preferredKeys) {
-                if (typeof value.output[key] === 'string') { return value.output[key]; }
-            }
-        }
-        return undefined;
-    };
-
-    const archiveSourceId = inputs.archive || inputs.file;
-    const archiveSource = archiveSourceId ? allResults[archiveSourceId] : undefined;
-    let archivePath = typeof task.archive === 'string' ? task.archive : undefined;
-    if (!archivePath) {
-        archivePath = resolveValue(archiveSource, ['path', 'archivePath']);
-    }
+    // 압축 파일·해제 위치를 고르는 규칙은 독립 실행기와 공유한다.
+    const locations = unzipLocations(task, allResults);
+    const archivePath = locations.archive;
     if (!archivePath) {
         throw new Error(t(`unzip 태스크 '${task.id}'에는 'inputs.archive', 'inputs.file' 또는 'archive' 속성으로 지정한 압축 파일 경로가 필요합니다.`, `Unzip task '${task.id}' requires an archive path via 'inputs.archive', 'inputs.file', or the 'archive' property.`));
     }
-
-    const destinationSourceId = inputs.destination;
-    const destinationSource = destinationSourceId ? allResults[destinationSourceId] : undefined;
-    let outputDir = typeof task.destination === 'string' ? task.destination : undefined;
-    if (!outputDir) {
-        outputDir = resolveValue(destinationSource, ['path', 'outputDir']);
-    }
-    if (!outputDir) {
-        outputDir = resolveValue(archiveSource, ['dir']);
-    }
-    if (!outputDir) {
-        outputDir = path.dirname(archivePath);
-    }
+    const outputDir = locations.destination ?? path.dirname(archivePath);
 
     // `zip` 과 같은 기준점. 예전에는 `handleUnzip` 이 `cwd` 를 아예 무시해,
     // 같은 설정이 zip 에서는 듣고 unzip 에서는 안 듣는 비대칭이 있었다.

@@ -309,6 +309,9 @@ suite('Password taint and redaction', function () {
             `조건 스킵이 verbose 로그에 남지 않았다 — 이 테스트가 겨누는 줄이 없다:\n${verbose}`);
         assert.ok(!verbose.includes(secret), `비밀번호가 조건 사유로 샜다:\n${verbose}`);
         assert.ok(verbose.includes('***'), `사유의 값이 자리표시자로 바뀌지 않았다:\n${verbose}`);
+        // 비밀이 무엇과 비교됐는지도 단서이므로 기대값도 숨긴다.
+        assert.ok(!verbose.includes('definitely-not-the-password'), `비밀과 비교한 값이 사유에 남았다:\n${verbose}`);
+        assert.ok(/expected equals \(hidden\)|조건 equals \(숨김\)/.test(verbose), `기대값을 숨긴 표시가 없다:\n${verbose}`);
     });
 
     test('password switch case 일치 결과는 명령·보고서·오류에서 가린다', async () => {

@@ -121,6 +121,28 @@ suite('Shared pipeline engine', () => {
         assert.ok(events.includes('timeout:long'));
     });
 
+    test('settles a timed-out task only after the work the host stops has finished', async () => {
+        const tasks = [
+            { id: 'long', type: 'command', timeoutSeconds: 0.02, continueOnError: true },
+            { id: 'next', type: 'command', dependsOn: ['long'] },
+        ] as Task[];
+        let stopped = false;
+        const { host, events } = makeHost(tasks, { long: delay(1_000), next: async () => { events.push('next saw stopped=' + stopped); return {}; } });
+        const prepare = host.prepare;
+        host.prepare = task => ({ ...prepare(task), onTimeout: () => new Promise<void>(resolve => setTimeout(() => { stopped = true; resolve(); }, 50)) });
+        await runPipelineEngine(host);
+        assert.ok(events.includes('next saw stopped=true'), events.join(','));
+    });
+
+    test('settles a timed-out task even when stopping its work fails', async () => {
+        const tasks = [{ id: 'long', type: 'command', timeoutSeconds: 0.02 }] as Task[];
+        const { host } = makeHost(tasks, { long: delay(1_000) });
+        const prepare = host.prepare;
+        host.prepare = task => ({ ...prepare(task), onTimeout: () => Promise.reject(new Error('cleanup failed')) });
+        const { failures } = await runPipelineEngine(host);
+        assert.equal(failures[0].error.name, 'TaskTimeoutError');
+    });
+
     test('stops running siblings and throws when the combined result limit is exceeded', async () => {
         const tasks = [
             { id: 'big', type: 'command', parallel: true },

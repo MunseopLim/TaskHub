@@ -97,7 +97,9 @@ function outputAvailabilityLabel(task: TaskRunLogRecord): string {
         case 'terminal': return t('터미널로 스트림되어 저장되지 않음', 'Streamed to a terminal and not stored');
         case 'background-one-shot': return t('백그라운드 one-shot이라 저장되지 않음', 'Not stored for a background one-shot');
         case 'capture-truncated': return t('캡처 상한을 넘어 저장되지 않음', 'Not stored because the capture limit was exceeded');
-        case 'not-applicable': return t('해당 없음', 'Not applicable');
+        case 'not-applicable': return task.output.notCaptured === true
+            ? t('CLI를 --capture-output 없이 실행해 저장되지 않음', 'Not stored (the CLI ran without --capture-output)')
+            : t('해당 없음', 'Not applicable');
     }
 }
 

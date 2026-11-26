@@ -114,6 +114,45 @@ suite('Doctor', () => {
         assert.ok(findings.some(f => f.code === 'duplicate.action.id'));
     });
 
+    test('places a task finding inside its own action when other actions reuse the task id', () => {
+        const v = compileValidator();
+        const actions = [
+            { id: 'folder', title: 'F', children: [
+                { id: 'first', title: 'First', action: { description: 'd', tasks: [{ id: 'build', type: 'shell', command: 'echo ok' }] } },
+            ] },
+            { id: 'second', title: 'Second', action: { description: 'd', tasks: [
+                { id: 'build', type: 'writeFile', path: 'x.txt', content: '${missing.output}' },
+                { id: 'build', type: 'shell', command: 'echo dup' },
+            ] } },
+        ];
+        const input = makeInput(actions);
+        const lines = input.rawText.split('\n');
+        const secondStart = lines.findIndex(line => line.includes('"second"'));
+        const buildLines = lines.map((line, index) => line.includes('"build"') ? index + 1 : 0).filter(Boolean);
+        const findings = runDoctor([input], v);
+        const unresolved = findings.find(f => f.code === 'variable.unresolved');
+        const duplicate = findings.find(f => f.code === 'duplicate.task.id');
+        assert.ok(unresolved && duplicate, codes(findings).join(','));
+        assert.ok(unresolved.range.startLine > secondStart, 'the finding belongs to the second action, not the first `build`');
+        assert.equal(unresolved.range.startLine, buildLines[1]);
+        assert.equal(duplicate.range.startLine, buildLines[2]);
+    });
+
+    test('places a duplicate task id at the duplicate when the action and an item share that id', () => {
+        const v = compileValidator();
+        const input = makeInput([{ id: 'build', title: 'B', action: { description: 'd', tasks: [
+            { id: 'build', type: 'quickPick', items: [{ id: 'build', label: 'x' }] },
+            { id: 'build', type: 'shell', command: 'echo 2' },
+        ] } }]);
+        const lines = input.rawText.split('\n');
+        const shellLine = lines.findIndex(line => line.includes('echo 2'));
+        const duplicateIdLine = lines.slice(0, shellLine).map((line, index) => line.includes('"id": "build"') ? index + 1 : 0)
+            .filter(Boolean).pop();
+        const duplicate = runDoctor([input], v).find(f => f.code === 'duplicate.task.id');
+        assert.ok(duplicate);
+        assert.strictEqual(duplicate.range.startLine, duplicateIdLine);
+    });
+
     test('flags duplicate task ids within a single action', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([

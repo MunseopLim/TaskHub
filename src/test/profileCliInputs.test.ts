@@ -46,6 +46,20 @@ suite('Input profile export for the CLI', () => {
         assert.deepEqual(results(JSON.parse(JSON.stringify(exported.inputs))), saved);
     });
 
+    test('uses item ids where saved, labels otherwise, and skips a selection the task can no longer hold', () => {
+        const tasks = [
+            { id: 'mixed', type: 'quickPick', canPickMany: true, items: [{ id: 'a', label: 'A' }, 'B'] },
+            { id: 'single', type: 'quickPick', items: ['x', 'y'] },
+        ] as Task[];
+        const exported = profileToCliInputs(profile({
+            mixed: { value: 'A', label: 'A', labelList: ['A', 'B'], _itemIds: ['a', null] },
+            // Saved while `single` still allowed several picks.
+            single: { value: 'x', label: 'x', labelList: ['x', 'y'] },
+        }, tasks), tasks, root);
+        assert.deepEqual(exported.inputs.mixed, ['a', 'B']);
+        assert.deepEqual(exported.skippedTaskIds, ['single']);
+    });
+
     test('keeps paths outside the workspace absolute', () => {
         const tasks = [{ id: 'file', type: 'fileDialog' }] as Task[];
         const outside = path.join(os.tmpdir(), 'elsewhere.bin');

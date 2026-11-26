@@ -508,6 +508,90 @@ function skipToTopLevelComma(text: string, from: number, closeCh: string): numbe
     return -1;
 }
 
+/** Offset just past the JSON object or array that starts at `start`, or -1. */
+export function jsonValueEnd(text: string, start: number): number {
+    let depth = 0;
+    for (let index = start; index < text.length; index++) {
+        const char = text[index];
+        if (char === '"') {
+            for (index++; index < text.length && text[index] !== '"'; index++) {
+                if (text[index] === '\\') { index++; }
+            }
+        } else if (char === '{' || char === '[') {
+            depth++;
+        } else if (char === '}' || char === ']') {
+            if (--depth === 0) { return index + 1; }
+        }
+    }
+    return -1;
+}
+
+interface TextSpan { start: number; end: number }
+
+/** Where an action and each of its tasks (in order) are written in an actions file. */
+export interface ActionSpan extends TextSpan {
+    tasks: (TextSpan & { id: unknown })[];
+}
+
+/**
+ * Text offsets of each action object and its task objects, by action id (the first definition wins).
+ * Folders' `children` are searched too. Task-level findings are placed inside their own task with
+ * this, since task ids such as `build` repeat across actions.
+ */
+export function locateActionSpans(text: string): Map<string, ActionSpan> {
+    const spans = new Map<string, ActionSpan>();
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); } catch { return spans; }
+    const lineStarts = [0];
+    for (let index = 0; index < text.length; index++) {
+        if (text.charCodeAt(index) === 0x0A) { lineStarts.push(index + 1); }
+    }
+    const spanAt = (pointer: string): TextSpan | undefined => {
+        const location = locateJsonPointer(text, parsed, pointer);
+        const start = lineStarts[location.startLine - 1] + location.startColumn - 1;
+        const end = text[start] === '{' ? jsonValueEnd(text, start) : -1;
+        return end > start ? { start, end } : undefined;
+    };
+    const walk = (items: unknown, base: string) => {
+        if (!Array.isArray(items)) { return; }
+        items.forEach((item: { id?: unknown; action?: { tasks?: unknown }; children?: unknown } | null, index) => {
+            if (!item || typeof item !== 'object') { return; }
+            const pointer = `${base}/${index}`;
+            if (typeof item.id === 'string' && item.action && !spans.has(item.id)) {
+                const span = spanAt(pointer);
+                if (span) {
+                    const tasks = Array.isArray(item.action.tasks) ? item.action.tasks : [];
+                    spans.set(item.id, { ...span, tasks: tasks.flatMap((task: { id?: unknown } | null, taskIndex: number) => {
+                        const taskSpan = task && typeof task === 'object' ? spanAt(`${pointer}/action/tasks/${taskIndex}`) : undefined;
+                        return taskSpan ? [{ ...taskSpan, id: task!.id }] : [];
+                    }) });
+                }
+            }
+            walk(item.children, `${pointer}/children`);
+        });
+    };
+    walk(parsed, '');
+    return spans;
+}
+
+let actionSpanCache: { text: string; spans: Map<string, ActionSpan> } | undefined;
+
+/**
+ * Like {@link findIdLine} for a task id, but inside the `occurrence`-th task with that id in its own
+ * action — not at an earlier action's task, the action's own id, or a quickPick item id.
+ */
+function findTaskIdLine(text: string, actionId: unknown, taskId: string, occurrence = 0): DoctorFinding['range'] {
+    if (actionSpanCache?.text !== text) { actionSpanCache = { text, spans: locateActionSpans(text) }; }
+    const action = typeof actionId === 'string' ? actionSpanCache.spans.get(actionId) : undefined;
+    const task = action?.tasks.filter(candidate => candidate.id === taskId)[occurrence];
+    if (!task) { return findIdLine(text, taskId, occurrence); }
+    const escaped = taskId.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    const re = new RegExp(`"id"\\s*:\\s*"${escaped}"`, 'g');
+    re.lastIndex = task.start;
+    const match = re.exec(text);
+    return match && match.index < task.end ? offsetToRange(text, match.index) : offsetToRange(text, task.start);
+}
+
 /**
  * Locate the line + column of `"id": "<actionId>"` (or task id) in the
  * source — used by checks where we know the offending action/task by id
@@ -560,7 +644,7 @@ function checkDuplicateIds(actions: ActionItem[], input: DoctorInput): DoctorFin
                         findings.push({
                             filePath: input.filePath,
                             sourceLabel: input.sourceLabel,
-                            range: findIdLine(input.rawText, task.id, count),
+                            range: findTaskIdLine(input.rawText, item.id, task.id, count),
                             severity: 'error',
                             code: 'duplicate.task.id',
                             message: `Action '${item.id ?? '(unknown)'}' has duplicate task id '${task.id}'.`,
@@ -580,7 +664,7 @@ function checkDuplicateIds(actions: ActionItem[], input: DoctorInput): DoctorFin
                             findings.push({
                                 filePath: input.filePath,
                                 sourceLabel: input.sourceLabel,
-                                range: findIdLine(input.rawText, task.id),
+                                range: findTaskIdLine(input.rawText, item.id, task.id),
                                 severity: used.length === 0 ? 'warning' : 'error',
                                 code: 'when.operators',
                                 message: used.length === 0
@@ -600,7 +684,7 @@ function checkDuplicateIds(actions: ActionItem[], input: DoctorInput): DoctorFin
                                 findings.push({
                                     filePath: input.filePath,
                                     sourceLabel: input.sourceLabel,
-                                    range: findIdLine(input.rawText, task.id),
+                                    range: findTaskIdLine(input.rawText, item.id, task.id),
                                     severity: 'error',
                                     code: 'when.regex',
                                     message: `Task '${item.id ?? '(unknown)'}.${task.id}' has an invalid 'when.matches' regex: ${e.message ?? e}`,
@@ -645,7 +729,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                         findings.push({
                             filePath: input.filePath,
                             sourceLabel: input.sourceLabel,
-                            range: findIdLine(input.rawText, task.id),
+                            range: findTaskIdLine(input.rawText, item.id, task.id),
                             severity: 'error',
                             code: 'capture.reserved',
                             message: `Capture name '${rule.name}' in task '${item.id}.${task.id}' is reserved (it would shadow the built-in task result key). Pick a different name.`,
@@ -655,7 +739,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                         findings.push({
                             filePath: input.filePath,
                             sourceLabel: input.sourceLabel,
-                            range: findIdLine(input.rawText, task.id),
+                            range: findTaskIdLine(input.rawText, item.id, task.id),
                             severity: 'error',
                             code: 'capture.duplicate',
                             message: `Duplicate capture name '${rule.name}' in task '${item.id}.${task.id}'. Each capture in one task must have a unique name.`,
@@ -677,7 +761,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                     findings.push({
                         filePath: input.filePath,
                         sourceLabel: input.sourceLabel,
-                        range: findIdLine(input.rawText, task.id),
+                        range: findTaskIdLine(input.rawText, item.id, task.id),
                         severity: 'error',
                         code: 'capture.regex',
                         message: `Task '${item.id}.${task.id}' capture '${rule.name}' has invalid regex: ${e.message ?? e}`,
@@ -697,7 +781,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                         findings.push({
                             filePath: input.filePath,
                             sourceLabel: input.sourceLabel,
-                            range: findIdLine(input.rawText, task.id),
+                            range: findTaskIdLine(input.rawText, item.id, task.id),
                             severity: 'warning',
                             code: 'capture.group',
                             message: `Capture '${rule.name}' in task '${item.id}.${task.id}' refers to group ${rule.group}, but the regex defines ${groupCount} capture group(s).`,
@@ -718,7 +802,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                     findings.push({
                         filePath: input.filePath,
                         sourceLabel: input.sourceLabel,
-                        range: findIdLine(input.rawText, task.id),
+                        range: findTaskIdLine(input.rawText, item.id, task.id),
                         severity: 'error',
                         code: 'diagnostics.preset',
                         message: `Task '${item.id}.${task.id}' diagnostics: ${e.message ?? e}`,
@@ -750,7 +834,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                             findings.push({
                                 filePath: input.filePath,
                                 sourceLabel: input.sourceLabel,
-                                range: findIdLine(input.rawText, task.id),
+                                range: findTaskIdLine(input.rawText, item.id, task.id),
                                 severity: 'warning',
                                 code: 'diagnostics.group',
                                 message: `Task '${item.id}.${task.id}' diagnostics: '${String(field)}' refers to group ${value}, but the regex defines ${groupCount} capture group(s).`,
@@ -763,7 +847,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                     findings.push({
                         filePath: input.filePath,
                         sourceLabel: input.sourceLabel,
-                        range: findIdLine(input.rawText, task.id),
+                        range: findTaskIdLine(input.rawText, item.id, task.id),
                         severity: 'error',
                         code: 'diagnostics.regex',
                         message: `Task '${item.id}.${task.id}' diagnostics has invalid regex: ${e.message ?? e}`,
@@ -2873,7 +2957,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'warning',
                 code: 'tool.platform-missing',
                 message: `Task '${item.id}.${task.id}' has no usable 'tool' entry for the current platform (${process.platform}), so it would fail at runtime on this machine. Other platforms' entries are still checked.`,
@@ -2908,7 +2992,7 @@ function analyzeActionTasks(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'info',
                     code: 'quickpick.numeric-label-order',
                     message: `Task '${item.id}.${task.id}' uses integer-like compact QuickPick label(s) ${shown}${remaining}. JavaScript places these labels before other keys in ascending numeric order; use the array items form to preserve authored display order.`,
@@ -2929,7 +3013,7 @@ function analyzeActionTasks(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'error',
                     code: 'quickpick.item-id-duplicate',
                     message: `Task '${item.id}.${task.id}' repeats QuickPick item id ${ids}. Item ids must be unique within the task so remembered and History selections cannot resolve to a different mapping.`,
@@ -3010,7 +3094,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'error',
                 code: 'foreach.when-each',
                 message: `Task '${item.id}.${task.id}' uses the per-item '\${each}' value in 'when.var', but the task-level condition is evaluated before 'forEach' starts. Move the condition into the command/tool being run or remove this reference.`,
@@ -3075,7 +3159,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'warning',
                 code: 'variable.unresolved',
                 message: `Task '${item.id}.${task.id}' has unresolved variable(s) under simulated inputs: ${unresolvedEn.join(', ')}. At runtime these pass through as literal '\${…}'.`,
@@ -3091,7 +3175,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'warning',
                 code: 'variable.dead-alternative',
                 message: `Task '${item.id}.${task.id}': ${chain.literal} resolves, but ${dead.length === 1 ? 'one alternative is' : `${dead.length} alternatives are`} never used — ${dead.map(alt => describeDeadAlternative(alt).en).join('; ')}.`,
@@ -3117,7 +3201,7 @@ function analyzeActionTasks(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'warning',
                     code: 'when.dead-branch',
                     message: `Task '${item.id}.${task.id}' has a 'when' whose outcome never changes: ${frozen.en}. This task ${frozen.runs ? 'always runs, making the condition meaningless' : 'never runs'}.`,
@@ -3149,7 +3233,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'warning',
                 code: 'when.literal-operand',
                 message: `Task '${item.id}.${task.id}' puts a '\${…}' reference in a 'when' operand (${literalOperands.join(', ')}). Only 'when.var' is interpolated — the operand is compared verbatim, so the comparison is against the literal text and never matches a real value. The reference is not a dependency either (0.7.16) — it does not order this task after the one it names, so the comparison simply never matches.`,
@@ -3161,7 +3245,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'warning',
                 code: 'args.array-joined',
                 message: `Task '${item.id}.${task.id}' mixes an array reference (${refs}) with other text inside an 'args' element. Only an element that is exactly '\${…}' expands into one argument per item; here the array is joined with spaces into a single argument, so the boundaries between the items are lost and the program receives one value.`,
@@ -3173,7 +3257,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'info',
                 code: 'quickpick.label-as-argument',
                 message: `Task '${item.id}.${task.id}' passes display label ${mappedLabelRefs.join(', ')} to a command even though that QuickPick defines mapped values. Use the bare reference (for example '\${pick}') or '.value' to pass the execution value; an empty value array then omits the argument. Keep '.label' only when the displayed text is intentionally required.`,
@@ -3186,7 +3270,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'warning',
                 code: 'output.not-captured',
                 message: `Task '${item.id}.${task.id}' references ${refs}, but task ${heads} does not set 'passTheResultToNextTask': true — its output is streamed, not captured, so the reference passes through as a literal '\${…}'.`,
@@ -3227,7 +3311,7 @@ function analyzeActionTasks(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'warning',
                     code: 'output.ignored',
                     message: `Task '${item.id}.${task.id}' defines output ${dead.join(', ')} that the runtime never reads — 'mode'/'language'/'content'/'filePath'/'overwrite' need 'passTheResultToNextTask': true (and 'filePath'/'overwrite' additionally need mode 'file', 'language' mode 'editor'); 'capture'/'diagnostics' need a string output.`,
@@ -3250,7 +3334,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'error',
                 code: 'secret.file-optin',
                 message: `Task '${item.id}.${task.id}' would persist a sensitive runtime value to disk without 'allowSecretContent': true — the runtime refuses this write.`,
@@ -3273,7 +3357,7 @@ function analyzeActionTasks(
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity: 'warning',
                 code: 'secret.allow-unused',
                 message: `Task '${item.id}.${task.id}' sets 'allowSecretContent' but it grants nothing — ${reason.en}.`,
@@ -3299,7 +3383,7 @@ function analyzeActionTasks(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'warning',
                     code: 'shell.interpolated-command',
                     message: `Task '${item.id}.${task.id}' is a 'shell' task that interpolates \${...} into the command string. 'shell' passes the string to a shell verbatim, so a value containing ';', '&&' or '$(...)' runs as a command. Pass such values through the 'args' array, or use type 'command' (argv, each token quoted).`,
@@ -3360,7 +3444,7 @@ function analyzeActionTasks(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'warning',
                     code: 'command.dynamic-interpreter',
                     message: `Task '${item.id}.${task.id}' decides its executable (or its script switch) from an interpolated \${...} value, so what actually runs cannot be determined here. If it resolves to a shell (\`sh -c\`, \`cmd /c\`, \`powershell -Command\`, …), other interpolated values in the same argv become script text and are re-parsed as syntax. Use a fixed executable, or pass values through 'env' so they never appear in the script text.`,
@@ -3371,7 +3455,7 @@ function analyzeActionTasks(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'warning',
                     code: 'command.nested-interpreter',
                     message: `Task '${item.id}.${task.id}' is a 'command' task whose effective argv invokes another interpreter (\`cmd /c\`, \`sh -c\`, \`powershell -Command\`, …) with an interpolated \${...} value in the script it runs. argv quoting stops at that interpreter — it re-parses the script, so the value can still be read as syntax. Pass the value through the child's own argv, or hand it over via 'env' so it never appears in the script text.`,
@@ -3405,7 +3489,7 @@ function analyzeActionTasks(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'error',
                     code: 'path.outside-workspace',
                     message: `Task '${item.id}.${task.id}' ${kind} resolves to '${resolved}', outside the workspace. The runtime will refuse to write here.`,
@@ -3470,7 +3554,7 @@ function analyzeDependsOn(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'error',
                     code: 'dependsOn.self',
                     message: `Task '${item.id}.${task.id}' depends on itself.`,
@@ -3482,7 +3566,7 @@ function analyzeDependsOn(
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, task.id),
+                    range: findTaskIdLine(input.rawText, item.id, task.id),
                     severity: 'error',
                     code: 'dependsOn.missing',
                     message: `Task '${item.id}.${task.id}' depends on unknown task id '${dep}'.`,
@@ -3499,7 +3583,7 @@ function analyzeDependsOn(
         findings.push({
             filePath: input.filePath,
             sourceLabel: input.sourceLabel,
-            range: findIdLine(input.rawText, cycle[0]),
+            range: findTaskIdLine(input.rawText, item.id, cycle[0]),
             severity: 'error',
             code: 'dependsOn.cycle',
             message: `Task dependency cycle in action '${item.id}' (includes auto-inferred deps from \${id.x} references): ${path}.`,
@@ -3524,7 +3608,7 @@ function checkParallelInteractive(actions: ActionItem[], input: DoctorInput): Do
         findings.push({
             filePath: input.filePath,
             sourceLabel: input.sourceLabel,
-            range: findIdLine(input.rawText, task.id),
+            range: findTaskIdLine(input.rawText, item.id, task.id),
             severity: 'warning',
             code: 'parallel.interactive',
             message: `Task '${item.id}.${task.id}' is '${task.type}' with 'parallel: true', but interactive prompts are serialized at runtime via a UI mutex — concurrent execution does not apply to the dialog itself. Remove 'parallel: true' or move the interactive prompt out of the parallel pool.`,
@@ -3560,7 +3644,7 @@ function checkInteractiveTerminal(actions: ActionItem[], input: DoctorInput): Do
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
-                range: findIdLine(input.rawText, task.id),
+                range: findTaskIdLine(input.rawText, item.id, task.id),
                 severity,
                 code,
                 message,

@@ -1,8 +1,10 @@
 import * as path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
+import { unzipLocations } from '../archiveTaskPaths';
 import { createZipArchive, extractZipArchive } from '../archiveUtils';
 import { attachPipelineTaskIds, buildBuiltinVariableContext, redactSensitiveBuiltinVariables } from '../builtinVariables';
 import { applyDiagnosticMatchers } from '../diagnosticMatcher';
-import { applyOutputCapture, buildForEachValue, buildTaskGraph, expandArgTemplate, formatGraphIssue,
+import { applyOutputCapture, buildForEachValue, buildTaskGraph, expandArgTemplate, formatConditionNotMet, formatGraphIssue,
     getCommandString, inferTaskDependencies, INTERACTIVE_TASK_TYPES, interpolateCommandPreservingTokens,
     interpolatePipelineVariables, interpolateToolValue, materializeSwitchBranchTask, PipelineBuiltinUnavailableError,
     quickPickUsesItemsFromCommand, resolveForEachItems, resolveTaskWorkingDirectory,
@@ -53,7 +55,7 @@ interface Execution {
     signal: AbortSignal;
     log: ActionRunLogCollector;
     /** Shows command output live, like the extension's terminal. Unset for JSON output and MCP. */
-    onOutput?: OutputListener;
+    onOutput?: ConsoleListener;
     /** Set while a forEach runs so the iterations' outputs are logged once, as the extension does. */
     outputSink?: IterationSink;
 }
@@ -64,6 +66,9 @@ interface IterationSink {
     streams: ProcessStreams[];
     bytes: number;
 }
+
+/** A command's output that was not stored because `--capture-output` was off. */
+const notCaptured = (): TaskRunLogOutput => ({ availability: 'not-applicable', notCaptured: true });
 
 /** Upper bound for the iterations' logged output that a forEach keeps in memory. */
 const ITERATION_LOG_LIMIT = 32 * 1024 * 1024;
@@ -92,9 +97,61 @@ function commandLogOutput(streams: ProcessStreams, exec: Execution): TaskRunLogO
             break;
         }
     }
-    return exec.captureOutput && !exec.sensitive
+    if (exec.sensitive) { return { availability: 'redacted' }; }
+    return exec.captureOutput
         ? { availability: 'captured', stdout: streams.output, stderr: streams.stderr }
-        : { availability: 'redacted' };
+        : notCaptured();
+}
+
+/** Receives command output for a console, whole lines at a time with known secrets masked. */
+export type ConsoleListener = (text: string, stream: 'stdout' | 'stderr', taskId: string) => void;
+
+/** Shorter secrets are not masked in live output; run logs still treat output containing them as sensitive. */
+const CONSOLE_MASK_MIN_LENGTH = 4;
+
+/** Longest partial line held back while waiting for its newline. */
+const CONSOLE_LINE_LIMIT = 64 * 1024;
+
+/**
+ * Adapts a console listener to one process. Output is passed on at line ends (`\n` or `\r`, so progress
+ * lines still update live) with known secrets masked, longest first so an overlapping shorter one cannot
+ * leave part of a longer one visible. A secret printed over several lines is masked too: as many complete
+ * lines as the longest secret spans are held back until the next output shows whether it continues.
+ * Values derived from a secret (encoded, reversed) cannot be recognized.
+ */
+function consoleOutput(exec: Execution, taskId: string): { listener: OutputListener; flush(): void } | undefined {
+    const target = exec.onOutput;
+    if (!target) { return undefined; }
+    const pending = { stdout: '', stderr: '' };
+    const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
+    const secrets = () => [...exec.secrets].map(secret => secret.trim())
+        .filter(value => value.length >= CONSOLE_MASK_MIN_LENGTH).sort((left, right) => right.length - left.length);
+    const mask = (text: string) => secrets().reduce((masked, value) => masked.split(value).join(SECRET_PLACEHOLDER), text);
+    /** Emits the masked text through its last safe line end (everything when `final`), keeping the rest pending. */
+    const release = (stream: 'stdout' | 'stderr', text: string, final: boolean) => {
+        const values = secrets();
+        const masked = mask(text);
+        if (final) { pending[stream] = ''; if (masked) { target(masked, stream, taskId); } return; }
+        // Line ends after which a secret could still continue: hold back as many lines as a secret spans.
+        const spans = Math.max(0, ...values.map(value => value.split(/\r\n|\r|\n/).length - 1));
+        const ends = [...masked.matchAll(/\r\n|\r(?!$)|\n/g)].map(match => match.index! + match[0].length);
+        let cut = ends.length > spans ? ends[ends.length - 1 - spans] : 0;
+        if (!cut && masked.length > CONSOLE_LINE_LIMIT) {
+            // No line end for a long time: release most of it, keeping enough to finish a secret.
+            const longest = values[0]?.length ?? 0;
+            cut = Math.max(0, masked.length - Math.max(0, longest - 1));
+        }
+        pending[stream] = masked.slice(cut);
+        if (cut) { target(masked.slice(0, cut), stream, taskId); }
+    };
+    return {
+        listener: (chunk, stream) => release(stream, pending[stream] + decoders[stream].write(chunk), false),
+        flush: () => {
+            for (const stream of ['stdout', 'stderr'] as const) {
+                release(stream, pending[stream] + decoders[stream].end(), true);
+            }
+        },
+    };
 }
 
 async function executeBody(task: Task, context: Result, exec: Execution): Promise<Result> {
@@ -130,12 +187,15 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         return aggregateForEachResults(values);
     }
 
-    const processTask = (raw: boolean, command: string, args: string[], capture: boolean, show = false) => {
+    const processTask = async (raw: boolean, command: string, args: string[], capture: boolean, show = false) => {
         const env = Object.fromEntries(Object.entries(task.env ?? {}).map(([key, value]) => [key, expand(value)]));
         addCredentialValues(exec.secrets, env);
         const cwd = resolveTaskWorkingDirectory(task.cwd && expand(task.cwd), exec.root)!;
-        return runProcess(raw, command, args, cwd, mergeProcessEnvironment(process.env, env), exec.signal, capture,
-            show ? exec.onOutput : undefined);
+        const shown = show ? consoleOutput(exec, task.id) : undefined;
+        try {
+            return await runProcess(raw, command, args, cwd, mergeProcessEnvironment(process.env, env), exec.signal, capture,
+                shown?.listener);
+        } finally { shown?.flush(); }
     };
     const checkSecretWrite = () => {
         if (exec.sensitive && !task.allowSecretContent) {
@@ -164,13 +224,14 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         const recordOutput = exec.captureOutput && !exec.sensitive;
         const streams = await processTask(raw, command, args, task.passTheResultToNextTask === true || recordOutput, true).catch(error => {
             if (error instanceof ProcessFailure && error.captured) {
-                const logged = commandLogOutput(error.streams, exec);
-                if (exec.captureOutput) { exec.log.recordOutput(task.id, logged); }
+                exec.log.recordOutput(task.id, commandLogOutput(error.streams, exec));
                 // The extension also reports diagnostics of a failed build, the case where they matter most.
                 recordDiagnostics(task, exec, error.streams.output, error.streams.stderr);
-            } else if (error instanceof ProcessInterrupted && exec.captureOutput) {
+            } else if (error instanceof ProcessInterrupted) {
                 // The extension keeps the capture state without content for a stopped command.
-                exec.log.recordOutput(task.id, { availability: exec.sensitive ? 'redacted' : 'captured' });
+                exec.log.recordOutput(task.id, exec.sensitive ? { availability: 'redacted' } : exec.captureOutput ? { availability: 'captured' } : notCaptured());
+            } else if (error instanceof ProcessFailure) {
+                exec.log.recordOutput(task.id, exec.sensitive ? { availability: 'redacted' } : notCaptured());
             }
             throw error;
         });
@@ -183,11 +244,12 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         checkSecretWrite();
         result = writeTaskFile(t, task, context, [exec.root], exec.root, task.type === 'appendFile', exec.sensitive);
     } else if (task.type === 'zip' || task.type === 'unzip') {
-        const previous = (id?: string) => id ? context[id] as Result | undefined : undefined;
-        const from = previous(task.inputs?.archive ?? task.inputs?.file);
-        const dest = previous(task.inputs?.destination);
-        const source = task.archive ? expand(task.archive) : from?.path ?? from?.archivePath ?? from?.output;
-        if (typeof source !== 'string' || !source) { throw new TaskHubError(2, t('압축 파일 경로가 필요합니다.', 'An archive path is required.')); }
+        // The extension's rules: zip names its archive itself, unzip may take it from an earlier result.
+        const locations = task.type === 'unzip'
+            ? unzipLocations({ ...task, archive: task.archive && expand(task.archive), destination: task.destination && expand(task.destination) }, context)
+            : { archive: task.archive ? expand(task.archive) : undefined, destination: undefined };
+        const source = locations.archive;
+        if (!source) { throw new TaskHubError(2, t('압축 파일 경로가 필요합니다.', 'An archive path is required.')); }
         const cwd = resolveTaskWorkingDirectory(task.cwd && expand(task.cwd), exec.root)!;
         const archive = path.resolve(cwd, source);
         const tool = task.tool && interpolateToolValue(task.tool, context);
@@ -201,9 +263,7 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
             else { await createZipArchive(archive, sources, { signal: exec.signal }); }
             result = { archivePath: archive };
         } else {
-            const target = task.destination ? expand(task.destination) : dest?.path ?? dest?.outputDir ?? from?.dir ?? path.dirname(archive);
-            if (typeof target !== 'string') { throw new TaskHubError(2, t('해제 경로가 필요합니다.', 'An extraction path is required.')); }
-            const outputDir = path.resolve(cwd, target);
+            const outputDir = path.resolve(cwd, locations.destination ?? path.dirname(archive));
             if (tool !== undefined) { await processTask(false, tool, ['x', archive, '-o' + outputDir, '-aoa'], false); }
             else { await extractZipArchive(archive, outputDir, { signal: exec.signal }); }
             result = { outputDir };
@@ -304,7 +364,7 @@ function maskLeaves(value: unknown): unknown {
 const TOTAL_RESULT_LIMIT = 64 * 1024 * 1024;
 
 export async function runPipeline(item: Runnable, root: string, extensionPath: string, inputs: Inputs,
-    signal: AbortSignal, captureOutput: boolean, onOutput?: OutputListener) {
+    signal: AbortSignal, captureOutput: boolean, onOutput?: ConsoleListener) {
     const tasks = item.action.tasks;
     const issues = executionIssues(tasks);
     if (issues.length) { throw new TaskHubError(2, issues.join('\n')); }
@@ -340,6 +400,7 @@ export async function runPipeline(item: Runnable, root: string, extensionPath: s
             || inferTaskDependencies(task, sensitive).size > 0;
         const timeout = new AbortController();
         const taskSignal = AbortSignal.any([runSignal, timeout.signal]);
+        let running: Promise<unknown> | undefined;
         return {
             start(conditionFailure) {
                 const body = (async () => {
@@ -353,10 +414,11 @@ export async function runPipeline(item: Runnable, root: string, extensionPath: s
                 })();
                 pending.add(body);
                 const settle = () => { pending.delete(body); };
-                body.then(settle, settle);
+                running = body.then(settle, settle);
                 return body;
             },
-            onTimeout: () => timeout.abort(),
+            // The process tree is stopped before the task settles, so a following task never races it.
+            onTimeout: () => { timeout.abort(); return running; },
             // Outputs are logged while the body runs, where the complete streams are still available.
             succeeded: () => undefined,
             failed(err) {
@@ -393,7 +455,7 @@ export async function runPipeline(item: Runnable, root: string, extensionPath: s
             skippedReferenceReason: () => t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.'),
             conditionNotMetReason: (task, gateContext) => {
                 const shown = conditionDisplay(task, gateContext, sensitive, secrets);
-                return t(`조건이 맞지 않습니다 (${shown}).`, `Condition not met (${shown}).`);
+                return formatConditionNotMet(task.when!, shown, shown !== interpolatePipelineVariables(task.when!.var, gateContext), t);
             },
             abortInFlight: async inFlight => {
                 stop.abort();

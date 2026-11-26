@@ -193,15 +193,21 @@ function installPromptStubs() {
     window.createQuickPick = () => {
         const accept: Array<() => void> = [];
         const hide: Array<() => void> = [];
-        const event = (listeners: Array<() => void>) => (listener: () => void) => { listeners.push(listener); return { dispose: () => undefined }; };
+        const change: Array<(value: string) => void> = [];
+        const event = <T extends (...args: any[]) => void>(listeners: T[]) => (listener: T) => { listeners.push(listener); return { dispose: () => undefined }; };
         const none = () => ({ dispose: () => undefined });
         const picker: any = {
             items: [], selectedItems: [], activeItems: [], value: '', canSelectMany: false,
-            onDidAccept: event(accept), onDidHide: event(hide),
-            onDidChangeValue: none, onDidChangeSelection: none, onDidChangeActive: none, onDidTriggerButton: none,
+            onDidAccept: event(accept), onDidHide: event(hide), onDidChangeValue: event(change),
+            onDidChangeSelection: none, onDidChangeActive: none, onDidTriggerButton: none,
             show: () => queueMicrotask(() => {
                 const entry = nextInput('quickPick');
                 if (!entry) { for (const listener of [...hide]) { listener(); } return; }
+                // A value that matches no item is typed, as a person would for allowCustom.
+                if (!pick(picker.items, entry.value).length && typeof entry.value === 'string') {
+                    picker.value = entry.value;
+                    for (const listener of [...change]) { listener(entry.value); }
+                }
                 picker.selectedItems = pick(picker.items, entry.value);
                 for (const listener of [...accept]) { listener(); }
             }),
@@ -448,6 +454,49 @@ const EXTRA_FIXTURES: Fixture[] = [
             node('a', ['emit.cjs', 'a'], { parallel: true }),
             node('b', ['emit.cjs', 'b'], { parallel: true }),
             { ...write('joined', '${a.output}+${b.output}'), dependsOn: ['a', 'b'] } as Task,
+        ],
+    },
+    {
+        name: 'quickPick allowCustom에서 기존 항목 선택 (createQuickPick)',
+        tasks: [{ id: 'pick', type: 'quickPick', allowCustom: true, items: ['dev', 'prod'] } as Task, write('chosen', '${pick.value}|${pick.custom}')],
+        inputs: { pick: 'prod' },
+    },
+    {
+        name: 'quickPick allowCustom에서 직접 입력 (createQuickPick)',
+        tasks: [{ id: 'pick', type: 'quickPick', allowCustom: true, items: ['dev', 'prod'] } as Task, write('chosen', '${pick.value}|${pick.custom}')],
+        inputs: { pick: 'staging' },
+    },
+    {
+        name: 'quickPick default가 있으면 createQuickPick으로 선택',
+        tasks: [{ id: 'pick', type: 'quickPick', default: 'dev', items: ['dev', 'prod'] } as Task, write('chosen', '${pick.value}')],
+        inputs: { pick: 'prod' },
+    },
+    {
+        name: 'pathDialog mode both에서 파일 선택',
+        tasks: [{ id: 'any', type: 'pathDialog', mode: 'both' } as Task, write('picked', '${any.name}|${any.count}')],
+        inputs: { any: 'emit.cjs' },
+    },
+    {
+        name: 'pathDialog mode both에서 폴더 선택',
+        tasks: [{ id: 'any', type: 'pathDialog', mode: 'both' } as Task, write('picked', '${any.name}|${any.count}')],
+        inputs: { any: 'assets' },
+    },
+    {
+        name: 'unzip이 앞 태스크 결과에서 압축 파일과 해제 위치를 받음',
+        tasks: [
+            { id: 'seed', type: 'writeFile', path: 'payload/data.txt', content: 'zipped' } as Task,
+            { id: 'pack', type: 'zip', source: ['payload'], archive: 'bundle.zip' } as Task,
+            { id: 'where', type: 'stringManipulation', function: 'trim', input: ' from-result ' } as Task,
+            { id: 'unpack', type: 'unzip', inputs: { archive: 'pack', destination: 'where' } } as Task,
+        ],
+    },
+    {
+        name: 'unzip이 문자열 결과로 받은 압축 파일을 그 폴더에 해제',
+        tasks: [
+            { id: 'seed', type: 'writeFile', path: 'payload/data.txt', content: 'zipped' } as Task,
+            { id: 'pack', type: 'zip', source: ['payload'], archive: 'out/bundle.zip' } as Task,
+            { id: 'name', type: 'stringManipulation', function: 'trim', input: ' out/bundle.zip ' } as Task,
+            { id: 'unpack', type: 'unzip', inputs: { archive: 'name' }, dependsOn: ['pack'] } as Task,
         ],
     },
     {

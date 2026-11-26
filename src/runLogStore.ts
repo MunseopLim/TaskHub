@@ -43,6 +43,11 @@ export interface TaskRunLogOutput {
     stderr?: string;
     truncated?: boolean;
     originalBytes?: number;
+    /**
+     * With `not-applicable`: a command whose output the standalone CLI did not store because it ran without
+     * `--capture-output`. An optional field rather than a new availability value, so older readers keep the log.
+     */
+    notCaptured?: boolean;
 }
 
 export interface TaskRunLogDiagnostics {
@@ -363,6 +368,7 @@ export function parseActionRunLog(value: unknown): ActionRunLog {
             || !isOptionalString(output.stdout)
             || !isOptionalString(output.stderr)
             || (output.truncated !== undefined && typeof output.truncated !== 'boolean')
+            || (output.notCaptured !== undefined && typeof output.notCaptured !== 'boolean')
             || (output.originalBytes !== undefined && (!Number.isInteger(output.originalBytes) || (output.originalBytes as number) < 0))
             || (task.diagnostics !== undefined && !isDiagnosticSummary(task.diagnostics))
             || (task.artifacts !== undefined && (
@@ -730,7 +736,17 @@ async function unlinkIfPresent(filePath: string): Promise<void> {
     try {
         await fs.unlink(filePath);
     } catch (error) {
-        if (!isVanished(error)) { throw error; }
+        if (isVanished(error)) { return; }
+        // Windows reports a file another process is deleting (or still has open for its own unlink) as
+        // EPERM/EBUSY, and the name can linger briefly while the deletion is pending. Give that cleanup a
+        // moment; if the file is then gone, the other process did the same work.
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'EPERM' && code !== 'EBUSY') { throw error; }
+        for (let attempt = 0; attempt < 3; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+            if (await fs.lstat(filePath).then(() => false, statError => isVanished(statError))) { return; }
+        }
+        throw error;
     }
 }
 

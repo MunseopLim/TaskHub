@@ -31,6 +31,7 @@ TaskHub/
 │   │   └── normalization.ts           # tags / line 번호 정규화 헬퍼
 │   ├── pipelineEngine.ts              # 확장·CLI·MCP 공용 태스크 그래프 실행 엔진 (vscode 의존 없음)
 │   ├── profileCliInputs.ts            # 입력 프로필 → CLI 입력 파일 변환
+│   ├── archiveTaskPaths.ts            # zip/unzip의 압축 파일·해제 위치 선택 규칙 (확장·CLI 공용)
 │   ├── pipelineUtils.ts               # 순수 유틸리티 (vscode 의존 없음)
 │   │                                  # - 변수 치환/sanitize, workspace 경로 검증
 │   │                                  # - 쉘 토큰화 + POSIX/PowerShell/Windows native 인자 quoting

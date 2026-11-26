@@ -379,6 +379,54 @@ suite('Action run log storage', () => {
         }
     });
 
+    test('Windows가 삭제 중인 파일에 내는 EPERM은 파일이 이미 사라졌을 때만 넘어간다', async () => {
+        let nonce = 0;
+        let now = Date.parse('2026-08-14T12:00:00.000Z');
+        const store = new RunLogStore(workspaceRoot, () => now, () => `n${++nonce}`);
+        const policy = { maxFiles: 1, retentionDays: 0, maxTotalBytes: 10 * 1024 * 1024 };
+        await store.write(sampleLog(now), policy);
+        const promises = fs.promises as { unlink: typeof fs.promises.unlink };
+        const unlink = promises.unlink;
+        const eperm = () => Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        try {
+            // 다른 프로세스가 지우는 중: 파일은 사라지고 이쪽 unlink는 EPERM을 받는다.
+            promises.unlink = async target => { await unlink(target); throw eperm(); };
+            now += 1000;
+            assert.strictEqual((await store.write(sampleLog(now), policy)).rotationWarning, undefined);
+            // 파일이 그대로 남아 있는 EPERM은 실제 실패다.
+            promises.unlink = async () => { throw eperm(); };
+            now += 1000;
+            assert.ok((await store.write(sampleLog(now), policy)).rotationWarning);
+        } finally {
+            promises.unlink = unlink;
+        }
+    });
+
+    test('회전 중 다른 프로세스가 액션 로그 폴더를 통째로 지워도 경고하지 않는다', async () => {
+        let nonce = 0;
+        let now = Date.parse('2026-08-14T12:00:00.000Z');
+        const store = new RunLogStore(workspaceRoot, () => now, () => `n${++nonce}`);
+        const policy = { maxFiles: 10, retentionDays: 0, maxTotalBytes: 10 * 1024 * 1024 };
+        const first = await store.write(sampleLog(now), policy);
+        const vanished = path.join(path.dirname(path.dirname(first.absolutePath)), 'gone-action');
+        fs.mkdirSync(vanished);
+        const promises = fs.promises as { readdir: typeof fs.promises.readdir };
+        const readdir = promises.readdir;
+        promises.readdir = (async (target: fs.PathLike, options?: unknown) => {
+            if (String(target) === vanished) {
+                fs.rmSync(vanished, { recursive: true, force: true });
+                throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+            }
+            return (readdir as (p: fs.PathLike, o?: unknown) => Promise<unknown>)(target, options);
+        }) as typeof fs.promises.readdir;
+        try {
+            now += 1000;
+            assert.strictEqual((await store.write(sampleLog(now), policy)).rotationWarning, undefined);
+        } finally {
+            promises.readdir = readdir;
+        }
+    });
+
     test('강제 종료로 남은 오래된 임시 로그는 회전 때 지우고 쓰는 중일 수 있는 최근 것은 남긴다', async () => {
         let nonce = 0;
         const now = Date.parse('2026-08-14T12:00:00.000Z');
