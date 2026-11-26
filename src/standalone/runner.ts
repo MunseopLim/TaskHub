@@ -1,12 +1,13 @@
 import * as path from 'node:path';
 import { createZipArchive, extractZipArchive } from '../archiveUtils';
-import { attachPipelineTaskIds, buildBuiltinVariableContext } from '../builtinVariables';
+import { attachPipelineTaskIds, buildBuiltinVariableContext, redactSensitiveBuiltinVariables } from '../builtinVariables';
 import { applyDiagnosticMatchers } from '../diagnosticMatcher';
-import { applyOutputCapture, buildForEachValue, buildTaskGraph, evaluateTaskCondition, expandArgTemplate, formatGraphIssue,
+import { applyOutputCapture, buildForEachValue, buildTaskGraph, expandArgTemplate, formatGraphIssue,
     getCommandString, inferTaskDependencies, INTERACTIVE_TASK_TYPES, interpolateCommandPreservingTokens,
     interpolatePipelineVariables, interpolateToolValue, materializeSwitchBranchTask, PipelineBuiltinUnavailableError,
-    quickPickUsesItemsFromCommand, resolveForEachItems, resolveTaskWorkingDirectory, referencesSkippedTask,
-    taskReferencesSensitiveBuiltin, TaskScheduler, validateTaskGraph, writeWorkspaceFileSync } from '../pipelineUtils';
+    quickPickUsesItemsFromCommand, resolveForEachItems, resolveTaskWorkingDirectory,
+    taskReferencesSensitiveBuiltin, validateTaskGraph, writeWorkspaceFileSync } from '../pipelineUtils';
+import { runPipelineEngine, type PipelineTaskAttempt } from '../pipelineEngine';
 import { mergeProcessEnvironment } from '../processEnvironment';
 import { parsePickLines } from '../quickPickValues';
 import { ActionRunLogCollector, type TaskRunLogOutput } from '../runLogStore';
@@ -15,7 +16,7 @@ import { aggregateForEachResults, transformString, writeTaskFile } from '../task
 import { TaskHubError } from './errors';
 import { inputResult, missingInput, type Inputs } from './inputs';
 import { t } from './language';
-import { ProcessFailure, ProcessInterrupted, runProcess, type ProcessStreams } from './process';
+import { ProcessFailure, ProcessInterrupted, runProcess, type OutputListener, type ProcessStreams } from './process';
 
 type Result = Record<string, unknown>;
 type Runnable = ActionItem & { action: Action };
@@ -51,6 +52,8 @@ interface Execution {
     captureOutput: boolean;
     signal: AbortSignal;
     log: ActionRunLogCollector;
+    /** Shows command output live, like the extension's terminal. Unset for JSON output and MCP. */
+    onOutput?: OutputListener;
     /** Set while a forEach runs so the iterations' outputs are logged once, as the extension does. */
     outputSink?: IterationSink;
 }
@@ -127,11 +130,12 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         return aggregateForEachResults(values);
     }
 
-    const processTask = (raw: boolean, command: string, args: string[], capture: boolean) => {
+    const processTask = (raw: boolean, command: string, args: string[], capture: boolean, show = false) => {
         const env = Object.fromEntries(Object.entries(task.env ?? {}).map(([key, value]) => [key, expand(value)]));
         addCredentialValues(exec.secrets, env);
         const cwd = resolveTaskWorkingDirectory(task.cwd && expand(task.cwd), exec.root)!;
-        return runProcess(raw, command, args, cwd, mergeProcessEnvironment(process.env, env), exec.signal, capture);
+        return runProcess(raw, command, args, cwd, mergeProcessEnvironment(process.env, env), exec.signal, capture,
+            show ? exec.onOutput : undefined);
     };
     const checkSecretWrite = () => {
         if (exec.sensitive && !task.allowSecretContent) {
@@ -158,7 +162,7 @@ async function executeBody(task: Task, context: Result, exec: Execution): Promis
         const command = raw ? expand(template) : interpolateCommandPreservingTokens(template, context);
         const args = (task.args ?? []).flatMap(arg => expandArgTemplate(arg, context));
         const recordOutput = exec.captureOutput && !exec.sensitive;
-        const streams = await processTask(raw, command, args, task.passTheResultToNextTask === true || recordOutput).catch(error => {
+        const streams = await processTask(raw, command, args, task.passTheResultToNextTask === true || recordOutput, true).catch(error => {
             if (error instanceof ProcessFailure && error.captured) {
                 const logged = commandLogOutput(error.streams, exec);
                 if (exec.captureOutput) { exec.log.recordOutput(task.id, logged); }
@@ -272,8 +276,35 @@ function addCredentialValues(secrets: Set<string>, environment: NodeJS.ProcessEn
     }
 }
 
+/** Where the standalone host shows a resolved condition: secrets and values derived from them are masked. */
+function conditionDisplay(task: Task, gateContext: Result, sensitive: ReadonlySet<string>, secrets: ReadonlySet<string>) {
+    const context: Result = { ...redactSensitiveBuiltinVariables(gateContext, SECRET_PLACEHOLDER) };
+    for (const id of sensitive) {
+        if (Object.hasOwn(context, id)) { context[id] = maskLeaves(context[id]); }
+    }
+    let shown = interpolatePipelineVariables(task.when!.var, Object.assign(Object.create(null), context));
+    for (const secret of secrets) {
+        const value = secret.trim();
+        if (value) { shown = shown.split(value).join(SECRET_PLACEHOLDER); }
+    }
+    return shown;
+}
+
+const SECRET_PLACEHOLDER = '***';
+
+function maskLeaves(value: unknown): unknown {
+    if (Array.isArray(value)) { return value.map(maskLeaves); }
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, maskLeaves(entry)]));
+    }
+    return SECRET_PLACEHOLDER;
+}
+
+/** Upper bound of the combined task results kept for later tasks. */
+const TOTAL_RESULT_LIMIT = 64 * 1024 * 1024;
+
 export async function runPipeline(item: Runnable, root: string, extensionPath: string, inputs: Inputs,
-    signal: AbortSignal, captureOutput: boolean) {
+    signal: AbortSignal, captureOutput: boolean, onOutput?: OutputListener) {
     const tasks = item.action.tasks;
     const issues = executionIssues(tasks);
     if (issues.length) { throw new TaskHubError(2, issues.join('\n')); }
@@ -294,77 +325,90 @@ export async function runPipeline(item: Runnable, root: string, extensionPath: s
         const value = inputs[task.id];
         if (task.password && typeof value === 'string' && value) { secrets.add(value); }
     }
-    const context = attachPipelineTaskIds(buildBuiltinVariableContext({ workspaceFolder: root, extensionPath, strict: true }), ids);
-    const scheduler = new TaskScheduler(graph, { maxConcurrency: 4 });
+    const builtins = attachPipelineTaskIds(buildBuiltinVariableContext({ workspaceFolder: root, extensionPath, strict: true }), ids);
     const log = new ActionRunLogCollector(item.id, item.title, Date.now(), tasks);
-    const skipped = new Set<string>();
     const sensitive = new Set<string>();
-    const active = new Map<string, Promise<void>>();
+    const stepResults: Result = Object.create(null);
     const stop = new AbortController();
     const runSignal = AbortSignal.any([signal, stop.signal]);
-    let failure: TaskHubError | undefined;
-    let resultBytes = 0;
+    /** Task bodies that may outlive their task (a timeout). The run ends only after they settle. */
+    const pending = new Set<Promise<unknown>>();
 
-    const execute = async (task: Task) => {
+    const prepare = (task: Task): PipelineTaskAttempt => {
         // Like the extension, envPick yields a variable name, not its value; `${env:...}` references stay sensitive.
         const hidden = task.password === true || taskReferencesSensitiveBuiltin(task, ids)
             || inferTaskDependencies(task, sensitive).size > 0;
         const timeout = new AbortController();
         const taskSignal = AbortSignal.any([runSignal, timeout.signal]);
-        const timer = task.timeoutSeconds ? setTimeout(() => timeout.abort(), Math.min(task.timeoutSeconds * 1000, 2147483647)) : undefined;
-        try {
-            taskSignal.throwIfAborted();
-            if (referencesSkippedTask(task, skipped, context) ||
-                (task.when && !evaluateTaskCondition(task.when, interpolatePipelineVariables(task.when.var, context)))) {
-                skipped.add(task.id);
-                log.skipTask(task.id, t('조건에 따라 건너뜀', 'Skipped by condition'), Date.now());
-            } else {
-                log.startTask(task.id, Date.now());
-                const execution = { root, inputs, sensitive: hidden, secrets, captureOutput, signal: taskSignal, log };
-                const result = await executeBody(task, context, execution);
-                taskSignal.throwIfAborted();
-                resultBytes += Buffer.byteLength(JSON.stringify(result));
-                if (resultBytes > 64 * 1024 * 1024) { throw new TaskHubError(1, t('액션 결과 용량 초과', 'Action result limit exceeded')); }
-                context[task.id] = result;
-                if (execution.sensitive) { sensitive.add(task.id); }
-                log.finishTask(task.id, { status: 'success', finishedAt: Date.now() });
-            }
-            scheduler.markCompleted(task.id);
-        } catch (err) {
-            // System errors can embed interpolated paths, argv or stderr. Only deliberately public messages cross this boundary.
-            const cancelled = runSignal.aborted || (err instanceof TaskHubError && err.exitCode === 130);
-            const detail = cancelled ? t('실행 취소', 'Cancelled') : timeout.signal.aborted ? t('시간 초과', 'Timed out')
-                : err instanceof TaskHubError || err instanceof ProcessFailure ? err.message
-                : err instanceof PipelineBuiltinUnavailableError ? unavailableBuiltinMessage(err)
-                : hidden ? t('민감한 태스크 실패', 'Sensitive task failed') : t('태스크 실행 실패', 'Task execution failed');
-            const exitCode = cancelled ? 130 : err instanceof TaskHubError ? err.exitCode : err instanceof PipelineBuiltinUnavailableError ? 2 : 1;
-            const error = new TaskHubError(exitCode, task.id + ': ' + detail);
-            // Missing or invalid CLI input must not be skipped silently. Configuration errors the extension
-            // continues past (an unavailable built-in, a rejected task shape) keep continueOnError.
-            const continued = task.continueOnError === true && !cancelled
-                && (error.exitCode !== 2 || err instanceof PipelineBuiltinUnavailableError || err instanceof TaskConfigError);
-            // Like the extension, a failed command that used sensitive data never reports its output.
-            if (hidden && (task.type === 'command' || task.type === 'shell')) { log.recordOutput(task.id, { availability: 'redacted' }); }
-            log.finishTask(task.id, { status: continued ? 'continued' : 'failure', finishedAt: Date.now(), error: detail,
-                ...(hidden && !(err instanceof TaskHubError) ? { errorCode: 'sensitive-hidden' as const } : {}),
-                ...(err instanceof ProcessFailure ? { exitCode: err.code, signal: err.signal } : {}) });
-            if (continued) {
-                context[task.id] = {};
-                scheduler.markCompleted(task.id);
-            } else {
-                failure ??= error;
-                scheduler.markFailed(task.id);
-                stop.abort();
-            }
-        } finally { clearTimeout(timer); }
+        return {
+            start(conditionFailure) {
+                const body = (async () => {
+                    if (conditionFailure) { throw conditionFailure.error; }
+                    taskSignal.throwIfAborted();
+                    const execution: Execution = { root, inputs, sensitive: hidden, secrets, captureOutput, signal: taskSignal, log, onOutput };
+                    const result = await executeBody(task, Object.assign(Object.create(null), builtins, stepResults), execution);
+                    taskSignal.throwIfAborted();
+                    if (execution.sensitive) { sensitive.add(task.id); }
+                    return result;
+                })();
+                pending.add(body);
+                const settle = () => { pending.delete(body); };
+                body.then(settle, settle);
+                return body;
+            },
+            onTimeout: () => timeout.abort(),
+            // Outputs are logged while the body runs, where the complete streams are still available.
+            succeeded: () => undefined,
+            failed(err) {
+                // System errors can embed interpolated paths, argv or stderr. Only deliberately public messages cross this boundary.
+                const cancelled = runSignal.aborted || (err instanceof TaskHubError && err.exitCode === 130);
+                const detail = cancelled ? t('실행 취소', 'Cancelled')
+                    : err.name === 'TaskTimeoutError' || timeout.signal.aborted ? t('시간 초과', 'Timed out')
+                    : err instanceof TaskHubError || err instanceof ProcessFailure ? err.message
+                    : err instanceof PipelineBuiltinUnavailableError ? unavailableBuiltinMessage(err)
+                    : hidden ? t('민감한 태스크 실패', 'Sensitive task failed') : t('태스크 실행 실패', 'Task execution failed');
+                const exitCode = cancelled ? 130 : err instanceof TaskHubError ? err.exitCode : err instanceof PipelineBuiltinUnavailableError ? 2 : 1;
+                return {
+                    error: new TaskHubError(exitCode, task.id + ': ' + detail),
+                    // Missing or invalid CLI input must not be skipped silently. Configuration errors the extension
+                    // continues past (an unavailable built-in, a rejected task shape) keep continueOnError.
+                    continuable: !cancelled && (exitCode !== 2 || err instanceof PipelineBuiltinUnavailableError || err instanceof TaskConfigError),
+                    log: {
+                        error: detail,
+                        ...(hidden && !(err instanceof TaskHubError) ? { errorCode: 'sensitive-hidden' as const } : {}),
+                        ...(err instanceof ProcessFailure ? { exitCode: err.code, signal: err.signal } : {}),
+                        // Like the extension, a failed command that used sensitive data never reports its output.
+                        ...(hidden && (task.type === 'command' || task.type === 'shell') ? { output: { availability: 'redacted' as const } } : {}),
+                    },
+                };
+            },
+        };
     };
 
-    while (!scheduler.isFinished()) {
-        for (const id of scheduler.nextReady()) {
-            scheduler.markStarted(id);
-            active.set(id, execute(tasks[graph.nodes.get(id)!.index]).finally(() => active.delete(id)));
-        }
-        await Promise.race(active.values());
+    let failure: TaskHubError | undefined;
+    try {
+        const { failures } = await runPipelineEngine({
+            tasks, graph, maxConcurrency: 4, totalResultLimitBytes: TOTAL_RESULT_LIMIT, builtinVariables: builtins, log, stepResults,
+            prepare,
+            skippedReferenceReason: () => t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.'),
+            conditionNotMetReason: (task, gateContext) => {
+                const shown = conditionDisplay(task, gateContext, sensitive, secrets);
+                return t(`조건이 맞지 않습니다 (${shown}).`, `Condition not met (${shown}).`);
+            },
+            abortInFlight: async inFlight => {
+                stop.abort();
+                await Promise.allSettled(inFlight.values());
+            },
+            resultLimitError: () => new TaskHubError(1, t('액션 결과 용량 초과', 'Action result limit exceeded')),
+            stalledError: () => new TaskHubError(1, t('다음에 실행할 태스크를 결정하지 못했습니다.', 'Could not determine the next task to run.')),
+        });
+        const first = failures[0]?.error;
+        failure = first === undefined ? undefined : first instanceof TaskHubError ? first : new TaskHubError(1, t('태스크 실행 실패', 'Task execution failed'));
+    } catch (error) {
+        failure = error instanceof TaskHubError ? error : new TaskHubError(1, t('액션 실행 실패', 'Action execution failed'));
+    } finally {
+        // A timed-out body is still stopping its process; the log is complete only after it settles.
+        await Promise.allSettled(pending);
     }
     const exitCode = signal.aborted ? 130 : failure?.exitCode ?? 0;
     const outcome = exitCode === 130 ? 'cancelled' : exitCode ? 'failure' : 'success';

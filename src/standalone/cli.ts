@@ -119,7 +119,21 @@ async function main(argv: string[]): Promise<void> {
                 break;
             case 'run':
                 workspace.requireTrust();
-                result = await workspace.run(id, applyInputPairs(await readInputs(values['inputs-file'], abort.signal), values.input), abort.signal);
+                // Command output is shown live as in the extension's terminal; `--json` keeps stdout to one JSON document.
+                let lastStdout: number | undefined;
+                // A reader that closes early (`| head`, a stopped pager) must not crash the run mid-way:
+                // the command would keep running detached and no run log would be written.
+                const closed = new Set<NodeJS.WriteStream>();
+                for (const stream of [process.stdout, process.stderr]) { stream.on('error', () => { closed.add(stream); }); }
+                result = await workspace.run(id, applyInputPairs(await readInputs(values['inputs-file'], abort.signal), values.input), abort.signal,
+                    json ? undefined : (chunk, stream) => {
+                        const target = stream === 'stdout' ? process.stdout : process.stderr;
+                        if (closed.has(target)) { return; }
+                        if (stream === 'stdout') { lastStdout = chunk.at(-1); }
+                        target.write(chunk);
+                    });
+                // Start the summary on its own line after output that did not end with a newline.
+                if (lastStdout !== undefined && lastStdout !== 0x0a) { process.stdout.write('\n'); }
                 process.exitCode = result.exitCode;
                 display = [result.actionId, result.outcome, result.error, result.runId, result.warning].filter(Boolean).join('\n');
                 break;

@@ -723,6 +723,22 @@ export const RUN_LOG_ORPHAN_TEMP_AGE_MS = 10 * 60 * 1000;
 const RUN_LOG_TEMP_NAME = /^\..+\.log\.tmp-[A-Za-z0-9]+$/;
 
 /**
+ * 다른 창이나 CLI가 같은 로그를 동시에 정리할 수 있다. 이미 지워진 파일은 목표를 이룬 것이므로
+ * 실패로 보지 않는다 — 그렇지 않으면 정상 실행에도 "이전 로그 정리 실패" 경고가 뜬다.
+ */
+async function unlinkIfPresent(filePath: string): Promise<void> {
+    try {
+        await fs.unlink(filePath);
+    } catch (error) {
+        if (!isVanished(error)) { throw error; }
+    }
+}
+
+function readDirectoryEntries(directory: string) {
+    return fs.readdir(directory, { withFileTypes: true });
+}
+
+/**
  * 임시 파일에 쓰고 rename하기 전에 extension host가 강제 종료되면 `.<이름>.log.tmp-<nonce>`가
  * 남는다. `*.log`만 세는 회전 대상에서 빠져 파일 수·총 용량 상한에 걸리지 않고 영원히 쌓였다.
  */
@@ -730,7 +746,15 @@ async function sweepOrphanTempFiles(logsRoot: string, now: number): Promise<void
     for (const entry of await fs.readdir(logsRoot, { withFileTypes: true })) {
         if (!entry.isDirectory()) { continue; }
         const actionDir = path.join(logsRoot, entry.name);
-        for (const child of await fs.readdir(actionDir, { withFileTypes: true })) {
+        let children: Awaited<ReturnType<typeof readDirectoryEntries>>;
+        try {
+            children = await readDirectoryEntries(actionDir);
+        } catch (error) {
+            // 그 사이 마지막 로그가 지워져 폴더째 사라졌을 수 있다.
+            if (isVanished(error)) { continue; }
+            throw error;
+        }
+        for (const child of children) {
             if (!child.isFile() || !RUN_LOG_TEMP_NAME.test(child.name)) { continue; }
             const filePath = path.join(actionDir, child.name);
             // 다른 창이 그 사이 rename을 마쳤을 수 있다. 사라진 파일 때문에 회전 전체를 멈추지 않는다.
@@ -756,7 +780,7 @@ async function rotateLogs(
         const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
         for (const file of files) {
             if (file.path !== newestPath && file.mtimeMs < cutoff) {
-                await fs.unlink(file.path);
+                await unlinkIfPresent(file.path);
             }
         }
         files = await collectLogFiles(logsRoot);
@@ -768,7 +792,7 @@ async function rotateLogs(
         const index = files.findIndex(file => file.path !== newestPath);
         if (index < 0) { break; }
         const [oldest] = files.splice(index, 1);
-        await fs.unlink(oldest.path);
+        await unlinkIfPresent(oldest.path);
     }
 
     const maxTotalBytes = Math.max(1, Math.floor(policy.maxTotalBytes));
@@ -777,7 +801,7 @@ async function rotateLogs(
         const index = files.findIndex(file => file.path !== newestPath);
         if (index < 0) { break; }
         const [oldest] = files.splice(index, 1);
-        await fs.unlink(oldest.path);
+        await unlinkIfPresent(oldest.path);
         totalBytes -= oldest.size;
     }
 }

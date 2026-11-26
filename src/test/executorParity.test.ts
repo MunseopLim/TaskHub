@@ -451,6 +451,14 @@ const EXTRA_FIXTURES: Fixture[] = [
         ],
     },
     {
+        name: '병렬 태스크 하나가 실패해도 실행 중인 형제는 끝까지 실행',
+        tasks: [
+            node('fails', ['fail.cjs', '3'], { parallel: true }),
+            node('slow', ['sleep.cjs', '300'], { parallel: true }),
+            { ...write('after', 'never'), dependsOn: ['fails', 'slow'] } as Task,
+        ],
+    },
+    {
         name: 'switch와 forEach 조합은 거부',
         tasks: [{
             id: 'pick', type: 'switch', on: 'x', forEach: ['1'],

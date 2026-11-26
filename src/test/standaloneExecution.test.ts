@@ -45,9 +45,9 @@ suite('Standalone Core, CLI and stdio MCP', function () {
     });
     teardown(async () => { await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
 
-    function invoke(args: string[], inputs?: object) {
+    function invoke(args: string[], inputs?: object, extraEnv?: NodeJS.ProcessEnv) {
         const result = spawnSync('node', [cli, ...args, ...(inputs ? ['--inputs-file', '-'] : []), '--workspace', root, '--json'],
-            { encoding: 'utf8', input: inputs && JSON.stringify(inputs), timeout: 15_000, env });
+            { encoding: 'utf8', input: inputs && JSON.stringify(inputs), timeout: 15_000, env: { ...env, ...extraEnv } });
         assert.ifError(result.error);
         assert.equal(result.stderr, '');
         return { code: result.status, data: JSON.parse(result.stdout), stdout: result.stdout };
@@ -345,6 +345,115 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         assert.equal(spawnSync('node', [cli, 'preview', 'pairs', '--input', 'name=x', '--workspace', root], { encoding: 'utf8', env }).status, 2);
     });
 
+    test('shows command output live without --json and keeps --json stdout to one document', () => {
+        fs.writeFileSync(config, JSON.stringify([action('show', [
+            { id: 'say', type: 'command', command: 'node', args: ['probe.cjs', 'live'] },
+        ])]));
+        const plain = spawnSync('node', [cli, 'run', 'show', '--trust', '--workspace', root], { encoding: 'utf8', env });
+        assert.equal(plain.status, 0, plain.stderr);
+        assert.ok(plain.stdout.startsWith('["live"]'), plain.stdout);
+        assert.match(plain.stdout, /\nshow\nsuccess\n/);
+        assert.equal(plain.stderr, 'diagnostic\n');
+        fs.writeFileSync(path.join(root, 'tail.cjs'), "process.stdout.write('no-newline');");
+        fs.writeFileSync(config, JSON.stringify([action('show', [
+            { id: 'say', type: 'command', command: 'node', args: ['tail.cjs'] },
+        ])]));
+        const tail = spawnSync('node', [cli, 'run', 'show', '--trust', '--workspace', root], { encoding: 'utf8', env });
+        assert.ok(tail.stdout.startsWith('no-newline\nshow\n'), tail.stdout);
+        const json = invoke(['run', 'show', '--trust']);
+        assert.equal(json.code, 0);
+        assert.equal(json.stdout.trim().split('\n').length, 1, json.stdout);
+    });
+
+    test('reports Doctor findings of one action at their positions in the actions file', () => {
+        // Both actions use the task id `build`; Doctor must still attribute each finding to its own action.
+        const actions = [
+            action('other', [{ id: 'build', type: 'writeFile', path: 'o.txt', content: 'fine' }]),
+            action('target', [{ id: 'build', type: 'writeFile', path: 't.txt', content: '${absent.output}' }]),
+        ];
+        const text = JSON.stringify(actions, null, 4);
+        fs.writeFileSync(config, text);
+        const lines = text.split('\n');
+        const targetStart = lines.findIndex(line => line.includes('"target"'));
+        const targetBuild = lines.findIndex((line, index) => index > targetStart && line.includes('"build"')) + 1;
+        type Finding = { range: { startLine: number }; code: string };
+        const unresolved = (findings: Finding[]) => findings.filter(finding => finding.code === 'variable.unresolved')
+            .map(finding => finding.range.startLine);
+        assert.deepEqual(unresolved(invoke(['doctor', 'other']).data.findings), []);
+        assert.deepEqual(unresolved(invoke(['doctor', 'target']).data.findings), [targetBuild]);
+        const display = spawnSync('node', [cli, 'doctor', 'target', '--workspace', root], { encoding: 'utf8', env });
+        assert.ok(display.stdout.includes(`.vscode/actions.json:${targetBuild}:`), display.stdout);
+
+        // An error-level finding decides the exit code of the action it belongs to only.
+        actions[1].action.tasks[0] = { id: 'build', type: 'command', command: 'node', passTheResultToNextTask: true, output: { capture: { name: 'x', regex: '(' } } } as Task;
+        fs.writeFileSync(config, JSON.stringify(actions, null, 4));
+        assert.equal(invoke(['doctor', 'other']).code, 0);
+        assert.equal(invoke(['doctor', 'target']).code, 2);
+    });
+
+    test('keeps running and writes the log when the reader of live output closes early', async () => {
+        fs.writeFileSync(path.join(root, 'chatty.cjs'),
+            "console.log('first'); setTimeout(() => { for (let i = 0; i < 2000; i++) { console.log('line ' + i); } }, 300);");
+        fs.writeFileSync(config, JSON.stringify([action('chatty', [
+            { id: 'talk', type: 'command', command: 'node', args: ['chatty.cjs'] },
+        ])]));
+        const child = spawn('node', [cli, 'run', 'chatty', '--trust', '--workspace', root], { stdio: ['ignore', 'pipe', 'pipe'], env });
+        const closed = once(child, 'close');
+        child.stdout.once('data', () => child.stdout.destroy());
+        const [code] = await closed;
+        assert.equal(code, 0);
+        assert.equal(invoke(['history']).data.runs[0].outcome, 'success');
+    });
+
+    test('logs why a condition skipped a task without its secret value', async () => {
+        fs.writeFileSync(config, JSON.stringify([action('gate', [
+            { id: 'pw', type: 'inputBox', password: true },
+            { id: 'plain', type: 'inputBox' },
+            { id: 'secretGate', type: 'writeFile', path: 'a.txt', content: 'x', when: { var: '${pw.value}', equals: 'other' } },
+            { id: 'plainGate', type: 'writeFile', path: 'b.txt', content: 'x', when: { var: '${plain.value}', equals: 'other' } },
+            { id: 'derived', type: 'stringManipulation', function: 'trim', input: '${pw.value}' },
+            { id: 'derivedGate', type: 'writeFile', path: 'c.txt', content: 'x', when: { var: '${derived.output}', equals: 'other' } },
+            { id: 'envGate', type: 'writeFile', path: 'd.txt', content: 'x', when: { var: '${env:TASKHUB_TEST_TOKEN}', equals: 'other' } },
+        ])]));
+        const run = invoke(['run', 'gate', '--trust'], { pw: secret, plain: 'shown' }, { TASKHUB_TEST_TOKEN: 'synthetic-env-token' });
+        assert.equal(run.code, 0, run.stdout);
+        const log = await new Workspace(root).log(run.data.runId);
+        const reasons = Object.fromEntries(log.tasks.map(task => [task.taskId, task.error]));
+        assert.match(reasons.secretGate!, /\(\*\*\*\)/);
+        assert.match(reasons.plainGate!, /\(shown\)/);
+        assert.match(reasons.derivedGate!, /\(\*\*\*\)/);
+        assert.match(reasons.envGate!, /\(\*\*\*\)/);
+        assert.ok(!JSON.stringify(log).includes(secret));
+        assert.ok(!JSON.stringify(log).includes('synthetic-env-token'));
+    });
+
+    test('runs a Windows workspace opened through a subst drive and a UNC path', function () {
+        if (process.platform !== 'win32') { this.skip(); }
+        fs.writeFileSync(config, JSON.stringify([action('drive', [
+            { id: 'save', type: 'writeFile', path: 'drive.txt', content: 'x', overwrite: true },
+        ])]));
+        const canonical = fs.realpathSync.native(root);
+        const run = (workspace: string) => {
+            fs.rmSync(path.join(root, 'drive.txt'), { force: true });
+            const result = spawnSync('node', [cli, 'run', 'drive', '--trust', '--json', '--workspace', workspace], { encoding: 'utf8', env });
+            assert.equal(result.status, 0, result.stdout + result.stderr);
+            // The workspace boundary check accepts the drive's own files, wherever the drive points.
+            assert.ok(fs.existsSync(path.join(root, 'drive.txt')));
+            const history = spawnSync('node', [cli, 'history', '--json', '--workspace', workspace], { encoding: 'utf8', env });
+            assert.equal(history.status, 0, history.stdout);
+            assert.ok(JSON.parse(history.stdout).runs.length > 0);
+        };
+        const used = new Set(spawnSync('cmd.exe', ['/d', '/c', 'subst'], { encoding: 'utf8' }).stdout.match(/^[A-Z]:/gm) ?? []);
+        const letter = 'TUVWXYZ'.split('').map(l => l + ':').find(l => !used.has(l) && !fs.existsSync(l + '\\'));
+        assert.ok(letter, 'no free drive letter');
+        assert.equal(spawnSync('cmd.exe', ['/d', '/c', 'subst', letter, root]).status, 0);
+        try { run(letter + '\\'); }
+        finally { spawnSync('cmd.exe', ['/d', '/c', 'subst', letter, '/d']); }
+        // The administrative share exists on hosted runners; elsewhere the UNC half is not checked.
+        const unc = '\\\\localhost\\' + canonical[0] + '$' + canonical.slice(2);
+        if (fs.existsSync(unc)) { run(unc); }
+    });
+
     test('names an IDE-only built-in variable that standalone execution cannot provide', () => {
         fs.writeFileSync(config, JSON.stringify([action('editor', [
             { id: 'open', type: 'command', command: 'node', args: ['probe.cjs', '${file}'] },
@@ -628,6 +737,8 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         const result = invoke(['run', 'long', '--trust']);
         assert.equal(result.code, 1, result.stdout);
         assert.equal(result.data.outcome, 'failure');
+        // The run ends only after the timed-out command's process tree is gone.
+        if (process.platform !== 'win32') { assert.ok(childGone(), 'the CLI returned while the timed-out process was still running'); }
         await until(childGone);
         assert.equal(fs.existsSync(path.join(root, 'after')), false);
     });

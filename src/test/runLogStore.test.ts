@@ -360,6 +360,25 @@ suite('Action run log storage', () => {
         assert.ok(fs.existsSync(newest.absolutePath));
     });
 
+    test('다른 창이나 CLI가 먼저 지운 로그 때문에 회전 경고를 내지 않는다', async () => {
+        let nonce = 0;
+        let now = Date.parse('2026-08-14T12:00:00.000Z');
+        const store = new RunLogStore(workspaceRoot, () => now, () => `n${++nonce}`);
+        const policy = { maxFiles: 1, retentionDays: 0, maxTotalBytes: 10 * 1024 * 1024 };
+        await store.write(sampleLog(now), policy);
+        now += 1000;
+        // 회전이 오래된 로그를 지우려는 순간 다른 프로세스가 같은 파일을 먼저 지운 상황.
+        const promises = fs.promises as { unlink: typeof fs.promises.unlink };
+        const unlink = promises.unlink;
+        promises.unlink = async target => { await unlink(target); return unlink(target); };
+        try {
+            const second = await store.write(sampleLog(now), policy);
+            assert.strictEqual(second.rotationWarning, undefined);
+        } finally {
+            promises.unlink = unlink;
+        }
+    });
+
     test('강제 종료로 남은 오래된 임시 로그는 회전 때 지우고 쓰는 중일 수 있는 최근 것은 남긴다', async () => {
         let nonce = 0;
         const now = Date.parse('2026-08-14T12:00:00.000Z');

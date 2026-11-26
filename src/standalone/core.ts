@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getActionsValidator, mergeActions, taskHubRoot, parseAndValidateActionsContent, traverseActionItems } from '../actionCatalog';
-import { runDoctorPerSource } from '../doctor';
+import { locateJsonPointer, runDoctorPerSource } from '../doctor';
 import { resolveWithinWorkspace } from '../pipelineUtils';
 import { buildPreviewReport } from '../previewRun';
 import type { Action, ActionItem } from '../schema';
@@ -10,7 +10,66 @@ import { listActionRunHistory, readActionRunLog, RunLogStore, RUN_LOG_DEFAULT_MA
 import { t } from './language';
 import { TaskHubError } from './errors';
 import type { Inputs } from './inputs';
+import type { OutputListener } from './process';
 import { executionIssues, runPipeline } from './runner';
+
+/** Offset just past the JSON value that starts at `start` (an object or array), or -1. */
+function valueEnd(text: string, start: number): number {
+    let depth = 0;
+    for (let index = start; index < text.length; index++) {
+        const char = text[index];
+        if (char === '"') {
+            for (index++; index < text.length && text[index] !== '"'; index++) {
+                if (text[index] === '\\') { index++; }
+            }
+        } else if (char === '{' || char === '[') {
+            depth++;
+        } else if (char === '}' || char === ']') {
+            if (--depth === 0) { return index + 1; }
+        }
+    }
+    return -1;
+}
+
+/**
+ * The actions file reduced to one action, with every other character blanked so lines and columns
+ * stay those of the original file. Doctor then reports only this action's findings at their real
+ * positions — filtering whole-file findings by position would not work, because Doctor places a
+ * task's finding at the first `"id"` with that task id in the file, which may belong to another action.
+ */
+export function isolateAction(rawText: string, id: string): string | undefined {
+    const text = rawText.replace(/^\uFEFF/, '');
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); } catch { return undefined; }
+    let pointer: string | undefined;
+    const walk = (items: unknown, base: string) => {
+        if (!Array.isArray(items)) { return; }
+        items.forEach((item: { id?: unknown; action?: unknown; children?: unknown } | null, index) => {
+            if (pointer !== undefined || !item || typeof item !== 'object') { return; }
+            if (item.id === id && item.action) { pointer = `${base}/${index}`; return; }
+            walk(item.children, `${base}/${index}/children`);
+        });
+    };
+    walk(parsed, '');
+    if (pointer === undefined) { return undefined; }
+    const lineStarts = [0];
+    for (let index = 0; index < text.length; index++) {
+        if (text[index] === '\n') { lineStarts.push(index + 1); }
+    }
+    const location = locateJsonPointer(text, parsed, pointer);
+    const start = lineStarts[location.startLine - 1] + location.startColumn - 1;
+    const end = valueEnd(text, start);
+    const open = text.indexOf('[');
+    const close = text.lastIndexOf(']');
+    if (end < 0 || open < 0 || close < end) { return undefined; }
+    let isolated = '';
+    for (let index = 0; index < text.length; index++) {
+        const char = text[index];
+        const kept = (index >= start && index < end) || index === open || index === close || char === '\n' || char === '\r';
+        isolated += kept ? char : ' ';
+    }
+    return isolated;
+}
 
 interface WorkspaceOptions {
     trusted?: boolean;
@@ -90,10 +149,13 @@ export class Workspace {
         }) };
     }
 
+    /** Doctor findings inside the action's definition, with their positions in the actions file. */
     validate(id: string) {
         const item = this.action(id);
-        const findings = runDoctorPerSource([{ rawText: JSON.stringify([item], null, 2), sourceLabel: id, filePath: id,
-            workspaceFolder: this.root, workspaceRoots: [this.root], extensionPath: this.extensionPath }], getActionsValidator());
+        // Like the merged catalog, the first source that defines the id provides the action.
+        const source = this.sources().map(candidate => ({ candidate, isolated: isolateAction(candidate.rawText, id) }))
+            .find(entry => entry.isolated !== undefined);
+        const findings = source ? runDoctorPerSource([{ ...source.candidate, rawText: source.isolated! }], getActionsValidator()) : [];
         const issues = executionIssues(item.action.tasks);
         return { actionId: id, valid: !issues.length && !findings.some(f => f.severity === 'error'), findings, issues };
     }
@@ -104,9 +166,10 @@ export class Workspace {
         }
     }
 
-    async run(id: string, inputs: Inputs, signal: AbortSignal) {
+    /** `onOutput` shows command output while it runs; the run log still follows `captureOutput`. */
+    async run(id: string, inputs: Inputs, signal: AbortSignal, onOutput?: OutputListener) {
         this.requireTrust();
-        const result = await runPipeline(this.action(id), this.root, this.extensionPath, inputs, signal, !!this.options.captureOutput);
+        const result = await runPipeline(this.action(id), this.root, this.extensionPath, inputs, signal, !!this.options.captureOutput, onOutput);
         const { actionId, startedAt, finishedAt, outcome, error } = result.log;
         const summary = { actionId, startedAt, finishedAt, outcome, exitCode: result.exitCode, error };
         try {
