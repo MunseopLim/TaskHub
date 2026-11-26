@@ -1,6 +1,7 @@
 # TaskHub
 
 > A VS Code extension that automates repetitive development workflows and provides embedded C/C++ development tooling.
+> The same actions also run without VS Code, from a terminal or a local AI client over MCP.
 
 [한국어](README.md) · [English](README.en.md)
 
@@ -30,6 +31,7 @@
 - **Quick Action Palette** — Fuzzy-search and run any action through the single `TaskHub: Run Any Action…` command. Recently used items appear at the top (count is configurable)
 - **Status Bar Feature Launcher** — Search common tools from the TaskHub status item and quickly reopen the three most recent choices
 - **Problem Matcher** — Surface compiler errors / warnings from build output in the Problems panel (built-in `$gcc` / `$tsc` presets or custom regex)
+- **Terminal CLI · stdio MCP** — List, diagnose, preview, and run the actions in the same `actions.json` with the `taskhub` command, and read run history and logs, without VS Code. A stdio MCP server offers the same tools to local AI clients ([usage (Korean)](docs/features.md#standalone-cli))
 
 ### Sidebar Panels
 - **Actions** — Action buttons in tree grouping, with search and filtering
@@ -134,6 +136,13 @@ View and edit device names, addresses, enabled states, and tags from `devices.js
 2. In VS Code, press `Ctrl+Shift+P` (macOS: `Cmd+Shift+P`) → **Extensions: Install from VSIX...**
 3. Select the downloaded `.vsix` file
 
+### Terminal CLI (optional)
+
+To use TaskHub from a terminal or an MCP client without VS Code, download `taskhub-cli-<version>.tgz` from the same
+[Releases](https://github.com/MunseopLim/TaskHub/releases) page. It requires Node.js 22 or later and npm, and installs
+without contacting a package registry. For the install command, MCP client configuration, and per-command usage, see
+[Standalone CLI (Korean)](docs/features.md#standalone-cli).
+
 To build from source or contribute, see [CONTRIBUTING.md (Korean)](CONTRIBUTING.md).
 
 ---
@@ -167,6 +176,9 @@ Before choosing a tool, check its supported inputs:
 
 TaskHub actions are **executable configuration** that can run commands with your workspace permissions. Do not
 run actions from an untrusted repository or `.taskhub` file. TaskHub is disabled in VS Code Restricted Mode.
+The terminal CLI and MCP server do not use VS Code Workspace Trust: they allow listing, diagnosing, and previewing by
+default, and run actions only when `--trust` is passed at launch. This trust is never stored and cannot be changed
+through MCP tool arguments.
 Every import shows its actions, commands, and file operations before changing `actions.json`, regardless of Doctor
 findings, and reviewing the complete source is the default action. No additional finding does not mean that a
 fixed malicious command is safe; see [TaskHub Doctor (Korean)](docs/features.md#23-taskhub-doctor-action-lint) for the
@@ -189,7 +201,7 @@ The detailed guides below are currently available in Korean.
 | Doc | Description |
 |------|------|
 | [docs/actions.md](docs/actions.md) | `actions.json` authoring, task types, fields, results, and composition examples |
-| [docs/features.md](docs/features.md) | Feature reference for panels, hover, JSON Editor, Hex/Memory Map, and more |
+| [docs/features.md](docs/features.md) | Feature reference for panels, hover, JSON Editor, Hex/Memory Map, terminal CLI and MCP, and more |
 | [docs/architecture.md](docs/architecture.md) | Project structure, key components, data structures, security |
 | [docs/roadmap.md](docs/roadmap.md) | Priorities for unshipped features and technical debt |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, build, test, and contribution guide |

@@ -1086,6 +1086,22 @@ export function shouldSkipForSkippedDependencies(
     return false;
 }
 
+// All switch branches contribute scheduling dependencies, but only the selected
+// branch propagates a skipped dependency into execution.
+export function referencesSkippedTask(task: Task, skipped: ReadonlySet<string>, context: Record<string, unknown>): boolean {
+    if (task.type !== 'switch') { return shouldSkipForSkippedDependencies(task, skipped); }
+    const selector: Task = { id: task.id, type: 'switch', on: task.on, when: task.when };
+    if (shouldSkipForSkippedDependencies(selector, skipped)) { return true; }
+    if (typeof task.on !== 'string' || !task.cases || typeof task.cases !== 'object') { return false; }
+    const selected = interpolatePipelineVariables(task.on, context);
+    const branch = Object.hasOwn(task.cases, selected) ? task.cases[selected] : task.defaultCase;
+    if (!branch) { return false; }
+    let active = task;
+    try { active = materializeSwitchBranchTask(task, branch); }
+    catch { /* The executor reports the specific branch configuration error. */ }
+    return shouldSkipForSkippedDependencies(active, skipped);
+}
+
 /**
  * forEach의 `${each}`는 본문에서만 지역값이다. 반복 소스와 task-level when은
  * 지역값을 만들기 전에 평가되므로 동명 task 참조로 취급해야 한다.

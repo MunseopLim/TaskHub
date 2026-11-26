@@ -1819,3 +1819,76 @@ print(f"{os.environ['TASKHUB_SCHEDULE_NAME']} @ {os.environ['TASKHUB_SCHEDULED_A
 ```
 
 저장된 예약 데이터가 손상돼도 명령은 사용할 수 있습니다. 뷰 제목이나 명령 팔레트의 **AI: 예약 데이터 초기화**에서 확인하면 기존 데이터를 확장 저장소에 백업한 후 빈 목록으로 복구합니다. 정상 데이터는 이 명령으로 초기화하지 않습니다.
+
+## Standalone CLI
+
+기존 VS Code 사용자는 같은 VSIX를 설치하고 Actions 패널과 기존 설정을 계속 사용한다.
+터미널과 AI 클라이언트용 배포 파일은 `taskhub-cli-<버전>.tgz`다. Node.js 22 이상과 npm이
+설치된 PC에 이 파일을 복사하면 사내 레지스트리나 IDE 없이 설치할 수 있다.
+
+```sh
+npm install --global --offline ./taskhub-cli-0.9.0.tgz
+taskhub --help
+```
+
+소스에서 사용할 때는 저장소에서 `npm ci`와 `npm run package`를 실행하고
+`node bin/taskhub.cjs`에 같은 인자를 전달한다. 배포 파일 생성은 `npm run package:cli`를 사용한다.
+
+### 기존 설정 연결
+
+- 기본 작업 폴더는 현재 디렉터리다. `--workspace DIR`의 `.vscode/actions.json`을 직접 읽고 중첩 폴더 안의 액션도 기존 ID로 찾는다. CLI 명령이나 MCP 도구를 호출할 때마다 파일을 다시 읽는다.
+- `--actions FILE`로 다른 위치의 액션 배열을 선택할 수 있다. `--preset FILE`은 기존 프리셋을 함께 읽는다. 확장에서처럼 워크스페이스 항목이 같은 ID의 프리셋 항목보다 우선한다. 상대 경로는 워크스페이스 기준이며 개인 프리셋은 절대 경로로 지정한다. 프리셋만 있는 워크스페이스도 지원한다.
+- 확장의 선택 프리셋, 입력 프로필, 최근 선택은 VS Code 설정이나 저장 상태에 속한다. 독립 실행에서는 프리셋을 명시하고 재사용할 입력을 별도 JSON 객체로 전달한다. 키는 액션 안의 **태스크 ID**다. `links.json`과 `favorites.json`은 확장의 탐색 패널에서 계속 사용한다.
+- `inputBox`는 접두사·접미사를 붙이기 전 문자열, `quickPick`은 항목 ID 또는 표시 이름(다중이면 배열), `envPick`은 변수 이름, 경로 선택은 경로 또는 경로 배열, `confirm`은 `true`를 받는다. 필수 입력을 생략하면 해당 태스크 ID를 반환한다. 실행은 항상 비대화형이며 `--non-interactive`로 명시할 수 있다.
+
+```sh
+taskhub list --workspace /work/project
+taskhub doctor --workspace /work/project --json
+taskhub preview build --workspace /work/project
+taskhub run build --workspace /work/project --trust --inputs-file inputs.json --json
+taskhub history --workspace /work/project --json
+taskhub logs <runId> --workspace /work/project --json
+```
+
+저장소 자체에서 동봉된 예제를 실행하는 예시다. 셸에서는 따옴표 안의 한 줄을 그대로 입력 파일로 저장해도 된다.
+
+```sh
+printf '%s' '{"slot":"array"}' | node bin/taskhub.cjs run demo.quickPick.argv --actions examples/command_shell/actions.json --inputs-file - --trust --capture-output --json
+```
+
+PowerShell에서는 `'{"slot":"array"}' | node bin/taskhub.cjs run demo.quickPick.argv --actions examples/command_shell/actions.json --inputs-file - --trust --capture-output --json`을 사용한다. `--inputs-file -`는 표준 입력에서 JSON을 읽는다. 비밀번호는 파일에 저장할 필요 없이 비밀 저장소의 출력을 파이프로 전달할 수 있다.
+
+### 실행과 로그
+
+조회·검증·미리보기는 읽기 전용이다. `--trust`는 **해당 실행 또는 MCP 프로세스 수명 동안** 지정한 폴더의 액션이 사용자 권한으로 명령을 실행하도록 허용한다. 신뢰 설정은 저장하지 않는다. 명령·셸·파일·압축·문자열 처리와 태스크 그래프를 실행하며, IDE 브라우저·대화형 터미널·분리 실행(`isOneShot`)은 사전 검사에서 거부한다. 에디터·클립보드 내장값을 요구하는 단계는 해당 값이 없으면 실패한다.
+
+`history`는 해당 폴더에 남아 있는 구조화 로그를 조회하므로 확장에서 실행 로그를 켜고 생성한 보고서도 읽을 수 있다. 손상되거나 8 MiB를 넘긴 로그와 다른 계정이 남겨 읽을 권한이 없는 로그·액션 로그 폴더는 건너뛴다. 읽을 수 없는 폴더는 안의 파일 수를 알 수 없으므로 1건으로 센다. CLI의 일반 출력에서는 표준 오류에 경고를 표시하고, JSON과 MCP 이력 응답에서는 건너뛴 수를 `skippedLogs`로 반환한다. 기존 VS Code History 패널의 항목은 VS Code가 관리한다. `runId`는 응답의 워크스페이스 상대 로그 경로다.
+
+기본 로그에는 태스크 상태·시간·실패 정보가 남는다. `--capture-output`을 시작 옵션에 추가하면 실패한 명령을 포함해 민감 정보가 감지되지 않은 태스크의 출력을 기록하고, 에디터·터미널 출력도 로그로 볼 수 있다. 암호 입력·환경 내장값과 그 파생 태스크의 출력은 숨긴다. 외부 프로그램이 자체적으로 읽은 파일이나 환경변수를 출력할 수 있으므로 출력 저장은 검토한 액션에서 켠다.
+
+| 종료 코드 | 의미 |
+| --- | --- |
+| 0 | 성공 |
+| 1 | 실행 실패·시간 초과·내부 오류 |
+| 2 | 인자·설정 오류, 알 수 없는 ID, 필수 입력 누락 |
+| 3 | 워크스페이스 실행 신뢰 필요 |
+| 130 | 실행 취소 |
+
+`--json`은 성공·실패 결과를 표준 출력에 JSON 한 건으로 쓴다. `doctor ACTION`은 해당 액션의 Doctor 진단과 독립 실행 제약을 함께 확인한다. `doctor`는 원본 파일 전체의 위치를 표시한다.
+
+### Stdio MCP
+
+MCP 클라이언트의 로컬 서버 설정 예시다. `command`에는 실제 설치된 실행 파일을 지정한다. Windows에서 클라이언트가 npm의 명령 래퍼를 실행할 수 없으면 `command`를 Node 실행 파일의 절대 경로로 하고 설치된 `taskhub-cli/bin/taskhub.cjs`의 절대 경로를 첫 인자로 추가한다.
+
+```json
+{
+  "mcpServers": {
+    "taskhub": {
+      "command": "taskhub",
+      "args": ["mcp", "--workspace", "/work/project"]
+    }
+  }
+}
+```
+
+`list_actions`, `validate_action`, `preview_action`, `list_run_history`, `get_run_log`로 조회한다. `run_action`을 허용하려면 운영자가 시작 인자에 `--trust`를 추가한다. 도구 인자는 `actionId`, 선택적 `inputs` 또는 로그 조회용 `runId`다. 워크스페이스·프리셋·신뢰 여부는 도구 인자로 바꿀 수 없다. `notifications/cancelled`, 클라이언트 연결 종료, CLI의 Ctrl+C 및 POSIX의 `SIGHUP`은 실행 중인 프로세스 트리 종료를 요청한다. 자식 프로세스는 MCP의 표준 입출력을 상속하지 않는다.

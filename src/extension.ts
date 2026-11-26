@@ -1,13 +1,23 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
+import { referencesSkippedTask } from './pipelineUtils';
+import { terminateProcessTree } from './processTree';
+import { mergeActions } from './actionCatalog';
+export { mergeActions, filterConflictingItems } from './actionCatalog';
+import { aggregateForEachResults, parsePathInfo, transformString, writeTaskFile } from './taskValues';
+export { aggregateForEachResults, parsePathInfo } from './taskValues';
+import { parsePickLines, quickPickEntries, buildQuickPickResult, interpolateQuickPickItems, type QuickPickEntry, type QuickPickResult } from './quickPickValues';
+export type { QuickPickResult } from './quickPickValues';
 import * as vscode from 'vscode';
+import { formatActionPath, performAdditionalActionValidation, getActionsValidator, loadAndValidateActions, parseAndValidateActionsContent, traverseActionItems } from './actionCatalog';
+export { formatActionPath, getActionsLoadErrorPath, getActionsValidator, type ActionsLoadError } from './actionCatalog';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { mergeProcessEnvironment, windowsCmdPath, windowsPowerShellPath } from './processEnvironment';
 import { StringDecoder } from 'string_decoder';
-import { ActionItem, Action as PipelineAction, type QuickPickItem } from './schema';
+import { ActionItem, Action as PipelineAction } from './schema';
 import { NumberBaseHoverProvider, registerHoverCopyCommand } from './numberBaseHoverProvider';
 import type { JsonEditorOpenHistory } from './jsonEditor';
 import { coerceToUri, openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
@@ -150,11 +160,6 @@ function assertUnreachableVariableCompletion(value: never): never {
     throw new Error(`Unsupported variable completion detail: ${String(value)}`);
 }
 
-/** 빌드 때 생성한 검증기를 재사용한다. 활성화 중 Ajv 컴파일을 하지 않는다. */
-export function getActionsValidator(): import('ajv').ValidateFunction<ActionItem[]> {
-    return require(path.join(__dirname, '..', 'dist', 'actionsValidator.js'));
-}
-
 /** 기능을 처음 사용할 때만 별도 CJS 번들을 읽는다. Node의 모듈 캐시가 상태를 공유한다. */
 const openJsonEditor: typeof import('./jsonEditor').openJsonEditor = (...args) =>
     (require('./jsonEditor') as typeof import('./jsonEditor')).openJsonEditor(...args);
@@ -198,118 +203,6 @@ export function createLazyHexEditorProvider(
         openCustomDocument: uri => get().openCustomDocument(uri),
         resolveCustomEditor: (document, panel) => get().resolveCustomEditor(document, panel),
     };
-}
-
-/**
- * Error carrying the file that actually failed to load.
- *
- * The Actions view renders a "failed to load" row whose click target used to
- * be the generic `taskhub.editActions` command — which re-asks which
- * workspace folder to edit, so in a multi-root setup it could open a
- * perfectly healthy file while the broken one stayed hidden. Attaching the
- * path lets the row open the offending file directly.
- */
-export interface ActionsLoadError extends Error {
-    filePath?: string;
-}
-
-export function getActionsLoadErrorPath(error: unknown): string | undefined {
-    const filePath = (error as ActionsLoadError | undefined)?.filePath;
-    return typeof filePath === 'string' && filePath.length > 0 ? filePath : undefined;
-}
-
-function actionsLoadError(filePath: string, message: string): ActionsLoadError {
-    const error = new Error(message) as ActionsLoadError;
-    error.filePath = filePath;
-    return error;
-}
-
-function parseAndValidateActionsContent(
-    fileContent: string,
-    filePath: string,
-    options?: { sourceLabel?: string }
-): ActionItem[] {
-    const validate = getActionsValidator();
-    let parsedJson: any;
-    try { parsedJson = JSON.parse(stripUtf8Bom(fileContent)); } catch (e: any) { throw actionsLoadError(filePath, `Error parsing JSON in ${path.basename(filePath)}: ${e.message}`); }
-    if (validate(parsedJson)) { const sourceLabel = options?.sourceLabel ?? filePath; performAdditionalActionValidation(parsedJson, { sourceLabel, filePath }); return parsedJson; } else { const errors = validate.errors?.map(error => `  - path: '${error.instancePath}' - message: ${error.message}`).join('\n'); throw actionsLoadError(filePath, `Validation failed for ${path.basename(filePath)}:\n${errors}`); }
-}
-
-function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
-    if (!fs.existsSync(filePath)) { return []; }
-    let fileContent: string;
-    try { fileContent = fs.readFileSync(filePath, 'utf-8'); } catch (e: any) { throw actionsLoadError(filePath, `Error reading file ${filePath}: ${e.message}`); }
-    return parseAndValidateActionsContent(fileContent, filePath, options);
-}
-
-interface ActionValidationContext {
-    sourceLabel: string;
-    filePath: string;
-}
-
-export function formatActionPath(parts: string[]): string {
-    return parts.length > 0 ? parts.join(' > ') : '(root)';
-}
-
-function performAdditionalActionValidation(actions: ActionItem[], context: ActionValidationContext): void {
-    const issues: string[] = [];
-    const idLocations = new Map<string, string>();
-
-    const traverse = (items: ActionItem[], breadcrumbs: string[]) => {
-        for (const item of items) {
-            const currentLabel = item.title || item.id || '(unnamed)';
-            const currentPathParts = [...breadcrumbs, currentLabel];
-            const currentPath = formatActionPath(currentPathParts);
-
-            if (item.id) {
-                if (idLocations.has(item.id)) {
-                    const existingPath = idLocations.get(item.id)!;
-                    issues.push(`Duplicate action id '${item.id}' found at '${existingPath}' and '${currentPath}' in ${context.sourceLabel}.`);
-                } else {
-                    idLocations.set(item.id, currentPath);
-                }
-            }
-
-            if (item.action?.tasks) {
-                const taskIds = new Map<string, number>();
-                for (const task of item.action.tasks) {
-                    if (!task?.id) {
-                        continue;
-                    }
-                    if (taskIds.has(task.id)) {
-                        issues.push(`Action '${item.id}' (${currentPath}) in ${context.sourceLabel} has duplicate task id '${task.id}'.`);
-                    } else {
-                        taskIds.set(task.id, 1);
-                    }
-                }
-            }
-
-            if (item.children && item.children.length > 0) {
-                traverse(item.children, currentPathParts);
-            }
-        }
-    };
-
-    traverse(actions, []);
-
-    if (issues.length > 0) {
-        const uniqueIssues = Array.from(new Set(issues));
-        throw actionsLoadError(
-            context.filePath,
-            `Additional validation failed for ${context.sourceLabel}:\n${uniqueIssues.map(issue => `  - ${issue}`).join('\n')}`
-        );
-    }
-}
-
-function traverseActionItems(items: ActionItem[], visitor: (item: ActionItem, pathParts: string[]) => void, breadcrumbs: string[] = []): void {
-    for (const item of items) {
-        const label = item.title || item.id || '(unnamed)';
-        const currentParts = [...breadcrumbs, label];
-        visitor(item, currentParts);
-        if (item.children && item.children.length > 0) {
-            traverseActionItems(item.children, visitor, currentParts);
-        }
-    }
 }
 
 export interface ActionSourceConflictDefinition {
@@ -773,66 +666,6 @@ export function discoverPresets(context: vscode.ExtensionContext): PresetInfo[] 
     }
 
     return presets;
-}
-
-export function mergeActions(
-    existing: ActionItem[],
-    preset: ActionItem[],
-    strategy: 'keep-existing' | 'use-preset'
-): ActionItem[] {
-    const collectIds = (items: ActionItem[], target: Set<string>) => {
-        for (const item of items) {
-            if (item.id) {
-                target.add(item.id);
-            }
-            if (item.children) {
-                collectIds(item.children, target);
-            }
-        }
-    };
-
-    const existingIds = new Set<string>();
-    collectIds(existing, existingIds);
-
-    if (strategy === 'keep-existing') {
-        const filteredPreset = filterConflictingItems(preset, existingIds);
-        return [...existing, ...filteredPreset];
-    }
-
-    // strategy === 'use-preset' — preset wins on conflicts, so drop conflicting items from existing.
-    const presetIds = new Set<string>();
-    collectIds(preset, presetIds);
-    const filteredExisting = filterConflictingItems(existing, presetIds);
-    return [...preset, ...filteredExisting];
-}
-
-/**
- * Recursively filter out items with IDs that conflict with existing IDs
- * @param items Items to filter
- * @param existingIds Set of existing IDs to check against
- * @returns Filtered items without conflicting IDs
- */
-export function filterConflictingItems(items: ActionItem[], existingIds: Set<string>): ActionItem[] {
-    const result: ActionItem[] = [];
-
-    for (const item of items) {
-        // Skip items with conflicting IDs
-        if (item.id && existingIds.has(item.id)) {
-            continue;
-        }
-
-        // Clone the item to avoid mutating the original
-        const clonedItem: ActionItem = { ...item };
-
-        // Recursively filter children if present
-        if (clonedItem.children && clonedItem.children.length > 0) {
-            clonedItem.children = filterConflictingItems(clonedItem.children, existingIds);
-        }
-
-        result.push(clonedItem);
-    }
-
-    return result;
 }
 
 export function findConflictingIds(actions1: ActionItem[], actions2: ActionItem[]): string[] {
@@ -4196,139 +4029,8 @@ async function applyDiagnosticsToCollection(
     return summary;
 }
 
-// Stop/timeout/출력 상한이 겹쳐도 종료를 공유한다. 확인된 종료도 기억해 PID 재사용 후 재신호하지 않는다.
-const pendingProcessTreeKills = new WeakMap<ReturnType<typeof spawn>, Promise<boolean>>();
-
-/**
- * spawn 한 프로세스와 같은 그룹의 자손을 종료한다.
- *
- * POSIX는 그룹에 SIGTERM을 보내 정리할 시간을 1초 주고, 남은 그룹만 SIGKILL로
- * 종료한다. 셸 래퍼가 먼저 종료돼도 자손의 정리를 기다린다. 그룹이 없으면 직접
- * child를 종료한다. Windows의 taskkill /T /F는 협력적 종료를 보장하지 않으므로
- * 기존 강제 트리 종료를 유지한다. 어느 경로든 전체 대기는 최대 2초다.
- */
 export function killProcessTree(child: ReturnType<typeof spawn>): Promise<boolean> {
-    if (!child || typeof child.pid !== 'number') {
-        try { child?.kill(); } catch { /* ignore */ }
-        return Promise.resolve(false);
-    }
-    const pending = pendingProcessTreeKills.get(child);
-    if (pending) { return pending; }
-    const pid = child.pid;
-    // `child.killed`는 종료 여부가 아니라 시그널 전송 여부이므로 쓰지 않는다.
-    const hasExited = () => child.exitCode !== null || child.signalCode !== null;
-    if (hasExited() && (!child.stdout || child.stdout.destroyed) && (!child.stderr || child.stderr.destroyed)) {
-        // 파이프까지 이미 닫힌 이전 실행의 PID는 더 이상 신호 대상으로 삼지 않는다.
-        return Promise.resolve(false);
-    }
-    let groupGone = false;
-    const killDirect = (signal: NodeJS.Signals) => {
-        // 종료를 관찰한 child의 PID를 나중에 다시 사용하지 않는다.
-        if (!hasExited()) { try { child.kill(signal); } catch { /* ignore */ } }
-    };
-    const termination = new Promise<boolean>(resolve => {
-        let settled = false;
-        let groupSignalled = false;
-        let windowsRequestFinished = false;
-        let windowsTreeKilled = false;
-        let graceTimer: ReturnType<typeof setTimeout> | undefined;
-        let pollTimer: ReturnType<typeof setInterval> | undefined;
-        let taskkill: ReturnType<typeof spawn> | undefined;
-
-        const groupExists = () => {
-            if (groupGone) { return false; }
-            try { process.kill(-pid, 0); return true; } catch (error) {
-                // 소멸을 한 번 관찰한 그룹 ID는 재사용될 수 있으므로 다시 신호를 보내지 않는다.
-                groupGone = (error as NodeJS.ErrnoException).code === 'ESRCH';
-                return !groupGone;
-            }
-        };
-        const finish = (treeKilled: boolean) => {
-            if (settled) { return; }
-            settled = true;
-            clearTimeout(deadline);
-            if (graceTimer) { clearTimeout(graceTimer); }
-            if (pollTimer) { clearInterval(pollTimer); }
-            child.removeListener('exit', checkExited);
-            child.removeListener('close', checkExited);
-            resolve(treeKilled);
-        };
-        const checkExited = () => {
-            if (settled) { return; }
-            if (process.platform === 'win32') {
-                if (windowsRequestFinished && hasExited()) { finish(windowsTreeKilled); }
-            } else if (groupSignalled) {
-                // 래퍼의 exit만으로 grace timer를 지우면 SIGTERM을 무시하는 자손이
-                // 남는다. 그룹 소멸을 관찰하면 지연된 SIGKILL도 함께 취소한다.
-                if (!groupExists() && hasExited()) { finish(true); }
-            } else if (hasExited()) {
-                finish(false);
-            }
-        };
-        const deadline = setTimeout(() => {
-            if (settled) { return; }
-            outputChannel.appendLine(`[WARN] Process tree termination for pid ${pid} did not confirm within 2s; continuing.`);
-            if (!groupGone) { killDirect('SIGKILL'); }
-            // taskkill 자체가 멈췄어도 취소 처리는 상한 내에 끝나야 한다.
-            if (taskkill && taskkill.exitCode === null && taskkill.signalCode === null) {
-                try { taskkill.kill(); } catch { /* ignore */ }
-            }
-            finish(false);
-        }, 2000);
-        child.on('exit', checkExited);
-        child.on('close', checkExited);
-
-        if (process.platform === 'win32') {
-            const completeRequest = (treeKilled: boolean) => {
-                if (settled || windowsRequestFinished) { return; }
-                windowsRequestFinished = true;
-                windowsTreeKilled = treeKilled;
-                if (!treeKilled) { killDirect('SIGKILL'); }
-                checkExited();
-            };
-            try {
-                taskkill = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
-            } catch {
-                completeRequest(false);
-                return;
-            }
-            taskkill.on('error', () => completeRequest(false));
-            taskkill.on('close', (code) => {
-                if (settled || windowsRequestFinished) { return; }
-                if (code !== 0) {
-                    outputChannel.appendLine(`[WARN] taskkill /T /F on pid ${pid} exited with ${code}; falling back to direct kill.`);
-                }
-                completeRequest(code === 0);
-            });
-        } else {
-            try {
-                process.kill(-pid, 'SIGTERM');
-                groupSignalled = true;
-            } catch {
-                // detached가 없는 프로세스 등: 같은 방식으로 직접 종료를 시도한다.
-                killDirect('SIGTERM');
-            }
-            checkExited();
-            if (settled) { return; }
-            pollTimer = setInterval(checkExited, 25);
-            graceTimer = setTimeout(() => {
-                checkExited();
-                if (settled) { return; }
-                if (groupSignalled && groupExists()) {
-                    try { process.kill(-pid, 'SIGKILL'); } catch { killDirect('SIGKILL'); }
-                } else if (!groupSignalled) {
-                    killDirect('SIGKILL');
-                }
-                checkExited();
-            }, 1000);
-        }
-    }).then(treeKilled => {
-        // 실패한 살아 있는 대상만 다음 Stop에서 재시도한다. WeakMap이므로 child와 함께 정리된다.
-        if (!treeKilled && !groupGone) { pendingProcessTreeKills.delete(child); }
-        return treeKilled;
-    });
-    pendingProcessTreeKills.set(child, termination);
-    return termination;
+    return terminateProcessTree(child, message => outputChannel.appendLine(message));
 }
 
 /**
@@ -6249,45 +5951,12 @@ async function executeActionPipelineForRun(
      * 인자로 그대로 넘어간다.
      */
     const conditionGate = (task: import('./schema').Task): string | undefined => {
-        let dependencyView = task;
-        if (task.type === 'switch') {
-            // 모든 case는 실행 순서를 잡기 위해 그래프 의존성에 포함하지만, skip
-            // 전파는 **실제로 고른 case만** 봐야 한다. 고르지 않은 case가 조건으로
-            // 꺼진 태스크를 참조한다는 이유로 현재 선택까지 사라지면 switch가
-            // `when` 복제를 줄이기는커녕 더 예측하기 어려워진다.
-            const selectorView = {
-                id: task.id,
-                type: 'switch',
-                on: task.on,
-                when: task.when,
-            } as import('./schema').Task;
-            if (shouldSkipForSkippedDependencies(selectorView, conditionSkipped)) {
-                return t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.');
-            }
-            if (typeof task.on === 'string' && task.cases && typeof task.cases === 'object') {
-                const gateContext = Object.assign(Object.create(null), builtinVariables, stepResults);
-                const selected = interpolatePipelineVariables(task.on, gateContext);
-                const branch = Object.prototype.hasOwnProperty.call(task.cases, selected)
-                    ? task.cases[selected]
-                    : task.defaultCase;
-                if (branch !== undefined) {
-                    try {
-                        dependencyView = materializeSwitchBranchTask(task, branch);
-                    } catch {
-                        // 실행기가 선택한 branch의 구체적인 설정 오류를 보고한다.
-                    }
-                } else {
-                    dependencyView = selectorView;
-                }
-            } else {
-                dependencyView = selectorView;
-            }
-        }
-        if (shouldSkipForSkippedDependencies(dependencyView, conditionSkipped)) {
+        if (!task.when && task.type !== 'switch' && conditionSkipped.size === 0) { return undefined; }
+        const gateContext = Object.assign(Object.create(null), builtinVariables, stepResults);
+        if (referencesSkippedTask(task, conditionSkipped, gateContext)) {
             return t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.');
         }
         if (!task.when) { return undefined; }
-        const gateContext = Object.assign(Object.create(null), builtinVariables, stepResults);
         const resolved = interpolatePipelineVariables(task.when.var, gateContext);
         if (evaluateTaskCondition(task.when, resolved)) { return undefined; }
         // **판정에 쓴 값과 보여 줄 값은 다른 문자열이다.** 이 사유는 그대로
@@ -7721,7 +7390,7 @@ function resolvedQuickPickEntries(task: any, context?: any): QuickPickEntry[] {
     const resolvedItems = context === undefined
         ? items
         : interpolateQuickPickItems(items, context);
-    return quickPickEntries(resolvedItems);
+    return quickPickEntries(resolvedItems, t);
 }
 
 function replayQuickPickEntries(task: any, saved: any, context?: any): QuickPickEntry[] | undefined {
@@ -7854,41 +7523,6 @@ export function savedInputStillValid(task: any, saved: any, context?: any): bool
         }
     }
     return true;
-}
-
-/** 반복 결과에서 흔히 쓰는 후속 참조를 작고 예측 가능한 모양으로 합친다. */
-export function aggregateForEachResults(results: readonly any[]): Record<string, any> {
-    const last = results.length > 0 && results[results.length - 1]
-        && typeof results[results.length - 1] === 'object'
-        ? results[results.length - 1]
-        : undefined;
-    const aggregate: Record<string, any> = last ? { ...last } : {};
-    aggregate.count = results.length;
-
-    const collectStrings = (key: string): string[] => results.flatMap(result => {
-        if (!result || typeof result !== 'object') { return []; }
-        const value = result[key];
-        if (typeof value === 'string') { return [value]; }
-        if (Array.isArray(value)) { return value.filter((entry): entry is string => typeof entry === 'string'); }
-        return [];
-    });
-    const outputs = collectStrings('output');
-    const stderrs = collectStrings('stderr');
-    const paths = results.flatMap(result => {
-        if (!result || typeof result !== 'object') { return []; }
-        for (const key of ['path', 'archivePath', 'outputDir']) {
-            if (typeof result[key] === 'string') { return [result[key]]; }
-        }
-        return [];
-    });
-    aggregate.outputs = outputs;
-    aggregate.stderrs = stderrs;
-    aggregate.paths = paths;
-    if (outputs.length > 0) { aggregate.output = outputs.join('\n'); }
-    if (stderrs.length > 0) {
-        aggregate.stderr = stderrs.join('\n');
-    }
-    return aggregate;
 }
 
 async function executeForEachTask(
@@ -8317,7 +7951,8 @@ async function executeSingleTask(
                     defaultWorkspace
                 )
                 : undefined;
-            result = await handleWriteFile(
+            result = writeTaskFile(
+                t,
                 task,
                 interpolationContext,
                 writeRoots,
@@ -9352,12 +8987,6 @@ export interface FileDialogResult {
     count: number;
 }
 
-export function parsePathInfo(fullPath: string): { path: string, dir: string, name: string, fileNameOnly: string, fileExt: string } {
-    const baseName = path.basename(fullPath);
-    const extension = path.extname(baseName);
-    return { path: fullPath, dir: path.dirname(fullPath), name: baseName, fileNameOnly: path.basename(baseName, extension), fileExt: extension.startsWith('.') ? extension.substring(1) : extension };
-}
-
 export async function handleFileDialog(task: any): Promise<FileDialogResult> {
     // `defaultUri`는 액션 JSON에서 문자열로 오므로 Uri로 승격한다 — 그대로
     // 넘기면 VS Code가 무시해 다이얼로그가 엉뚱한 위치에서 열린다. 명시하지
@@ -9691,277 +9320,8 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
     });
 }
 
-/**
- * `itemsFromCommand`의 stdout 줄을 QuickPick 항목으로 바꾼다.
- *
- * 기본 `lines` 형식은 기존 동작을 그대로 유지한다. `jsonl`은 외부 명령이
- * 표시 문구와 실행값을 분리할 수 있게 하되, 파싱한 객체를 그대로 spread하지
- * 않는다. 명시한 필드만 새 객체로 옮겨 프로토타입·내부 메타데이터 주입을 막고,
- * 오류에는 원문을 싣지 않아 동적 목록에 민감값이 있어도 알림으로 새지 않는다.
- */
-export function parseQuickPickCommandItems(
-    lines: readonly string[],
-    format: unknown = 'lines',
-    excluded: readonly unknown[] = []
-): Array<string | QuickPickItem> {
-    if (format !== 'lines' && format !== 'jsonl') {
-        throw new Error(t(
-            `지원하지 않는 itemsFromCommandFormat '${String(format)}'입니다.`,
-            `Unsupported itemsFromCommandFormat '${String(format)}'.`
-        ));
-    }
-    const exclude = new Set(excluded.map(value => String(value).trim()));
-    if (format === 'lines') {
-        return lines.filter(line => !exclude.has(line));
-    }
-
-    const items: QuickPickItem[] = [];
-    for (let index = 0; index < lines.length; index++) {
-        const raw = lines[index];
-        if (exclude.has(raw)) { continue; }
-        let parsed: unknown;
-        try {
-            parsed = JSON.parse(raw);
-        } catch {
-            throw new Error(t(
-                `itemsFromCommand JSONL ${index + 1}번째 줄이 올바른 JSON이 아닙니다.`,
-                `itemsFromCommand JSONL line ${index + 1} is not valid JSON.`
-            ));
-        }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            throw new Error(t(
-                `itemsFromCommand JSONL ${index + 1}번째 줄은 객체여야 합니다.`,
-                `itemsFromCommand JSONL line ${index + 1} must be an object.`
-            ));
-        }
-        const candidate = parsed as Record<string, unknown>;
-        if (typeof candidate.label !== 'string' || candidate.label.length === 0) {
-            throw new Error(t(
-                `itemsFromCommand JSONL ${index + 1}번째 줄에는 비어 있지 않은 문자열 label이 필요합니다.`,
-                `itemsFromCommand JSONL line ${index + 1} requires a non-empty string label.`
-            ));
-        }
-        if (candidate.id !== undefined
-            && (typeof candidate.id !== 'string' || candidate.id.length === 0 || candidate.id.length > 128)) {
-            throw new Error(t(
-                `itemsFromCommand JSONL ${index + 1}번째 줄의 id는 1~128자 문자열이어야 합니다.`,
-                `itemsFromCommand JSONL line ${index + 1} id must be a string of 1 to 128 characters.`
-            ));
-        }
-        for (const field of ['description', 'detail'] as const) {
-            if (candidate[field] !== undefined && typeof candidate[field] !== 'string') {
-                throw new Error(t(
-                    `itemsFromCommand JSONL ${index + 1}번째 줄의 ${field}은 문자열이어야 합니다.`,
-                    `itemsFromCommand JSONL line ${index + 1} ${field} must be a string.`
-                ));
-            }
-        }
-        if (candidate.value !== undefined
-            && typeof candidate.value !== 'string'
-            && (!Array.isArray(candidate.value)
-                || !candidate.value.every(value => typeof value === 'string'))) {
-            throw new Error(t(
-                `itemsFromCommand JSONL ${index + 1}번째 줄의 value는 문자열 또는 문자열 배열이어야 합니다.`,
-                `itemsFromCommand JSONL line ${index + 1} value must be a string or an array of strings.`
-            ));
-        }
-        if (candidate.args !== undefined
-            && typeof candidate.args !== 'string'
-            && (!Array.isArray(candidate.args)
-                || !candidate.args.every(value => typeof value === 'string'))) {
-            throw new Error(t(
-                `itemsFromCommand JSONL ${index + 1}번째 줄의 args는 문자열 또는 문자열 배열이어야 합니다.`,
-                `itemsFromCommand JSONL line ${index + 1} args must be a string or an array of strings.`
-            ));
-        }
-        if (exclude.has(candidate.label)
-            || (typeof candidate.id === 'string' && exclude.has(candidate.id))) {
-            continue;
-        }
-        const item: QuickPickItem = { label: candidate.label };
-        if (typeof candidate.id === 'string') { item.id = candidate.id; }
-        if (typeof candidate.description === 'string') { item.description = candidate.description; }
-        if (typeof candidate.detail === 'string') { item.detail = candidate.detail; }
-        if (typeof candidate.value === 'string' || Array.isArray(candidate.value)) {
-            item.value = candidate.value as string | string[];
-        }
-        if (typeof candidate.args === 'string' || Array.isArray(candidate.args)) {
-            item.args = typeof candidate.args === 'string'
-                ? [candidate.args]
-                : candidate.args as string[];
-        }
-        items.push(item);
-    }
-    return items;
-}
-
-/**
- * `quickPick` 결과.
- *
- * `label` 은 **보이는 문구**, `value` 는 **명령에 들어가는 값**이다. 항목에
- * `value` 를 적지 않으면 둘이 같으므로 예전 액션은 그대로 동작한다.
- */
-export interface QuickPickResult {
-    /**
-     * 고른 항목의 `value`(적지 않았으면 label). 배열이면 `args` 원소나
-     * `command` 토큰 자리에서 **인자 여러 개**로 펼쳐진다 — 빈 배열은 아무
-     * 인자도 만들지 않으므로 "이 선택지에서는 옵션을 붙이지 않는다" 가 된다.
-     */
-    value: string | string[];
-    /** 고른 항목의 표시 문구. `value` 매핑과 무관하게 **항상 문자열**이다. */
-    label: string;
-    /** 고른 표시 문구의 손실 없는 배열. label에 쉼표가 있어도 경계가 보존된다. */
-    labelList: string[];
-    /** 고른 값 전체를 평평하게 편 배열. 인자 확장용. */
-    valueList: string[];
-    /**
-     * 태스크가 별도로 매핑한 command 인자. 정적 목록 중 하나라도 `args`를
-     * 선언하거나 동적 목록 형식이 JSONL이면 항상 생긴다. 선택 항목에 매핑이
-     * 없거나 직접 입력이면 빈 배열이다. `${taskId.args}`를 `command.args` 원소
-     * 하나로 두면 배열의 각 값이 argv 한 칸씩 된다.
-     */
-    args?: string[];
-    /** 단일 선택이 목록 밖 직접 입력이었는지. History 재실행 식별에도 쓴다. */
-    custom: boolean;
-    /** `canPickMany` 일 때만: 고른 값 전체를 쉼표로 이은 문자열. */
-    values?: string;
-    /** `canPickMany` 일 때만: 고른 표시 문구 전체를 쉼표로 이은 문자열. */
-    labels?: string;
-    /** History/기억 복원용 내부 식별자. actions 변수 API로 사용하지 않는다. */
-    _itemId?: string;
-    /** id가 없는 자리는 null로 보존하는 내부 식별자 배열. */
-    _itemIds?: Array<string | null>;
-}
-
-/** `showQuickPick` 이 돌려주는 항목 객체에 매핑된 값을 얹어 둔다. */
-interface QuickPickEntry extends vscode.QuickPickItem {
-    taskHubValue: string | string[];
-    /** actions.json 항목의 별도 command 인자 매핑. */
-    taskHubArgs?: string[];
-    /** `allowCustom`가 입력 중에 만든 임시 항목. */
-    taskHubCustom?: boolean;
-    /** 기억 복원에서 같은 label 항목을 구분하는 원래 목록 위치. */
-    taskHubSourceIndex?: number;
-    /** actions.json 항목에 명시한 안정 id. */
-    taskHubItemId?: string;
-}
-
-/**
- * 항목이 명령에 넘길 값. 문자열 항목과 `value` 없는 객체 항목은 label 그대로다.
- * 배열은 문자열 원소만 남긴다 — 숫자·객체가 섞이면 무엇을 인자로 넘길지
- * 정의되지 않고, 조용히 `[object Object]` 를 명령에 넣는 것보다 빼는 편이 낫다.
- */
-function quickPickItemValue(item: any, label: string): string | string[] {
-    if (item && typeof item === 'object') {
-        if (typeof item.value === 'string') { return item.value; }
-        if (Array.isArray(item.value)) {
-            return item.value.filter((entry: any) => typeof entry === 'string');
-        }
-    }
-    return label;
-}
-
-/** 항목의 `value`(문자열 또는 문자열 배열)를 원래 모양 그대로 보간한다. */
-function interpolateQuickPickItemValue(value: unknown, context: any): unknown {
-    if (typeof value === 'string') { return interpolatePipelineVariables(value, context); }
-    if (Array.isArray(value)) {
-        return value.map(entry =>
-            typeof entry === 'string' ? interpolatePipelineVariables(entry, context) : entry);
-    }
-    return value;
-}
-
-function interpolateQuickPickItems(items: readonly any[], context: any): any[] {
-    return items.map(item => {
-        if (typeof item === 'string') {
-            return interpolatePipelineVariables(item, context);
-        }
-        return {
-            ...item,
-            label: item.label ? interpolatePipelineVariables(item.label, context) : item.label,
-            description: item.description
-                ? interpolatePipelineVariables(item.description, context)
-                : item.description,
-            detail: item.detail ? interpolatePipelineVariables(item.detail, context) : item.detail,
-            value: interpolateQuickPickItemValue(item.value, context),
-            args: Array.isArray(item.args)
-                ? item.args.map((entry: unknown) => typeof entry === 'string'
-                    ? interpolatePipelineVariables(entry, context)
-                    : entry)
-                : item.args,
-        };
-    });
-}
-
-function quickPickEntries(items: readonly any[]): QuickPickEntry[] {
-    const seenIds = new Set<string>();
-    return items.map((item: any, index: number) => {
-        if (typeof item === 'string') {
-            return { label: item, taskHubValue: item, taskHubSourceIndex: index };
-        }
-        if (item.id !== undefined) {
-            if (typeof item.id !== 'string' || item.id.length === 0 || item.id.length > 128) {
-                throw new Error(t('QuickPick 항목 id는 비어 있지 않은 128자 이하의 문자열이어야 합니다.', 'QuickPick item id must be a non-empty string of at most 128 characters.'));
-            }
-            if (seenIds.has(item.id)) {
-                // 동적 JSONL의 id는 환경변수·password 파생 출력일 수도 있다.
-                // Doctor는 정적 actions.json의 id를 구체적으로 알려 주지만,
-                // 런타임 오류에는 값을 싣지 않아 알림 표면으로 새지 않게 한다.
-                throw new Error(t('QuickPick 항목 id가 중복되었습니다.', 'QuickPick item id is duplicated.'));
-            }
-            seenIds.add(item.id);
-        }
-        return {
-            label: item.label,
-            description: item.description,
-            detail: item.detail,
-            taskHubValue: quickPickItemValue(item, item.label),
-            taskHubArgs: Array.isArray(item.args)
-                ? item.args.filter((entry: unknown): entry is string => typeof entry === 'string')
-                : undefined,
-            taskHubSourceIndex: index,
-            taskHubItemId: item.id,
-        };
-    });
-}
-
-function buildQuickPickResult(
-    selected: readonly QuickPickEntry[],
-    canPickMany: boolean,
-    producesArgs: boolean
-): QuickPickResult {
-    // VS Code 는 넘긴 항목 객체를 그대로 돌려주므로 실행 경로에서는 `taskHubValue`
-    // 가 늘 붙어 있다. 그래도 label 로 떨어지는 길을 남기는 것은, 이 값이 없을 때
-    // `${pick.value}` 가 `undefined` 가 되어 **`when` 분기가 조용히 어긋나기**
-    // 때문이다 — 값이 사라지는 실패는 그 자리에서 드러나지 않는다.
-    const entryValue = (entry: QuickPickEntry): string | string[] =>
-        entry.taskHubValue !== undefined ? entry.taskHubValue : entry.label;
-    const first = selected[0];
-    const valueList = selected.flatMap(entry => {
-        const value = entryValue(entry);
-        return Array.isArray(value) ? value : [value];
-    });
-    const result: QuickPickResult = {
-        value: entryValue(first),
-        label: first.label,
-        labelList: selected.map(entry => entry.label),
-        valueList,
-        custom: selected.length === 1 && selected[0].taskHubCustom === true,
-    };
-    if (producesArgs) {
-        result.args = selected.flatMap(entry => entry.taskHubArgs ?? []);
-    }
-    if (canPickMany) {
-        // `values` 는 예전부터 쉼표로 이은 문자열이었다. 매핑을 쓰지 않으면
-        // 값이 곧 label 이라 예전과 **같은 문자열**이 나온다.
-        result.values = valueList.join(',');
-        result.labels = selected.map(entry => entry.label).join(',');
-    }
-    if (first.taskHubItemId) { result._itemId = first.taskHubItemId; }
-    if (selected.some(entry => !!entry.taskHubItemId)) {
-        result._itemIds = selected.map(entry => entry.taskHubItemId ?? null);
-    }
-    return result;
+export function parseQuickPickCommandItems(lines: readonly string[], format: unknown = 'lines', excluded: readonly unknown[] = []) {
+    return parsePickLines(lines, format, excluded, t);
 }
 
 function requestedQuickPickSelections(
@@ -10202,7 +9562,7 @@ export async function handleQuickPick(
     };
 
     // Convert string items to QuickPickItem format
-    const items = quickPickEntries(task.items);
+    const items = quickPickEntries(task.items, t);
 
     const usesAdvancedPicker = task.default !== undefined
         || task.allowCustom === true
@@ -10420,44 +9780,6 @@ export async function handleEnvPick(task: any, token?: vscode.CancellationToken)
     }
 
     return { value: selected.label };
-}
-
-async function handleWriteFile(
-    task: import('./schema').Task,
-    interpolationContext: any,
-    workspaceRoots: string[],
-    defaultWorkspace: string,
-    append: boolean,
-    secretDerived = false
-): Promise<{ path: string }> {
-    if (typeof task.path !== 'string' || task.path.length === 0) {
-        throw new Error(t(`'${task.type}' 태스크 '${task.id}'에는 비어 있지 않은 'path' 속성이 필요합니다.`, `Task '${task.id}' of type '${task.type}' requires a non-empty 'path' property.`));
-    }
-    if (typeof task.content !== 'string') {
-        throw new Error(t(`'${task.type}' 태스크 '${task.id}'에는 문자열 'content' 속성이 필요합니다.`, `Task '${task.id}' of type '${task.type}' requires a 'content' property (string).`));
-    }
-
-    const rawPath = interpolatePipelineVariables(task.path, interpolationContext);
-    const content = interpolatePipelineVariables(task.content, interpolationContext);
-    const safePath = resolveWithinWorkspace(rawPath, workspaceRoots, defaultWorkspace);
-
-    const targetExists = fs.existsSync(safePath);
-
-    const normalized = normalizeEol(content, task.eol);
-    // For appendFile on an existing file, suppress the BOM — planting a BOM
-    // mid-file would corrupt the stream for UTF-8-aware readers. A fresh
-    // appendFile (target absent) still gets the BOM when requested.
-    const includeBom = !(append && targetExists);
-    const buffer = encodeFileContent(normalized, task.encoding, includeBom);
-
-    writeWorkspaceFileSync(safePath, workspaceRoots, defaultWorkspace, buffer, {
-        append,
-        overwrite: task.overwrite !== false,
-        mkdirs: task.mkdirs !== false,
-        mode: secretDerived ? SECRET_FILE_MODE : undefined,
-    });
-
-    return { path: safePath };
 }
 
 /**
@@ -10746,44 +10068,7 @@ async function handleZip(
 }
 
 export async function handleStringManipulation(task: any): Promise<{ output: string }> {
-    const { function: func, input } = task;
-    if (typeof input !== 'string') { throw new Error(t(`문자열 처리 태스크 '${task.id}'의 'input' 속성은 문자열이어야 합니다.`, `String manipulation task '${task.id}' requires the 'input' property to be a string.`)); }
-
-    const value = input;
-    let output: string;
-    switch (func) {
-        case 'stripExtension': {
-            const ext = path.extname(value);
-            output = ext ? value.slice(0, -ext.length) : value;
-            break;
-        }
-        case 'basename':
-            output = path.basename(value);
-            break;
-        case 'basenameWithoutExtension':
-            output = path.parse(value).name;
-            break;
-        case 'dirname':
-            output = path.dirname(value);
-            break;
-        case 'extension': {
-            const ext = path.extname(value);
-            output = ext.startsWith('.') ? ext.substring(1) : ext;
-            break;
-        }
-        case 'toLowerCase':
-            output = value.toLowerCase();
-            break;
-        case 'toUpperCase':
-            output = value.toUpperCase();
-            break;
-        case 'trim':
-            output = value.trim();
-            break;
-        default:
-            throw new Error(t(`지원하지 않는 문자열 처리 함수: ${func}`, `Unsupported string manipulation function: ${func}`));
-    }
-    return { output };
+    return transformString(task, t);
 }
 
 export async function handleConfirm(task: any): Promise<{ confirmed: string }> {

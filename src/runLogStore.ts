@@ -186,6 +186,11 @@ export class ActionRunLogCollector {
         if (completion.output) { record.output = completion.output; }
     }
 
+    recordOutput(taskId: string, output: TaskRunLogOutput): void {
+        const record = this.byId.get(taskId);
+        if (record) { record.output = output; }
+    }
+
     recordDiagnostics(taskId: string, diagnostics: TaskRunLogDiagnostics): void {
         const record = this.byId.get(taskId);
         if (!record) { return; }
@@ -626,12 +631,29 @@ async function writeExclusive(filePath: string, content: string, mode: number): 
     }
 }
 
-async function collectLogFiles(logsRoot: string): Promise<StoredLogFile[]> {
+function isPermissionDenied(error: unknown): boolean {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    return code === 'EACCES' || code === 'EPERM';
+}
+
+/**
+ * `onUnreadableDirectory`가 있으면 읽을 권한이 없는 액션 폴더를 알리고 건너뛴다.
+ * 정리(rotation)는 이를 넘기지 않으므로 기존처럼 실패를 보고한다.
+ */
+async function collectLogFiles(logsRoot: string, onUnreadableDirectory?: () => void): Promise<StoredLogFile[]> {
     const files: StoredLogFile[] = [];
     for (const entry of await fs.readdir(logsRoot, { withFileTypes: true })) {
         if (!entry.isDirectory()) { continue; }
         const actionDir = path.join(logsRoot, entry.name);
-        for (const child of await fs.readdir(actionDir, { withFileTypes: true })) {
+        let children;
+        try {
+            children = await fs.readdir(actionDir, { withFileTypes: true });
+        } catch (error) {
+            if (!onUnreadableDirectory || !isPermissionDenied(error)) { throw error; }
+            onUnreadableDirectory();
+            continue;
+        }
+        for (const child of children) {
             if (!child.isFile() || !child.name.endsWith('.log')) { continue; }
             const filePath = path.join(actionDir, child.name);
             const stat = await fs.lstat(filePath);
@@ -640,6 +662,49 @@ async function collectLogFiles(logsRoot: string): Promise<StoredLogFile[]> {
         }
     }
     return files;
+}
+
+export async function listActionRunHistory(root: string) {
+    const logsRoot = path.join(root, RUN_LOG_DIRECTORY);
+    let files: StoredLogFile[];
+    // A log or action folder left by another account (e.g. a `sudo` run) must not hide the readable ones.
+    // An unreadable folder counts as one skipped entry because its file count is unknown.
+    let skippedLogs = 0;
+    try {
+        // Compare canonical paths, as readActionRunLog does. A caller's root may be a link
+        // or, on Windows, an 8.3 short name (`RUNNER~1`) that only the native realpath expands.
+        const realRoot = await fs.realpath(root);
+        for (const directory of [path.dirname(logsRoot), logsRoot]) {
+            const stat = await fs.lstat(directory);
+            if (!stat.isDirectory() || isOutside(realRoot, await fs.realpath(directory))) {
+                throw new RunLogReadError('unsafe-path', 'Unsafe run log directory.');
+            }
+        }
+        files = await collectLogFiles(logsRoot, () => { skippedLogs++; });
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return { runs: [] }; }
+        throw error;
+    }
+    const runs = [];
+    for (const file of files) {
+        const runId = path.relative(root, file.path).split(path.sep).join('/');
+        try {
+            const { actionId, actionTitle, startedAt, finishedAt, outcome } = await readActionRunLog(root, runId);
+            runs.push({ runId, actionId, actionTitle, startedAt, finishedAt, outcome });
+        } catch (error) {
+            if (!(error instanceof RunLogReadError)) {
+                if (!isPermissionDenied(error)) { throw error; }
+                skippedLogs++;
+                continue;
+            }
+            // Rotation may remove an entry between discovery and opening it.
+            if (error.code === 'missing') { continue; }
+            if (error.code !== 'invalid' && error.code !== 'too-large') { throw error; }
+            skippedLogs++;
+        }
+    }
+    runs.sort((a, b) => b.startedAt - a.startedAt || a.runId.localeCompare(b.runId));
+    return skippedLogs ? { runs, skippedLogs } : { runs };
 }
 
 /** 다른 창이 아직 쓰는 중일 수 있으므로 이보다 오래된 임시 파일만 고아로 본다. */

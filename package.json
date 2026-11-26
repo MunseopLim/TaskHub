@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.74",
+  "version": "0.9.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -1468,6 +1468,7 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "npm run check-version && npm run check-types && npm run lint && node esbuild.js --production",
+    "package:cli": "npm run package && node scripts/package-cli.cjs",
     "compile-tests": "npm run clean-tests && tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run check-version && npm run compile-tests && npm run lint && node esbuild.js",
@@ -1475,6 +1476,7 @@
     "check-types": "tsc --noEmit",
     "lint": "eslint src --max-warnings 0",
     "test": "vscode-test",
+    "test:cli-package": "node .github/scripts/test-cli-package.cjs",
     "clean-tests": "node -e \"require('fs').rmSync('out', { recursive: true, force: true })\""
   },
   "devDependencies": {
@@ -1504,6 +1506,7 @@
     "glob": "^13.0.6"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "ajv": "^8.20.0",
     "proper-lockfile": "^4.1.2",
     "semver": "^7.8.5",
