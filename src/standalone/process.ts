@@ -48,8 +48,11 @@ export class ProcessInterrupted extends Error {
     }
 }
 
+/** Receives a command's output as it is printed, for a console that shows it live. */
+export type OutputListener = (chunk: Buffer, stream: 'stdout' | 'stderr') => void;
+
 export async function runProcess(raw: boolean, command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv,
-    signal: AbortSignal, capture: boolean) {
+    signal: AbortSignal, capture: boolean, onOutput?: OutputListener) {
     signal.throwIfAborted();
     const plan = launchPlan(raw, command, args, cwd, env);
     const child = spawn(plan.executable, plan.args, { cwd, env, detached: process.platform !== 'win32',
@@ -67,8 +70,8 @@ export async function runProcess(raw: boolean, command: string, args: string[], 
         if (size > limit) { stop(); }
         else { chunks.push(chunk); }
     };
-    child.stdout.on('data', (chunk: Buffer) => collect(stdout, chunk));
-    child.stderr.on('data', (chunk: Buffer) => collect(stderr, chunk));
+    child.stdout.on('data', (chunk: Buffer) => { onOutput?.(chunk, 'stdout'); collect(stdout, chunk); });
+    child.stderr.on('data', (chunk: Buffer) => { onOutput?.(chunk, 'stderr'); collect(stderr, chunk); });
     try {
         const [code, stoppedBy] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
             child.once('error', reject);

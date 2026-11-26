@@ -1,6 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
-import { referencesSkippedTask } from './pipelineUtils';
+import { profileToCliInputs } from './profileCliInputs';
+import { approximateResultBytes, runPipelineEngine, type PipelineEngineHost, type PipelineTaskAttempt, type PipelineTaskOutcome } from './pipelineEngine';
 import { terminateProcessTree } from './processTree';
 import { mergeActions } from './actionCatalog';
 export { mergeActions, filterConflictingItems } from './actionCatalog';
@@ -4647,6 +4648,96 @@ async function confirmRunOutdatedInputProfile(
     return choice === continueLabel;
 }
 
+/**
+ * 입력 프로필을 `taskhub run --inputs-file` 입력 파일로 저장한다. 프로필은 작업 공간 상태에만 있어
+ * CLI가 직접 읽을 수 없으므로, 같은 값을 터미널과 AI 클라이언트에서 다시 쓰는 길은 이 파일이다.
+ * 비밀번호 입력은 프로필에 애초에 저장되지 않는다.
+ */
+async function exportInputProfileForCli(profile: NamedInputProfile, actionItem: ActionItem | undefined, actionsLoaded: boolean): Promise<void> {
+    if (!actionItem?.action) {
+        vscode.window.showErrorMessage(actionsLoaded
+            ? t(
+                `현재 액션 목록에 액션 '${profile.actionId}'이(가) 없어 내보낼 수 없습니다.`,
+                `Cannot export: action '${profile.actionId}' is not in the current action list.`
+            )
+            : t(
+                'actions.json을 읽지 못해 내보낼 수 없습니다. TaskHub: Doctor로 오류를 확인하세요.',
+                'Cannot export because actions.json could not be loaded. Check the errors with TaskHub: Doctor.'
+            ));
+        return;
+    }
+    // 프리셋·기본 제공 액션은 작업 공간 폴더가 없다. CLI는 프리셋 파일을 --preset으로 받아야 찾는다.
+    const actionFolder = actionWorkspaceFolderMap.get(actionItem.id);
+    const workspaceRoot = actionFolder ?? getWorkspaceRoots()[0];
+    const converted = profileToCliInputs(profile, actionItem.action.tasks, workspaceRoot);
+    if (Object.keys(converted.inputs).length === 0) {
+        vscode.window.showErrorMessage(t(
+            `'${profile.name}' 프로필에는 CLI 입력으로 옮길 수 있는 값이 없습니다.`,
+            `Input profile '${profile.name}' has no values that can be used as CLI inputs.`
+        ));
+        return;
+    }
+    const fileName = `${actionItem.id}-${profile.name}`.replace(/[^\p{L}\p{N}._-]+/gu, '_') + '.inputs.json';
+    const target = await vscode.window.showSaveDialog({
+        defaultUri: workspaceRoot ? vscode.Uri.file(path.join(workspaceRoot, fileName)) : undefined,
+        filters: { JSON: ['json'] },
+        saveLabel: t('내보내기', 'Export'),
+    });
+    if (!target) { return; }
+    try {
+        await vscode.workspace.fs.writeFile(target, Buffer.from(JSON.stringify(converted.inputs, null, 2) + '\n', 'utf8'));
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        vscode.window.showErrorMessage(t(`입력 파일을 저장하지 못했습니다: ${message}`, `Could not save the inputs file: ${message}`));
+        return;
+    }
+
+    // 명령은 워크스페이스 폴더에서 실행한다고 보고, 그 안의 파일은 상대 경로로 쓴다.
+    // cmd·PowerShell은 큰따옴표, POSIX 셸은 작은따옴표로 감싼다.
+    const quote = (value: string) => /^[\w./:@=+-]+$/.test(value) ? value
+        : process.platform === 'win32' ? `"${value}"` : `'${value.replace(/'/g, `'\\''`)}'`;
+    const relative = workspaceRoot ? path.relative(workspaceRoot, target.fsPath) : '';
+    const inputsPath = relative && !relative.startsWith('..') && !path.isAbsolute(relative)
+        ? relative.split(path.sep).join('/') : target.fsPath;
+    const command = ['taskhub', 'run', quote(actionItem.id),
+        ...(actionFolder ? [] : ['--preset', t('<프리셋 파일>', '<preset file>')]),
+        '--trust', '--inputs-file', quote(inputsPath)].join(' ');
+
+    const taskById = new Map(actionItem.action.tasks.map(task => [task.id, task]));
+    const passwordIds = converted.passwordTaskIds;
+    const changedIds = [...converted.skippedTaskIds, ...converted.staleTaskIds.filter(id => taskById.has(id))];
+    // 타입이 바뀐 태스크는 stale이면서 다시 물을 입력이기도 하다. 한 번만 보여 준다.
+    const newIds = converted.promptTaskIds.filter(id => !changedIds.includes(id));
+    const notes: string[] = [];
+    if (changedIds.length || newIds.length) {
+        const ids = summarizeInputProfileTaskIds([...changedIds, ...newIds]);
+        notes.push(t(`옮기지 못했거나 새로 생긴 입력(${ids})은 --input으로 지정하세요.`,
+            `Pass the inputs that could not be exported or are new (${ids}) with --input.`));
+    }
+    if (passwordIds.length) {
+        const ids = summarizeInputProfileTaskIds(passwordIds);
+        notes.push(t(`비밀번호 입력(${ids})은 프로필에 저장되지 않습니다. 파일에 합친 JSON을 --inputs-file -로 파이프해 전달하세요.`,
+            `Password inputs (${ids}) are never saved in profiles. Merge them into the JSON and pipe it with --inputs-file -.`));
+    }
+    if (!actionFolder) {
+        notes.push(t('이 액션은 프리셋에서 왔으므로 --preset에 프리셋 파일을 지정하세요.',
+            'This action comes from a preset, so pass the preset file with --preset.'));
+    }
+    const copyLabel = t('명령 복사', 'Copy Command');
+    const openLabel = t('파일 열기', 'Open File');
+    const choice = await vscode.window.showInformationMessage(
+        [t(`CLI 입력 파일을 저장했습니다. 워크스페이스 폴더에서 실행: ${command}`,
+            `Saved the CLI inputs file. Run from the workspace folder: ${command}`), ...notes].join(' '),
+        copyLabel,
+        openLabel
+    );
+    if (choice === copyLabel) {
+        await vscode.env.clipboard.writeText(command);
+    } else if (choice === openLabel) {
+        await vscode.window.showTextDocument(target);
+    }
+}
+
 export async function runActionWithInputProfile(
     actionItem: Action,
     context: vscode.ExtensionContext,
@@ -5806,7 +5897,6 @@ async function executeActionPipelineForRun(
     }
 
     const maxConcurrency = resolveMaxParallelTasks();
-    const scheduler = new TaskScheduler(graph, { maxConcurrency });
     // Mark the action as parallel-capable while it runs so that the
     // streamed-task terminal grouping and `output.mode: 'terminal'`
     // terminal keys split per-task. Removed in the `finally` below
@@ -5835,9 +5925,7 @@ async function executeActionPipelineForRun(
         }
     };
 
-    const taskById = new Map<string, import('./schema').Task>();
-    for (const t of action.tasks) { taskById.set(t.id, t); }
-    const validTaskIds = new Set(taskById.keys());
+    const validTaskIds = new Set(action.tasks.map(task => task.id));
     // embedding caller가 같은 스냅샷을 여러 실행에 재사용할 수 있으므로 원본에
     // action별 task id를 붙이지 않는다.
     const builtinVariables = attachPipelineTaskIds(
@@ -5845,33 +5933,16 @@ async function executeActionPipelineForRun(
         validTaskIds
     ) as BuiltinVariableContext;
 
-    const inFlight = new Map<string, Promise<InFlightOutcome>>();
-    // Collect every failure so multi-failure runs (two parallel builds
-    // failing simultaneously) surface every cause rather than silently
-    // dropping the second through verbose-only logging. Single failures
-    // throw the original error unchanged (preserving stack + `instanceof`
-    // equality for callers like `handleActionFailure`); multi-failures
-    // are wrapped in an AggregateError with a one-line summary so the
-    // user sees every failed task at a glance.
-    const failures: { taskId: string; error: Error }[] = [];
-
-    // 태스크 결과 총량. 개별 태스크 출력은 `outputCaptureLimitMb` 로 막혀
-    // 있었지만 합계에는 제한이 없어, 그 설정을 크게 올린 환경에서 태스크
-    // 몇 개만으로 GB 단위가 될 수 있었다.
-    const totalResultLimit = getTotalResultLimitBytes();
-    let accumulatedResultBytes = 0;
-
     /**
-     * 스케줄러 루프를 **중간에서 던지고 나갈 때** 아직 도는 형제 태스크를
+     * 엔진이 스케줄 **중간에서 던지고 나갈 때** 아직 도는 형제 태스크를
      * 실제로 멈춘다.
      *
      * 평범한 태스크 실패는 이 함수가 필요 없다 — 스케줄러가 abort 상태로
-     * 가고 루프가 `inFlight` 를 끝까지 drain 한 뒤에 나간다. 문제는 총량
-     * 한도처럼 루프 **한가운데서 throw** 하는 경로다. 그때는 `finally` 가
-     * `exitParallelAction` 만 하고 끝나므로, 형제 태스크의 Promise 는 주인을
-     * 잃고 그 아래 프로세스는 **계속 돈다**. 사용자 눈에는 액션이 실패로
-     * 끝나고 재실행까지 가능한데, 실제로는 이전 빌드·플래싱이 여전히
-     * 파일을 쓰고 있는 상태다.
+     * 가고 엔진이 실행 중인 태스크를 끝까지 기다린 뒤에 나간다. 문제는 총량
+     * 한도처럼 루프 **한가운데서 throw** 하는 경로다. 그대로 두면 형제 태스크의
+     * Promise 는 주인을 잃고 그 아래 프로세스는 **계속 돈다**. 사용자 눈에는
+     * 액션이 실패로 끝나고 재실행까지 가능한데, 실제로는 이전 빌드·플래싱이
+     * 여전히 파일을 쓰고 있는 상태다.
      *
      * 순서가 중요하다: (1) 취소 토큰을 세워 프롬프트를 닫고 뒤이어 뜨려던
      * 것을 막고, (2) 프로세스와 터미널 태스크를 실제로 종료하고, (3) 전부
@@ -5898,8 +5969,7 @@ async function executeActionPipelineForRun(
      * 되지 않는다 — 이 수정이 막으려던 피해와는 성격이 다르다.
      */
     const ABORT_DRAIN_TIMEOUT_MS = options?.abortDrainTimeoutMs ?? 5000;
-    const abortInFlightTasks = async (): Promise<void> => {
-        if (inFlight.size === 0) { return; }
+    const abortInFlightTasks = async (inFlight: ReadonlyMap<string, Promise<PipelineTaskOutcome>>): Promise<void> => {
         if (!executionRun.cancellation.token.isCancellationRequested) {
             executionRun.cancellation.cancel();
         }
@@ -5910,9 +5980,9 @@ async function executeActionPipelineForRun(
                 try { exec.terminate(); } catch { /* ignore */ }
             }
         }
-        // `launchTask` 의 Promise 는 거부하지 않고 `InFlightOutcome` 으로
-        // 접히지만, 그래도 `allSettled` 를 쓴다 — 앞으로 거부하는 경로가
-        // 생겨도 여기서 unhandled rejection 이 되지 않게.
+        // 엔진의 태스크 Promise 는 거부하지 않고 결과로 접히지만, 그래도
+        // `allSettled` 를 쓴다 — 앞으로 거부하는 경로가 생겨도 여기서
+        // unhandled rejection 이 되지 않게.
         const drained = Promise.allSettled(inFlight.values()).then(() => true);
         const deadline = new Promise<boolean>(resolve =>
             setTimeout(() => resolve(false), ABORT_DRAIN_TIMEOUT_MS));
@@ -5926,7 +5996,6 @@ async function executeActionPipelineForRun(
                 `A prompt or native dialog that cannot be dismissed programmatically may still be open.`
             );
         }
-        inFlight.clear();
     };
 
     /**
@@ -5936,46 +6005,9 @@ async function executeActionPipelineForRun(
      */
     const maskedCommandForTask = (taskId: string): string | undefined => recordCommands?.[taskId];
 
-    /**
-     * 조건으로 꺼진 태스크 id. 그 결과를 참조하는 태스크도 함께 꺼진다.
-     * `stepResults` 로는 구별할 수 없다 — 조건으로 꺼진 것도, 값을 안 만드는
-     * 태스크도 똑같이 `{}` 이기 때문이다.
-     */
-    const conditionSkipped = new Set<string>();
-
-    /**
-     * 실행 전에 이 태스크를 꺼야 하는지 본다. 끌 이유가 없으면 undefined.
-     *
-     * 두 가지를 본다: 자기 `when` 이 거짓인가, 그리고 조건으로 꺼진 태스크를
-     * 참조하는가. 후자가 없으면 미해결 리터럴 `"${pickFile.path}"` 가 경로나
-     * 인자로 그대로 넘어간다.
-     */
-    const conditionGate = (task: import('./schema').Task): string | undefined => {
-        if (!task.when && task.type !== 'switch' && conditionSkipped.size === 0) { return undefined; }
-        const gateContext = Object.assign(Object.create(null), builtinVariables, stepResults);
-        if (referencesSkippedTask(task, conditionSkipped, gateContext)) {
-            return t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.');
-        }
-        if (!task.when) { return undefined; }
-        const resolved = interpolatePipelineVariables(task.when.var, gateContext);
-        if (evaluateTaskCondition(task.when, resolved)) { return undefined; }
-        // **판정에 쓴 값과 보여 줄 값은 다른 문자열이다.** 이 사유는 그대로
-        // 출력 채널에 실리므로(`condition-skipped` 분기), 비밀을 참조하는 조건이
-        // 실패하면 평문 비밀번호가 로그에 남는다. 명령줄·cwd·출력이 이미 거치는
-        // 그 마스킹을 여기서도 태운다.
-        //
-        // 컨텍스트를 다시 만드는 이유는 `redactSecretsInContext` 가 전개하면서
-        // null 프로토타입을 잃기 때문이다. 탐색은 `ownValue` 가 own property 만
-        // 보므로 안전하지만, 두 컨텍스트의 모양을 굳이 어긋나게 둘 이유가 없다.
-        const shown = interpolatePipelineVariables(
-            task.when.var,
-            Object.assign(Object.create(null), redactSecretsInContext(executionRun, gateContext))
-        );
-        return t(`조건이 맞지 않습니다 (${shown}).`, `Condition not met (${shown}).`);
-    };
-
-    const launchTask = (taskId: string): Promise<InFlightOutcome> => {
-        const task = taskById.get(taskId)!;
+    /** 엔진의 태스크 1회 실행. 이 호스트가 VS Code 쪽 실행 범위·민감 처리를 맡는다. */
+    const prepareTask = (task: import('./schema').Task): PipelineTaskAttempt => {
+        const taskId = task.id;
         const taskUsesSecret = taskReferencesSecret(task, executionRun);
         const taskUsesSensitiveData = taskUsesSecret
             || taskReferencesSensitiveData(task, executionRun, validTaskIds);
@@ -5992,114 +6024,77 @@ async function executeActionPipelineForRun(
                     : undefined
             );
         }
-        scheduler.markStarted(taskId);
-        // **'running' 을 알리기 전에 판정한다.** 돌지 않은 태스크가 화면과
-        // 히스토리에 "실행됨" 으로 잠깐이라도 보이면 안 된다. markStarted 는
-        // 스케줄러 상태 기계가 markCompleted 전에 요구하므로 그대로 둔다.
-        let skipReason: string | undefined;
-        let conditionFailure: { error: unknown } | undefined;
-        try {
-            skipReason = conditionGate(task);
-        } catch (error) {
-            // 조건·switch 보간 실패도 아래 공통 실패 처리에서 기록하고 정책을 적용한다.
-            conditionFailure = { error };
-        }
-        if (skipReason !== undefined) {
-            conditionSkipped.add(taskId);
-            runLogCollector?.skipTask(taskId, skipReason, Date.now());
-            return Promise.resolve({ taskId, kind: 'condition-skipped' as const, reason: skipReason });
-        }
-        emitTransition(taskId, 'running');
-        runLogCollector?.startTask(taskId, Date.now());
-
-        const usePreset =
-            !!presetInputs &&
-            INTERACTIVE_TASK_TYPES.has(task.type) &&
-            Object.prototype.hasOwnProperty.call(presetInputs, taskId);
-        const isInteractive = INTERACTIVE_TASK_TYPES.has(task.type);
-        const presetValue = usePreset ? presetInputs![taskId] : undefined;
-        const taskScope = createTaskExecutionScope(executionRun, taskId);
-        // Preset values flow through `presetResult` so that
-        // `executeSingleTask`'s shared post-processing (capture +
-        // `passTheResultToNextTask` output) still runs on replay.
-        //
-        // Interactive tasks bind the prompt mutex around
-        // `executeSingleTask` itself — *not* around the
-        // `withTaskTimeout` wrapper — so that a fired timeout reports
-        // the failure to the pipeline without releasing the lock. VS
-        // Code modal dialogs can't be programmatically dismissed: if
-        // we released the mutex on timeout, the next interactive task
-        // could open a second dialog on top of the still-visible
-        // first one. Holding the lock until the original dialog
-        // promise settles keeps the "no two concurrent prompts"
-        // guarantee even across a timed-out task.
-        const startTask = async (): Promise<unknown> => {
-            // 대기열을 빠져나온 시점에 다시 확인한다. 인터랙티브 태스크는
-            // 프롬프트 뮤텍스 뒤에 줄을 서므로, 앞 액션의 대화상자가 열려 있는
-            // 동안 이 액션이 중지될 수 있다. 여기서 안 막으면 이미 중지된
-            // 액션의 modal 이 한참 뒤에 새로 뜨고, itemsFromCommand 라면
-            // 취소된 명령을 잠깐이라도 실행하게 된다.
-            try {
-                throwIfTaskInactive(taskScope);
-                if (conditionFailure) { throw conditionFailure.error; }
-                return await executeSingleTask(
-                    task,
-                    stepResults,
-                    context,
-                    id,
-                    workspaceFolderPath,
-                    workspaceRoots,
-                    presetValue,
-                    recordCommands,
-                    runLogCollector,
-                    taskScope,
-                    taskUsesSecret,
-                    taskUsesSensitiveData,
-                    builtinVariables
-                );
-            } finally {
-                disposeTaskExecutionScope(taskScope);
-            }
-        };
-        const underlying: Promise<unknown> = isInteractive && !conditionFailure
-            ? withInteractivePromptLock(startTask)
-            : startTask();
-        // On timeout, kill only this task's child processes and
-        // terminate its streamed vscode Task slot. Sibling tasks
-        // running in parallel keep going; the failure policy below
-        // decides whether the action as a whole aborts.
-        const wrapped = withTaskTimeout(underlying, task.timeoutSeconds, taskId, () => {
-            timeoutTaskExecution(taskScope);
-            terminateChildProcesses(id, taskId, executionRun.generation);
-            abortTaskOperations(executionRun, taskId);
-            const exec = getActiveTaskExecution(id, taskId, executionRun.generation);
-            if (exec) {
-                try { exec.terminate(); } catch { /* ignore */ }
-            }
-        });
-
-        const contextualized = wrapped.catch((error: unknown) => {
-            if (error instanceof WindowsBatchArgumentError) {
-                error.message = error.executable === '<compound shell>' ? t(
-                    `복합 shell 본문의 args ${JSON.stringify(previewBatchArgument(error.argument))}에 cmd.exe 특수 문자가 있어 실행하지 않았습니다. 뒤쪽 명령이나 동적 호출이 배치 파일일 수 있습니다. 명령을 별도 태스크로 나누고 command 타입으로 인자를 전달하세요.`,
-                    `Did not run compound shell script: args ${JSON.stringify(previewBatchArgument(error.argument))} contain cmd.exe special characters. A later command or dynamic call may invoke a batch file. Split commands into separate tasks and pass arguments with type 'command'.`
-                ) : t(
-                    `배치 파일 '${error.executable}'의 인자 ${JSON.stringify(previewBatchArgument(error.argument))}에 cmd.exe 특수 문자(& | < > ^ % ! ")가 있어 실행하지 않았습니다. Windows가 배치 파일 인자를 다시 해석해 명령이 주입될 수 있습니다. 값을 확인하거나, 셸 문법이 필요하면 shell 타입으로 직접 인용하세요.`,
-                    `Did not run batch file '${error.executable}': argument ${JSON.stringify(previewBatchArgument(error.argument))} contains cmd.exe special characters (& | < > ^ % ! "). Windows re-parses batch file arguments, which could inject commands. Check the value, or use a shell task and quote it yourself if you need shell syntax.`
-                );
-            }
-            if (error instanceof Error && error.name === 'TaskTimeoutError' && taskScope.forEachIteration) {
-                const { index, total } = taskScope.forEachIteration;
-                error.message = t(
-                    `태스크 '${taskId}'의 forEach ${index}/${total}번째 반복이 실패했습니다: ${error.message}`,
-                    `Task '${taskId}' forEach iteration ${index}/${total} failed: ${error.message}`
-                );
-            }
-            throw error;
-        });
-
-        return contextualized.then(
-            (result): InFlightOutcome => {
+        let taskScope: TaskExecutionScope | undefined;
+        return {
+            start(conditionFailure) {
+                const usePreset =
+                    !!presetInputs &&
+                    INTERACTIVE_TASK_TYPES.has(task.type) &&
+                    Object.prototype.hasOwnProperty.call(presetInputs, taskId);
+                const isInteractive = INTERACTIVE_TASK_TYPES.has(task.type);
+                const presetValue = usePreset ? presetInputs![taskId] : undefined;
+                const scope = createTaskExecutionScope(executionRun, taskId);
+                taskScope = scope;
+                // Preset values flow through `presetResult` so that
+                // `executeSingleTask`'s shared post-processing (capture +
+                // `passTheResultToNextTask` output) still runs on replay.
+                //
+                // Interactive tasks bind the prompt mutex around
+                // `executeSingleTask` itself — *not* around the engine's
+                // timeout wrapper — so that a fired timeout reports the
+                // failure to the pipeline without releasing the lock. VS
+                // Code modal dialogs can't be programmatically dismissed: if
+                // we released the mutex on timeout, the next interactive task
+                // could open a second dialog on top of the still-visible
+                // first one. Holding the lock until the original dialog
+                // promise settles keeps the "no two concurrent prompts"
+                // guarantee even across a timed-out task.
+                const startTask = async (): Promise<unknown> => {
+                    // 대기열을 빠져나온 시점에 다시 확인한다. 인터랙티브 태스크는
+                    // 프롬프트 뮤텍스 뒤에 줄을 서므로, 앞 액션의 대화상자가 열려 있는
+                    // 동안 이 액션이 중지될 수 있다. 여기서 안 막으면 이미 중지된
+                    // 액션의 modal 이 한참 뒤에 새로 뜨고, itemsFromCommand 라면
+                    // 취소된 명령을 잠깐이라도 실행하게 된다.
+                    try {
+                        throwIfTaskInactive(scope);
+                        if (conditionFailure) { throw conditionFailure.error; }
+                        return await executeSingleTask(
+                            task,
+                            stepResults,
+                            context,
+                            id,
+                            workspaceFolderPath,
+                            workspaceRoots,
+                            presetValue,
+                            recordCommands,
+                            runLogCollector,
+                            scope,
+                            taskUsesSecret,
+                            taskUsesSensitiveData,
+                            builtinVariables
+                        );
+                    } finally {
+                        disposeTaskExecutionScope(scope);
+                    }
+                };
+                return isInteractive && !conditionFailure
+                    ? withInteractivePromptLock(startTask)
+                    : startTask();
+            },
+            // On timeout, kill only this task's child processes and
+            // terminate its streamed vscode Task slot. Sibling tasks
+            // running in parallel keep going; the failure policy decides
+            // whether the action as a whole aborts.
+            onTimeout() {
+                if (taskScope) { timeoutTaskExecution(taskScope); }
+                terminateChildProcesses(id, taskId, executionRun.generation);
+                abortTaskOperations(executionRun, taskId);
+                const exec = getActiveTaskExecution(id, taskId, executionRun.generation);
+                if (exec) {
+                    try { exec.terminate(); } catch { /* ignore */ }
+                }
+            },
+            succeeded(result) {
                 let output: TaskRunLogOutput | undefined;
                 if (task.type === 'command' || task.type === 'shell' || task.type === 'switch') {
                     if (taskUsesSensitiveData) {
@@ -6112,11 +6107,6 @@ async function executeActionPipelineForRun(
                         }
                     }
                 }
-                runLogCollector?.finishTask(taskId, {
-                    status: 'success',
-                    finishedAt: Date.now(),
-                    output,
-                });
                 if (taskUsesSecret) {
                     finishSensitiveDebugCapture(
                         executionRun,
@@ -6126,10 +6116,25 @@ async function executeActionPipelineForRun(
                             : 'success'
                     );
                 }
-                return { taskId, kind: 'success', result };
+                return output;
             },
-            (error): InFlightOutcome => {
-                const raw = error instanceof Error ? error : new Error(String(error));
+            failed(raw) {
+                if (raw instanceof WindowsBatchArgumentError) {
+                    raw.message = raw.executable === '<compound shell>' ? t(
+                        `복합 shell 본문의 args ${JSON.stringify(previewBatchArgument(raw.argument))}에 cmd.exe 특수 문자가 있어 실행하지 않았습니다. 뒤쪽 명령이나 동적 호출이 배치 파일일 수 있습니다. 명령을 별도 태스크로 나누고 command 타입으로 인자를 전달하세요.`,
+                        `Did not run compound shell script: args ${JSON.stringify(previewBatchArgument(raw.argument))} contain cmd.exe special characters. A later command or dynamic call may invoke a batch file. Split commands into separate tasks and pass arguments with type 'command'.`
+                    ) : t(
+                        `배치 파일 '${raw.executable}'의 인자 ${JSON.stringify(previewBatchArgument(raw.argument))}에 cmd.exe 특수 문자(& | < > ^ % ! ")가 있어 실행하지 않았습니다. Windows가 배치 파일 인자를 다시 해석해 명령이 주입될 수 있습니다. 값을 확인하거나, 셸 문법이 필요하면 shell 타입으로 직접 인용하세요.`,
+                        `Did not run batch file '${raw.executable}': argument ${JSON.stringify(previewBatchArgument(raw.argument))} contains cmd.exe special characters (& | < > ^ % ! "). Windows re-parses batch file arguments, which could inject commands. Check the value, or use a shell task and quote it yourself if you need shell syntax.`
+                    );
+                }
+                if (raw.name === 'TaskTimeoutError' && taskScope?.forEachIteration) {
+                    const { index, total } = taskScope.forEachIteration;
+                    raw.message = t(
+                        `태스크 '${taskId}'의 forEach ${index}/${total}번째 반복이 실패했습니다: ${raw.message}`,
+                        `Task '${taskId}' forEach iteration ${index}/${total} failed: ${raw.message}`
+                    );
+                }
                 if (taskUsesSecret && executionRun.sensitiveDebug) {
                     finishSensitiveDebugCapture(
                         executionRun,
@@ -6151,7 +6156,7 @@ async function executeActionPipelineForRun(
                 // 켜야 할 플래그 이름뿐이라 비밀이 없고, 하필 **비밀 태스크에서만**
                 // 발생하므로 감싸 버리면 고치는 방법을 아무도 못 보게 된다.
                 const policyFailure = raw instanceof SecretContentPolicyError;
-                const e = taskUsesSensitiveData
+                const error = taskUsesSensitiveData
                     && !policyFailure
                     && !(raw instanceof ActionStoppedError)
                     && !(raw instanceof PromptCancelledError)
@@ -6181,124 +6186,104 @@ async function executeActionPipelineForRun(
                         output = { availability: 'capture-truncated', truncated: true };
                     }
                 }
-                runLogCollector?.finishTask(taskId, {
-                    status: !actionStopped && task.continueOnError ? 'continued' : 'failure',
-                    finishedAt: Date.now(),
-                    error: taskUsesSensitiveData && !policyFailure
-                        ? `Task '${taskId}' details hidden because it used sensitive input.`
-                        : raw.message,
-                    // 보고서는 이 코드를 보고 **읽는 시점의 언어로** 문구를
-                    // 만든다. 위 `error` 는 로그 파일을 직접 여는 사람을 위한
-                    // 원문으로 남긴다.
-                    errorCode: taskUsesSensitiveData && !policyFailure ? 'sensitive-hidden' : undefined,
-                    exitCode: raw instanceof ShellCommandError ? raw.exitCode : undefined,
-                    signal: raw instanceof ShellCommandError ? raw.signal : undefined,
-                    output,
-                });
-                if (actionStopped) {
-                    return { taskId, kind: 'failed', error: e };
+                return {
+                    error,
+                    continuable: !actionStopped,
+                    log: {
+                        error: taskUsesSensitiveData && !policyFailure
+                            ? `Task '${taskId}' details hidden because it used sensitive input.`
+                            : raw.message,
+                        // 보고서는 이 코드를 보고 **읽는 시점의 언어로** 문구를
+                        // 만든다. 위 `error` 는 로그 파일을 직접 여는 사람을 위한
+                        // 원문으로 남긴다.
+                        errorCode: taskUsesSensitiveData && !policyFailure ? 'sensitive-hidden' : undefined,
+                        exitCode: raw instanceof ShellCommandError ? raw.exitCode : undefined,
+                        signal: raw instanceof ShellCommandError ? raw.signal : undefined,
+                        output,
+                    },
+                };
+            },
+        };
+    };
+
+    const host: PipelineEngineHost = {
+        tasks: action.tasks,
+        // `executeSingleTask` 가 앞 태스크 결과를 읽는 바로 그 객체를 엔진이 채운다.
+        stepResults,
+        graph,
+        maxConcurrency,
+        totalResultLimitBytes: getTotalResultLimitBytes(),
+        builtinVariables,
+        log: runLogCollector,
+        prepare: prepareTask,
+        skippedReferenceReason: () => t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.'),
+        conditionNotMetReason: (task, gateContext) => {
+            // **판정에 쓴 값과 보여 줄 값은 다른 문자열이다.** 이 사유는 그대로
+            // 출력 채널에 실리므로(`condition-skipped` 분기), 비밀을 참조하는 조건이
+            // 실패하면 평문 비밀번호가 로그에 남는다. 명령줄·cwd·출력이 이미 거치는
+            // 그 마스킹을 여기서도 태운다.
+            //
+            // 컨텍스트를 다시 만드는 이유는 `redactSecretsInContext` 가 전개하면서
+            // null 프로토타입을 잃기 때문이다. 탐색은 `ownValue` 가 own property 만
+            // 보므로 안전하지만, 두 컨텍스트의 모양을 굳이 어긋나게 둘 이유가 없다.
+            const shown = interpolatePipelineVariables(
+                task.when!.var,
+                Object.assign(Object.create(null), redactSecretsInContext(executionRun, gateContext))
+            );
+            return t(`조건이 맞지 않습니다 (${shown}).`, `Condition not met (${shown}).`);
+        },
+        taskStarted: task => emitTransition(task.id, 'running'),
+        taskSettled: (outcome, task) => {
+            const showVerboseLogs = outcome.kind === 'condition-skipped' || outcome.kind === 'skipped'
+                ? vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false)
+                : false;
+            if (outcome.kind === 'success') {
+                if (recordInputs && shouldRecordTaskInput(task) && !executionRun.sensitiveTaskIds.has(outcome.taskId)) {
+                    recordInputs[outcome.taskId] = outcome.result;
                 }
-                return task.continueOnError
-                    ? { taskId, kind: 'skipped', error: e }
-                    : { taskId, kind: 'failed', error: e };
+                emitTransition(outcome.taskId, 'success');
+            } else if (outcome.kind === 'condition-skipped') {
+                if (showVerboseLogs) {
+                    outputChannel.appendLine(`[INFO] Task '${outcome.taskId}' skipped — ${outcome.reason}`);
+                }
+                emitTransition(outcome.taskId, 'skipped');
+            } else if (outcome.kind === 'skipped') {
+                if (showVerboseLogs) {
+                    outputChannel.appendLine(
+                        `[WARN] Task '${outcome.taskId}' failed but 'continueOnError' is true — continuing: ${outcome.error.message}`
+                    );
+                }
+                emitTransition(outcome.taskId, 'skipped');
+            } else {
+                emitTransition(outcome.taskId, 'failure');
             }
-        );
+        },
+        abortInFlight: abortInFlightTasks,
+        resultLimitError: limitBytes => {
+            const limitMb = Math.round(limitBytes / (1024 * 1024));
+            return new Error(t(
+                `태스크 결과 총량이 ${limitMb}MB 한도를 초과했습니다. 'taskhub.pipeline.totalOutputLimitMb' 설정을 높이거나, 큰 출력을 캡처하지 않도록 태스크를 나누세요.`,
+                `Combined task output exceeded the ${limitMb} MB limit. Raise 'taskhub.pipeline.totalOutputLimitMb', or split the task so the large output is not captured.`
+            ));
+        },
+        stalledError: () => new Error(t(`액션 '${id}'에서 다음에 실행할 태스크를 결정하지 못했습니다.`, `Pipeline scheduler stalled in action '${id}'.`)),
     };
 
     try {
-    // Main scheduling loop. Each iteration: (1) launch every newly
-    // ready task subject to `maxConcurrency`; (2) await the next
-    // outcome via `Promise.race`; (3) update scheduler state and
-    // stepResults. Continues until the scheduler reports finished —
-    // either every task settled, or a hard failure aborted new
-    // scheduling and all in-flight tasks have drained.
-    while (!scheduler.isFinished()) {
-        if (!scheduler.isAborted()) {
-            for (const tid of scheduler.nextReady()) {
-                inFlight.set(tid, launchTask(tid));
-            }
+        const { failures } = await runPipelineEngine(host);
+        if (failures.length === 1) {
+            // Single failure — throw the original error unchanged so the
+            // existing error.message / stack / `instanceof` checks in
+            // `handleActionFailure` and test assertions keep working.
+            throw failures[0].error;
         }
-
-        if (inFlight.size === 0) {
-            // Validator should have caught any case where this is
-            // reachable. Fail loudly rather than infinite-loop.
-            throw new Error(t(`액션 '${id}'에서 다음에 실행할 태스크를 결정하지 못했습니다.`, `Pipeline scheduler stalled in action '${id}'.`));
+        if (failures.length > 1) {
+            const summary = failures.map(f => `${f.taskId}: ${f.error.message}`).join('; ');
+            throw new AggregateError(
+                failures.map(f => f.error),
+                t(`액션 '${id}'의 태스크 ${failures.length}개가 실패했습니다 — ${summary}`, `Action '${id}' had ${failures.length} task failures — ${summary}`)
+            );
         }
-
-        const outcome = await Promise.race(inFlight.values());
-        inFlight.delete(outcome.taskId);
-
-        if (outcome.kind === 'success') {
-            scheduler.markCompleted(outcome.taskId);
-            stepResults[outcome.taskId] = outcome.result;
-            // 담은 **뒤에** 잰다. 결과를 버리고 실패시키는 것보다, 이 태스크까지는
-            // 정상으로 두고 다음 태스크를 띄우지 않는 편이 상태가 일관된다.
-            accumulatedResultBytes += approximateResultBytes(outcome.result);
-            if (accumulatedResultBytes > totalResultLimit) {
-                const limitMb = Math.round(totalResultLimit / (1024 * 1024));
-                const limitError = new Error(t(
-                    `태스크 결과 총량이 ${limitMb}MB 한도를 초과했습니다. 'taskhub.pipeline.totalOutputLimitMb' 설정을 높이거나, 큰 출력을 캡처하지 않도록 태스크를 나누세요.`,
-                    `Combined task output exceeded the ${limitMb} MB limit. Raise 'taskhub.pipeline.totalOutputLimitMb', or split the task so the large output is not captured.`
-                ));
-                // 던지기 **전에** 형제를 멈춘다. 그냥 던지면 액션은 실패로
-                // 끝나는데 병렬 형제의 빌드·플래싱은 계속 돈다.
-                await abortInFlightTasks();
-                throw limitError;
-            }
-            if (recordInputs) {
-                const t = taskById.get(outcome.taskId);
-                if (t && shouldRecordTaskInput(t) && !executionRun.sensitiveTaskIds.has(outcome.taskId)) {
-                    recordInputs[outcome.taskId] = outcome.result;
-                }
-            }
-            emitTransition(outcome.taskId, 'success');
-        } else if (outcome.kind === 'condition-skipped') {
-            const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
-            if (showVerboseLogs) {
-                outputChannel.appendLine(`[INFO] Task '${outcome.taskId}' skipped — ${outcome.reason}`);
-            }
-            // `continueOnError` 의 skip 과 같은 모양으로 둔다: 뒤 태스크의
-            // `${task.*}` 참조가 "못 찾음 → 리터럴" 경로를 타게 된다.
-            stepResults[outcome.taskId] = {};
-            scheduler.markCompleted(outcome.taskId);
-            emitTransition(outcome.taskId, 'skipped');
-        } else if (outcome.kind === 'skipped') {
-            const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
-            if (showVerboseLogs) {
-                outputChannel.appendLine(
-                    `[WARN] Task '${outcome.taskId}' failed but 'continueOnError' is true — continuing: ${outcome.error.message}`
-                );
-            }
-            // Empty object matches the sequential behavior so downstream
-            // `${task.*}` references fall through to the "unmatched →
-            // literal" path in `interpolatePipelineVariables`.
-            stepResults[outcome.taskId] = {};
-            scheduler.markCompleted(outcome.taskId);
-            emitTransition(outcome.taskId, 'skipped');
-        } else {
-            scheduler.markFailed(outcome.taskId);
-            emitTransition(outcome.taskId, 'failure');
-            failures.push({ taskId: outcome.taskId, error: outcome.error });
-        }
-    }
-
-    if (failures.length === 1) {
-        // Single failure — throw the original error unchanged so the
-        // existing error.message / stack / `instanceof` checks in
-        // `handleActionFailure` and test assertions keep working.
-        throw failures[0].error;
-    }
-    if (failures.length > 1) {
-        const summary = failures.map(f => `${f.taskId}: ${f.error.message}`).join('; ');
-        throw new AggregateError(
-            failures.map(f => f.error),
-            t(`액션 '${id}'의 태스크 ${failures.length}개가 실패했습니다 — ${summary}`, `Action '${id}' had ${failures.length} task failures — ${summary}`)
-        );
-    }
-    } catch (error) {
-        // 스케줄러/콜백의 예기치 않은 동기 예외도 실행 중인 형제를 남기지 않는다.
-        await abortInFlightTasks();
-        throw error;
     } finally {
         if (isParallelAction) { exitParallelAction(id); }
     }
@@ -10690,31 +10675,7 @@ export function getTotalResultLimitBytes(
     return Math.max(total, perTask);
 }
 
-/**
- * 태스크 결과의 대략적인 바이트 크기.
- *
- * 정확한 힙 사용량이 아니라 **상대 비교용**이다. 무거운 것은 shell 태스크의
- * `stdout`/`stderr` 문자열이므로 문자열 길이를 더한다. 깊이를 제한해, 예상치
- * 못한 중첩 구조에서 이 계산 자체가 비싸지지 않게 한다.
- */
-export function approximateResultBytes(value: unknown, depth = 0): number {
-    if (depth > 3 || value === null || value === undefined) { return 0; }
-    if (typeof value === 'string') { return Buffer.byteLength(value, 'utf8'); }
-    if (typeof value === 'number' || typeof value === 'boolean') { return 8; }
-    if (Array.isArray(value)) {
-        let sum = 0;
-        for (const item of value) { sum += approximateResultBytes(item, depth + 1); }
-        return sum;
-    }
-    if (typeof value === 'object') {
-        let sum = 0;
-        for (const item of Object.values(value as Record<string, unknown>)) {
-            sum += approximateResultBytes(item, depth + 1);
-        }
-        return sum;
-    }
-    return 0;
-}
+export { approximateResultBytes };
 
 function getCaptureLimitBytes(): number {
     const configured = vscode.workspace.getConfiguration('taskhub').get<number>('pipeline.outputCaptureLimitMb', DEFAULT_CAPTURE_LIMIT_MB);
@@ -11864,15 +11825,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (!selected) { return; }
 
         const renameLabel = t('이름 변경', 'Rename');
+        const exportLabel = t('CLI 입력 파일로 내보내기', 'Export as CLI Inputs File');
         const deleteLabel = t('삭제', 'Delete');
         const operation = await vscode.window.showQuickPick(
             [
                 { label: renameLabel, description: t('프로필 이름만 변경합니다.', 'Change only the profile name.') },
+                { label: exportLabel, description: t('터미널·AI 클라이언트의 taskhub run에서 쓸 JSON 파일로 저장합니다.', 'Save a JSON file for taskhub run in a terminal or AI client.') },
                 { label: deleteLabel, description: t('이 프로필을 워크스페이스에서 삭제합니다.', 'Delete this profile from the workspace.') },
             ],
             { placeHolder: t(`'${selected.profile.name}' 관리`, `Manage '${selected.profile.name}'`), ignoreFocusOut: false }
         );
         if (!operation) { return; }
+
+        if (operation.label === exportLabel) {
+            await exportInputProfileForCli(selected.profile, findActionById(allActions, selected.profile.actionId), allActions.length > 0);
+            return;
+        }
 
         try {
             if (operation.label === renameLabel) {
