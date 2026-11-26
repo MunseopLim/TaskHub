@@ -1,6 +1,7 @@
 # TaskHub
 
 > 반복적인 개발 작업을 자동화하고, 임베디드 C/C++ 개발에 특화된 hover 도구를 제공하는 VS Code 확장 프로그램.
+> 같은 액션을 VS Code 없이 터미널과 로컬 AI 클라이언트(MCP)에서도 실행할 수 있습니다.
 
 [한국어](README.md) · [English](README.en.md)
 
@@ -30,6 +31,7 @@
 - **Quick Action Palette** — Actions의 돋보기나 `TaskHub: 액션 실행…` 명령으로 모든 액션을 fuzzy 검색·실행. 최근 실행 항목을 상위에 표시 (개수는 설정에서 조정)
 - **Status Bar 기능 런처** — 하단의 TaskHub 항목에서 자주 쓰는 기능을 검색하고 최근 선택 3개에 빠르게 접근
 - **Problem Matcher** — 빌드 출력의 컴파일러 에러·경고를 Problems 패널에 자동 표시 (gcc / TypeScript 프리셋 또는 커스텀 정규식)
+- **터미널 CLI · Stdio MCP** — VS Code 없이 `taskhub` 명령으로 같은 `actions.json`의 액션을 조회·진단·미리보기·실행하고 이력과 로그를 확인. 같은 기능을 MCP 서버로 로컬 AI 클라이언트에 제공 ([사용법](docs/features.md#standalone-cli))
 
 ### 사이드바 패널
 - **Actions** — 액션 버튼과 폴더 트리, 검색/그룹화
@@ -134,6 +136,12 @@ ARM Linker Listing의 Flash·RAM 사용량을 살펴보고, 영역을 펼쳐 섹
 2. VS Code에서 `Ctrl+Shift+P` (macOS: `Cmd+Shift+P`) → **Extensions: Install from VSIX...**
 3. 다운로드한 `.vsix` 파일 지정
 
+### 터미널용 CLI (선택)
+
+VS Code 없이 터미널이나 MCP 클라이언트에서 쓰려면 같은 [Releases](https://github.com/MunseopLim/TaskHub/releases)의
+`taskhub-cli-<버전>.tgz`를 받아 설치합니다. Node.js 22 이상과 npm이 필요하며 레지스트리에 접속하지 않고 설치할 수
+있습니다. 설치 명령, MCP 클라이언트 설정, 명령별 사용법은 [Standalone CLI](docs/features.md#standalone-cli)를 참고하세요.
+
 직접 빌드하거나 기여하려면 [CONTRIBUTING.md](CONTRIBUTING.md) 참조.
 
 ---
@@ -163,7 +171,9 @@ ARM Linker Listing의 Flash·RAM 사용량을 살펴보고, 영역을 펼쳐 섹
 
 TaskHub 액션은 워크스페이스 권한으로 명령을 실행할 수 있는 **실행 가능한 설정**입니다. 신뢰할 수
 없는 저장소나 `.taskhub` 파일의 액션은 실행하지 마세요. TaskHub는 VS Code의 Restricted Mode에서
-비활성화됩니다. 액션을 가져올 때는 Doctor 결과와 관계없이 `actions.json`을 수정하기 전에 액션·명령·
+비활성화됩니다. 터미널 CLI와 MCP 서버는 VS Code의 Workspace Trust를 사용하지 않으므로 조회·진단·미리보기만
+기본으로 허용하고, 액션 실행은 시작 옵션에 `--trust`를 지정한 경우에만 허용합니다. 이 신뢰는 저장하지 않으며 MCP
+도구 인자로 바꿀 수 없습니다. 액션을 가져올 때는 Doctor 결과와 관계없이 `actions.json`을 수정하기 전에 액션·명령·
 파일 작업을 표시하고 원본 검토를 기본 동작으로 제공합니다. Doctor의 추가 진단이 없어도 고정된 악성
 명령까지 안전하다는 뜻은 아닙니다. 자세한 검사 방법은
 [TaskHub Doctor](docs/features.md#23-taskhub-doctor-action-lint)를 참조하세요.
@@ -183,7 +193,7 @@ VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전
 | 문서 | 설명 |
 |------|------|
 | [docs/actions.md](docs/actions.md) | `actions.json` 작성법, 태스크 타입·필드·결과와 조합 예시 |
-| [docs/features.md](docs/features.md) | 패널 동작, Hover, JSON Editor, Hex/Memory Map 등 기능별 상세 문서 |
+| [docs/features.md](docs/features.md) | 패널 동작, Hover, JSON Editor, Hex/Memory Map, 터미널 CLI·MCP 등 기능별 상세 문서 |
 | [docs/architecture.md](docs/architecture.md) | 프로젝트 구조, 주요 컴포넌트, 데이터 구조, 보안 |
 | [docs/roadmap.md](docs/roadmap.md) | 미구현 기능 우선순위와 기술 부채 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 개발 환경 셋업, 빌드, 테스트, 기여 가이드 |
@@ -196,5 +206,3 @@ VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전
 ## 라이선스
 
 [MIT](LICENSE)
-
-[터미널에서 TaskHub 사용하기](docs/features.md#standalone-cli)
