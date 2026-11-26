@@ -105,7 +105,7 @@ async function main(argv: string[]): Promise<void> {
                 if (!json && skippedLogs) {
                     process.stderr.write(t(
                         `읽을 수 없는 실행 로그 ${skippedLogs}개를 건너뛰었습니다.\n`,
-                        `Skipped ${skippedLogs} invalid or oversized run log entries.\n`
+                        `Skipped ${skippedLogs} unreadable, invalid or oversized run log entries.\n`
                     ));
                 }
                 break;

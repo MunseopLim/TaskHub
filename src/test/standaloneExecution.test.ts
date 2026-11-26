@@ -229,6 +229,46 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         } finally { await client.close(); }
     });
 
+    test('skips run logs and action folders without read permission in CLI and MCP history', async function () {
+        // Windows ACLs and root bypass POSIX mode bits, so the denial cannot be staged there.
+        if (process.platform === 'win32' || process.getuid?.() === 0) { this.skip(); }
+        const run = invoke(['run', 'build', '--trust'], { slot: 'debug' });
+        assert.equal(run.code, 0);
+        const source = path.join(root, run.data.runId);
+        const deniedFile = path.join(path.dirname(source), 'denied.log');
+        // A first `sudo` run of another action leaves a 0700 folder owned by root.
+        const deniedFolder = path.join(path.dirname(path.dirname(source)), 'other-0000000000000000');
+        fs.copyFileSync(source, deniedFile);
+        fs.mkdirSync(deniedFolder);
+        fs.copyFileSync(source, path.join(deniedFolder, path.basename(source)));
+        fs.chmodSync(deniedFile, 0o000);
+        fs.chmodSync(deniedFolder, 0o000);
+        try {
+            const history = invoke(['history']);
+            assert.equal(history.code, 0);
+            assert.equal(history.data.skippedLogs, 2);
+            assert.deepEqual(history.data.runs.map((entry: { runId: string }) => entry.runId), [run.data.runId]);
+            assert.ok(!history.stdout.includes(root), history.stdout);
+
+            const human = spawnSync('node', [cli, 'history', '--workspace', root], { encoding: 'utf8', timeout: 10_000, env });
+            assert.ifError(human.error);
+            assert.equal(human.status, 0);
+            assert.ok(human.stdout.includes(run.data.runId));
+            assert.match(human.stderr, /Skipped 2 unreadable, invalid or oversized run log entries/);
+
+            const client = mcp();
+            try {
+                await client.init();
+                const listing = await client.call('list_run_history');
+                assert.equal(listing.error, false);
+                assert.deepEqual(listing.data, history.data);
+            } finally { await client.close(); }
+        } finally {
+            fs.chmodSync(deniedFolder, 0o700);
+            fs.chmodSync(deniedFile, 0o600);
+        }
+    });
+
     test('returns cancellation code 130 and records a declined confirmation', () => {
         fs.writeFileSync(config, JSON.stringify([action('deploy', [
             { id: 'accept', type: 'confirm', message: 'Continue?' },
