@@ -20,7 +20,7 @@ suite('운영 의존성 분류', () => {
         return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
             const full = path.join(dir, entry.name);
             if (entry.isDirectory()) { return entry.name === 'test' ? [] : sourceFiles(full); }
-            return entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts') ? [full] : [];
+            return /\.m?ts$/.test(entry.name) && !entry.name.endsWith('.d.ts') ? [full] : [];
         });
     }
 
@@ -50,7 +50,7 @@ suite('운영 의존성 분류', () => {
     test('생성 검증기를 포함한 배포 번들의 패키지도 운영 의존성 감사에 포함된다', () => {
         const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'));
         const used = new Map<string, string>();
-        for (const bundle of ['extension', 'features', 'actionsValidator', 'jsonEditorWebview', 'regexWorker']) {
+        for (const bundle of ['extension', 'features', 'actionsValidator', 'jsonEditorWebview', 'regexWorker', 'cli']) {
             const metadata = JSON.parse(fs.readFileSync(path.join(repoRoot, 'out', 'build', `${bundle}.meta.json`), 'utf8'));
             for (const output of Object.values(metadata.outputs) as { inputs: Record<string, { bytesInOutput: number }> }[]) {
                 for (const [input, contribution] of Object.entries(output.inputs)) {

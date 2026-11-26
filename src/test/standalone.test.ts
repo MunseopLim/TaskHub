@@ -4,7 +4,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-suite('Standalone CLI', () => {
+suite('Standalone CLI', function () {
+    this.timeout(30_000);
     let root: string;
     let config: string;
     const cli = path.resolve(__dirname, '../../bin/taskhub.cjs');

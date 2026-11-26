@@ -29,3 +29,7 @@ examples/**
 **/*.map
 **/*.ts
 **/.vscode-test.*
+
+bin/**
+dist/cli.js
+dist/*.tgz

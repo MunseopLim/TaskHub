@@ -186,6 +186,11 @@ export class ActionRunLogCollector {
         if (completion.output) { record.output = completion.output; }
     }
 
+    recordOutput(taskId: string, output: TaskRunLogOutput): void {
+        const record = this.byId.get(taskId);
+        if (record) { record.output = output; }
+    }
+
     recordDiagnostics(taskId: string, diagnostics: TaskRunLogDiagnostics): void {
         const record = this.byId.get(taskId);
         if (!record) { return; }
@@ -640,6 +645,35 @@ async function collectLogFiles(logsRoot: string): Promise<StoredLogFile[]> {
         }
     }
     return files;
+}
+
+export async function listActionRunHistory(root: string) {
+    const logsRoot = path.join(root, RUN_LOG_DIRECTORY);
+    let files: StoredLogFile[];
+    try {
+        for (const directory of [path.dirname(logsRoot), logsRoot]) {
+            const stat = await fs.lstat(directory);
+            if (!stat.isDirectory() || isOutside(root, await fs.realpath(directory))) {
+                throw new RunLogReadError('unsafe-path', 'Unsafe run log directory.');
+            }
+        }
+        files = await collectLogFiles(logsRoot);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
+        throw error;
+    }
+    const runs = [];
+    for (const file of files) {
+        const runId = path.relative(root, file.path).split(path.sep).join('/');
+        try {
+            const { actionId, actionTitle, startedAt, finishedAt, outcome } = await readActionRunLog(root, runId);
+            runs.push({ runId, actionId, actionTitle, startedAt, finishedAt, outcome });
+        } catch (error) {
+            // Rotation may remove an entry between discovery and opening it.
+            if (!(error instanceof RunLogReadError && error.code === 'missing')) { throw error; }
+        }
+    }
+    return runs.sort((a, b) => b.startedAt - a.startedAt || a.runId.localeCompare(b.runId));
 }
 
 /** 다른 창이 아직 쓰는 중일 수 있으므로 이보다 오래된 임시 파일만 고아로 본다. */

@@ -21,6 +21,7 @@ npm ci
 
 ```bash
 npm run compile          # 타입 체크 + 린트 + esbuild 번들링
+npm run package:cli      # 프로덕션 빌드와 레지스트리 의존성 없는 dist/taskhub-cli-<버전>.tgz 생성
 npm run package          # 프로덕션 빌드 (minify 포함)
 npm run check-version    # 버전 동기화와 변경 범위에 따른 버전 증가 검사
 npm run check-types      # TypeScript 타입 체크만
@@ -43,7 +44,7 @@ esbuild는 초기 확장·기능별 지연 로딩·공유 상태·사전 생성 
 | 워크플로 / 정의 원본 | 실행 조건 | 환경·설치 | 검사·산출물 | 원격 변경 |
 | --- | --- | --- | --- | --- |
 | **CI** — [ci.yml](.github/workflows/ci.yml) | `main` 브랜치 push, `pull_request`, 수동 `workflow_dispatch` | `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`, Git 전체 이력 | 두 OS에서 고정 VS Code `1.145.2` 전체 테스트·최소 `1.75.0` 스모크 테스트, Linux에서 최신 stable 전체 테스트. Linux: `xvfb-run -a npm test`; Windows: `npm test`. 버전 비교 기준은 PR의 base SHA 또는 push 직전 SHA | 없음 (`contents: read`) |
-| **Release** — [release.yml](.github/workflows/release.yml) | `v*.*.*` 패턴의 태그 push | 빌드: `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`, Git 전체 이력. 게시: 별도 `ubuntu-latest` 잡 | 두 OS에서 태그·패키지 버전 일치 검사와 고정 버전 전체 테스트 → Linux에서 `npm exec --no -- vsce package --out "taskhub-${VSIX_VERSION}.vsix"` → 산출물 전달. 두 OS 모두 성공해야 게시 | 빌드·테스트는 `contents: read`, 게시 잡만 `contents: write`로 GitHub Release·릴리스 노트·VSIX 생성 |
+| **Release** — [release.yml](.github/workflows/release.yml) | `v*.*.*` 패턴의 태그 push | 빌드: `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`, Git 전체 이력. 게시: 별도 `ubuntu-latest` 잡 | 두 OS에서 태그·패키지 버전 일치 검사와 고정 버전 전체 테스트 → Linux에서 VSIX 생성 및 `npm run package:cli`로 CLI tarball 생성 → 두 산출물 전달. 두 OS 모두 성공해야 게시 | 빌드·테스트는 `contents: read`, 게시 잡만 `contents: write`로 GitHub Release·릴리스 노트·VSIX·CLI tarball 게시 |
 | **Dependency Audit** — [security-audit.yml](.github/workflows/security-audit.yml) | 매주 월요일 `03:23` UTC (`23 3 * * 1`), 수동 `workflow_dispatch` | `ubuntu-latest`, Node.js `22`, `npm ci` | `npm audit --omit=dev --audit-level=high`로 운영 의존성의 high 이상 취약점 검사 | 없음 (`contents: read`) |
 
 `npm test`는 `pretest`에서 버전 검사·타입 검사를 포함한 테스트 컴파일·린트·확장과 웹뷰 번들 빌드를 각각 한 번 수행한 뒤

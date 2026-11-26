@@ -3,9 +3,11 @@ import * as path from 'path';
 import type { ActionItem } from './schema';
 import { stripUtf8Bom } from './jsonEditorUtils';
 
+export const taskHubRoot = path.resolve(__dirname, '..');
+
 /** 빌드 때 생성한 검증기를 재사용한다. 활성화 중 Ajv 컴파일을 하지 않는다. */
 export function getActionsValidator(): import('ajv').ValidateFunction<ActionItem[]> {
-    return require(path.join(__dirname, '..', 'dist', 'actionsValidator.js'));
+    return require(path.join(taskHubRoot, 'dist', 'actionsValidator.js'));
 }
 
 /**
@@ -118,4 +120,64 @@ export function traverseActionItems(items: ActionItem[], visitor: (item: ActionI
             traverseActionItems(item.children, visitor, currentParts);
         }
     }
+}
+
+export function mergeActions(
+    existing: ActionItem[],
+    preset: ActionItem[],
+    strategy: 'keep-existing' | 'use-preset'
+): ActionItem[] {
+    const collectIds = (items: ActionItem[], target: Set<string>) => {
+        for (const item of items) {
+            if (item.id) {
+                target.add(item.id);
+            }
+            if (item.children) {
+                collectIds(item.children, target);
+            }
+        }
+    };
+
+    const existingIds = new Set<string>();
+    collectIds(existing, existingIds);
+
+    if (strategy === 'keep-existing') {
+        const filteredPreset = filterConflictingItems(preset, existingIds);
+        return [...existing, ...filteredPreset];
+    }
+
+    // strategy === 'use-preset' — preset wins on conflicts, so drop conflicting items from existing.
+    const presetIds = new Set<string>();
+    collectIds(preset, presetIds);
+    const filteredExisting = filterConflictingItems(existing, presetIds);
+    return [...preset, ...filteredExisting];
+}
+
+/**
+ * Recursively filter out items with IDs that conflict with existing IDs
+ * @param items Items to filter
+ * @param existingIds Set of existing IDs to check against
+ * @returns Filtered items without conflicting IDs
+ */
+export function filterConflictingItems(items: ActionItem[], existingIds: Set<string>): ActionItem[] {
+    const result: ActionItem[] = [];
+
+    for (const item of items) {
+        // Skip items with conflicting IDs
+        if (item.id && existingIds.has(item.id)) {
+            continue;
+        }
+
+        // Clone the item to avoid mutating the original
+        const clonedItem: ActionItem = { ...item };
+
+        // Recursively filter children if present
+        if (clonedItem.children && clonedItem.children.length > 0) {
+            clonedItem.children = filterConflictingItems(clonedItem.children, existingIds);
+        }
+
+        result.push(clonedItem);
+    }
+
+    return result;
 }

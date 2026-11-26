@@ -14,7 +14,13 @@ TaskHub/
 │   │                                  #   MainViewProvider / Folder / Action 3개 심볼만 (기존 import 호환용)
 │   │                                  #   상세는 §주요 컴포넌트 > 1. TreeDataProvider 참조
 │   ├── actionCatalog.ts              # 공유 액션 스키마 검증·중복 검사·트리 순회
-│   ├── standalone/                   # core.ts 워크스페이스 조회, cli.ts 터미널 진입점, language.ts 로케일
+│   ├── standalone/                   # cli.ts와 mcp.mts(stdio)가 core.ts의 워크스페이스·실행 정책을 공유
+│   │                                  # runner.ts 그래프 실행, inputs.ts 비대화형 입력, process.ts 플랫폼별 자식 실행
+│   │                                  # errors.ts 종료 코드, language.ts 터미널 로케일
+│   ├── language.ts                    # 호스트가 제공한 언어로 한국어·영어 선택
+│   ├── taskValues.ts                  # 공용 문자열·경로·반복 결과와 파일 쓰기
+│   ├── quickPickValues.ts             # 정적·동적 항목 해석과 선택 결과
+│   ├── processTree.ts                 # POSIX 그룹·Windows 프로세스 트리 종료
 │   ├── providers/                     # TreeDataProvider 분리 모듈 (Phase 2 split)
 │   │   ├── mainViewProvider.ts        # Actions 패널 (폴더 트리)
 │   │   ├── linkViewProvider.ts        # 워크스페이스 링크 패널 (.vscode/links.json)
@@ -302,6 +308,8 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 *   Output 패널: "TaskHub" 채널에서 로그 확인
 
 ## 보안 가드
+
+Standalone은 시작 인자로 워크스페이스와 신뢰 여부를 고정한다. CLI와 MCP의 파일·프로세스 실행은 동일한 Core에서 검사한다. 세부 정책은 [Standalone CLI](features.md#standalone-cli)를 참고한다.
 
 TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, 위험한 입력에 대해 다음 방어 계층을 유지한다:
 
