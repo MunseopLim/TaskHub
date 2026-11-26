@@ -1033,20 +1033,64 @@ export function extractVariableReferences(text: string): string[][] {
     return refs;
 }
 
+/** Environment variable names whose values are treated as credentials (for example `GITHUB_TOKEN`). */
+export function isCredentialEnvName(name: string): boolean {
+    return /(?:PASSWORD|PASSWD|TOKEN|SECRET|API_?KEY|PRIVATE_?KEY|CREDENTIAL)/i.test(name);
+}
+
+/**
+ * Every occurrence of each secret in `text`, as sorted, merged `[start, end)` ranges. Overlapping or
+ * touching secrets merge, so masking one can never leave the rest of another visible.
+ */
+export function secretRanges(text: string, secrets: Iterable<string>, minLength = 1): [number, number][] {
+    const found: [number, number][] = [];
+    for (const raw of secrets) {
+        const value = typeof raw === 'string' ? raw.trim() : '';
+        if (value.length < minLength) { continue; }
+        for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) { found.push([at, at + value.length]); }
+    }
+    found.sort((left, right) => left[0] - right[0] || right[1] - left[1]);
+    const merged: [number, number][] = [];
+    for (const range of found) {
+        const last = merged[merged.length - 1];
+        if (last && range[0] <= last[1]) { last[1] = Math.max(last[1], range[1]); } else { merged.push([range[0], range[1]]); }
+    }
+    return merged;
+}
+
+/** `text` with every secret occurrence (see {@link secretRanges}) replaced by `placeholder`. */
+export function maskSecretText(text: string, secrets: Iterable<string>, placeholder = '***', minLength = 1): string {
+    let masked = '';
+    let at = 0;
+    for (const [start, end] of secretRanges(text, secrets, minLength)) {
+        masked += text.slice(at, start) + placeholder;
+        at = end;
+    }
+    return masked + text.slice(at);
+}
+
 /**
  * Why a `when` turned a task off, e.g. `Condition not met: ${mode} is "debug", expected equals "release"`.
- * `shown` is the resolved value as it may be displayed (already redacted). With `hideOperand` the expected
- * value is withheld: a condition on a secret could otherwise reveal what the secret was compared with.
+ * `shown` is the resolved value as it may be displayed (already redacted). The condition text and the
+ * expected value come from the configuration but may still contain a credential, so each passes `mask`.
+ * The expected value is withheld when `hideOperand` (the compared value was secret) or when masking
+ * changes it: either way it would reveal what a secret was compared with.
  */
-export function formatConditionNotMet(when: TaskCondition, shown: string, hideOperand: boolean, t: Translate): string {
+export function formatConditionNotMet(when: TaskCondition, shown: string, hideOperand: boolean, t: Translate,
+    mask: (text: string) => string = text => text): string {
     const operator = typeof when.equals === 'string' ? ['equals', when.equals]
         : typeof when.notEquals === 'string' ? ['notEquals', when.notEquals]
         : typeof when.matches === 'string' ? ['matches', when.matches]
         : Array.isArray(when.in) ? ['in', when.in] : undefined;
-    const expected = operator === undefined ? ''
-        : `${operator[0]} ${hideOperand ? t('(숨김)', '(hidden)') : JSON.stringify(operator[1])}`;
-    const value = JSON.stringify(shown);
-    return t(`조건이 맞지 않습니다: ${when.var} 값 ${value}, 조건 ${expected}`, `Condition not met: ${when.var} is ${value}, expected ${expected}`);
+    let expected = '';
+    if (operator) {
+        const operand = JSON.stringify(operator[1]);
+        const hidden = hideOperand || mask(operand) !== operand;
+        expected = `${operator[0]} ${hidden ? t('(숨김)', '(hidden)') : operand}`;
+    }
+    const variable = mask(when.var);
+    const value = JSON.stringify(mask(shown));
+    return t(`조건이 맞지 않습니다: ${variable} 값 ${value}, 조건 ${expected}`, `Condition not met: ${variable} is ${value}, expected ${expected}`);
 }
 
 /**

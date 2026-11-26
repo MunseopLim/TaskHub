@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict';
-import { buildTaskGraph } from '../pipelineUtils';
+import { buildTaskGraph, formatConditionNotMet, maskSecretText, secretRanges } from '../pipelineUtils';
 import { approximateResultBytes, runPipelineEngine, type PipelineEngineHost, type PipelineTaskAttempt,
     type PipelineTaskOutcome } from '../pipelineEngine';
 import { ActionRunLogCollector } from '../runLogStore';
@@ -204,6 +204,17 @@ suite('Shared pipeline engine', () => {
         await assert.rejects(runPipelineEngine(host), /host bug/);
         assert.ok(events.includes('abort:slow'));
 
+    });
+
+    test('merges overlapping secret matches and masks condition text and operands', () => {
+        assert.deepEqual(secretRanges('xxabcdefghijklyy', ['efghijkl', 'abcdefgh']), [[2, 14]]);
+        assert.equal(maskSecretText('abcdefghijkl and abcd', ['abcdefgh', 'efghijkl', 'abcd']), '*** and ***');
+        const en = (_ko: string, english: string) => english;
+        const mask = (text: string) => maskSecretText(text, ['s3cr3t-token']);
+        assert.equal(formatConditionNotMet({ var: 'id-s3cr3t-token', equals: 'x' }, 'id-s3cr3t-token', false, en, mask),
+            'Condition not met: id-*** is "id-***", expected equals "x"');
+        assert.equal(formatConditionNotMet({ var: '${mode}', in: ['a', 's3cr3t-token'] }, 'debug', false, en, mask),
+            'Condition not met: ${mode} is "debug", expected in (hidden)');
     });
 
     test('measures results by their captured strings', () => {

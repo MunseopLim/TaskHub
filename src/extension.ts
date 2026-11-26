@@ -2,7 +2,7 @@
 // Import the module and reference it with the alias vscode in your code below
 import { profileToCliInputs } from './profileCliInputs';
 import { unzipLocations } from './archiveTaskPaths';
-import { formatConditionNotMet } from './pipelineUtils';
+import { formatConditionNotMet, isCredentialEnvName, maskSecretText } from './pipelineUtils';
 import { approximateResultBytes, runPipelineEngine, type PipelineEngineHost, type PipelineTaskAttempt, type PipelineTaskOutcome } from './pipelineEngine';
 import { terminateProcessTree } from './processTree';
 import { mergeActions } from './actionCatalog';
@@ -3076,6 +3076,29 @@ function taskReferencesSensitiveData(
     if (taskReferencesSensitiveBuiltin(task, validTaskIds)) { return true; }
     if (run.sensitiveTaskIds.size === 0) { return false; }
     return inferTaskDependencies(task, run.sensitiveTaskIds).size > 0;
+}
+
+/**
+ * 짧은 값은 가리지 않는다. 민감 태스크의 결과에는 `true` 같은 평범한 조각도 섞여 있어, 그것까지
+ * 가리면 사유 문구의 일반 단어가 지워진다.
+ */
+const CONDITION_SECRET_MIN_LENGTH = 4;
+
+/** 조건 사유에서 가릴 문자열: 비밀·민감 태스크 결과의 문자열 값과 자격증명 환경변수 값. */
+function conditionSecretValues(run: ActionRunContext, context: Record<string, unknown>): string[] {
+    const values: string[] = [];
+    const collect = (value: unknown, depth = 0): void => {
+        if (typeof value === 'string') { values.push(value); return; }
+        if (depth > 4 || !value || typeof value !== 'object') { return; }
+        for (const entry of Array.isArray(value) ? value : Object.values(value)) { collect(entry, depth + 1); }
+    };
+    for (const id of new Set([...run.secretTaskIds, ...run.sensitiveTaskIds])) {
+        if (Object.prototype.hasOwnProperty.call(context, id)) { collect(context[id]); }
+    }
+    for (const [name, value] of Object.entries(process.env)) {
+        if (value && isCredentialEnvName(name)) { values.push(value); }
+    }
+    return values;
 }
 
 /** 표시·기록용 보간 컨텍스트. 비밀 태스크의 결과를 자리표시자로 바꾼다. */
@@ -6236,7 +6259,11 @@ async function executeActionPipelineForRun(
                 Object.assign(Object.create(null), redactSecretsInContext(executionRun, gateContext))
             );
             // 가린 값과 비교한 상대는 보여 주지 않는다 — 비밀이 무엇과 비교됐는지도 단서다.
-            return formatConditionNotMet(task.when!, shown, shown !== interpolatePipelineVariables(task.when!.var, gateContext), t);
+            // 조건식과 기대값은 설정 텍스트지만 자격증명을 그대로 담을 수 있다. 이 실행이 아는 비밀
+            // (비밀·민감 태스크의 결과, 자격증명 환경변수 값)이 들어 있으면 그 부분을 가린다.
+            const secrets = conditionSecretValues(executionRun, gateContext);
+            return formatConditionNotMet(task.when!, shown, shown !== interpolatePipelineVariables(task.when!.var, gateContext), t,
+                text => maskSecretText(text, secrets, SECRET_PLACEHOLDER, CONDITION_SECRET_MIN_LENGTH));
         },
         taskStarted: task => emitTransition(task.id, 'running'),
         taskSettled: (outcome, task) => {

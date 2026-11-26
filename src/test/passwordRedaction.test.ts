@@ -314,6 +314,39 @@ suite('Password taint and redaction', function () {
         assert.ok(/expected equals \(hidden\)|조건 equals \(숨김\)/.test(verbose), `기대값을 숨긴 표시가 없다:\n${verbose}`);
     });
 
+    test('조건식이나 기대값에 들어간 비밀번호·자격증명도 사유 문구에서 가린다', async () => {
+        const secret = 'Literal-Gate-Secret';
+        const token = 'literal-env-token-value';
+        const originalShowInputBox = vscode.window.showInputBox;
+        (vscode.window as any).showInputBox = async (options?: vscode.InputBoxOptions) => options?.password ? secret : 'public';
+        process.env.TASKHUB_LITERAL_TEST_TOKEN = token;
+        const actionItem: ActionItem = {
+            id: 'password-literal-gate',
+            title: 'Password literal gate',
+            action: {
+                description: 'condition text and operands must not leak secrets',
+                tasks: [
+                    { id: 'pw', type: 'inputBox', prompt: 'password?', password: true },
+                    { id: 'plain', type: 'inputBox', prompt: 'plain?', dependsOn: ['pw'] },
+                    { id: 'byPassword', type: 'stringManipulation', function: 'trim', input: 'x', dependsOn: ['plain'],
+                        when: { var: '${plain.value}', equals: secret } },
+                    { id: 'byToken', type: 'stringManipulation', function: 'trim', input: 'x', dependsOn: ['plain'],
+                        when: { var: `token-${token}`, equals: 'other' } },
+                ],
+            },
+        };
+        try {
+            await extension.executeAction(actionItem, makeContext(), makeMainViewProvider(), new HistoryProvider(makeContext()));
+        } finally {
+            (vscode.window as any).showInputBox = originalShowInputBox;
+            delete process.env.TASKHUB_LITERAL_TEST_TOKEN;
+        }
+        const verbose = verboseLines.join('\n');
+        assert.ok(verbose.includes("Task 'byPassword' skipped") && verbose.includes("Task 'byToken' skipped"), verbose);
+        assert.ok(!verbose.includes(secret), `비교 대상으로 쓴 비밀번호가 사유에 남았다:\n${verbose}`);
+        assert.ok(!verbose.includes(token), `조건식의 자격증명이 사유에 남았다:\n${verbose}`);
+    });
+
     test('password switch case 일치 결과는 명령·보고서·오류에서 가린다', async () => {
         const result = await runPasswordSwitchFailure(true);
 

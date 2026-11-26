@@ -147,11 +147,13 @@ async function main(argv: string[]): Promise<void> {
                 const atLineStart = new Map<NodeJS.WriteStream, boolean>([[process.stdout, true], [process.stderr, true]]);
                 const lastTask = new Map<NodeJS.WriteStream, string>();
                 const endsLine = new Map<NodeJS.WriteStream, boolean>([[process.stdout, true], [process.stderr, true]]);
+                const endsWithReturn = new Map<NodeJS.WriteStream, boolean>();
                 const write = (stream: NodeJS.WriteStream, text: string) => {
                     if (closed.has(stream) || !text) { return; }
                     stream.write(text);
                     atLineStart.set(stream, /[\r\n]$/.test(text));
                     endsLine.set(stream, text.endsWith('\n'));
+                    endsWithReturn.set(stream, text.endsWith('\r'));
                 };
                 result = await workspace.run(id, applyInputPairs(await readInputs(values['inputs-file'], abort.signal), values.input), abort.signal,
                     json ? undefined : (text, stream, taskId) => {
@@ -160,10 +162,12 @@ async function main(argv: string[]): Promise<void> {
                         // Another task's unfinished line ends here, so this task's output starts on a line of its own.
                         if (!atLineStart.get(target) && lastTask.get(target) !== taskId) { write(target, '\n'); }
                         lastTask.set(target, taskId);
-                        // A carriage return starts a redrawn progress line, which keeps its prefix too.
+                        // A carriage return starts a redrawn progress line, which keeps its prefix too. A `\n`
+                        // arriving right after a released `\r` only ends that line and gets no prefix of its own.
+                        const continuesLine = endsWithReturn.get(target) === true && text.startsWith('\n');
                         const lines = text.split(/(?<=\n|\r(?!\n))/);
                         write(target, lines.map((line, index) =>
-                            index === 0 && !atLineStart.get(target) ? line : prefix + line).join(''));
+                            index === 0 && (continuesLine || !atLineStart.get(target)) ? line : prefix + line).join(''));
                     });
                 // Close lines left open on either stream so the summary starts on its own line.
                 // A progress line ended by `\r` is kept rather than overwritten by the summary.

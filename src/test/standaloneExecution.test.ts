@@ -377,6 +377,46 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         assert.equal(json.stdout.trim().split('\n').length, 1, json.stdout);
     });
 
+    test('masks a credential written into a condition or its expected value in skip reasons', async () => {
+        const token = 'synthetic-env-token';
+        fs.writeFileSync(config, JSON.stringify([action('literal', [
+            { id: 'plain', type: 'inputBox' },
+            { id: 'inVar', type: 'writeFile', path: 'a.txt', content: 'x', when: { var: `prefix-${token}`, equals: 'other' } },
+            { id: 'inOperand', type: 'writeFile', path: 'b.txt', content: 'x', when: { var: '${plain.value}', equals: token } },
+        ])]));
+        const run = invoke(['run', 'literal', '--trust'], { plain: 'public' }, { TASKHUB_TEST_TOKEN: token });
+        assert.equal(run.code, 0, run.stdout);
+        const log = await new Workspace(root).log(run.data.runId);
+        assert.ok(!JSON.stringify(run.data).includes(token) && !JSON.stringify(log).includes(token));
+        const reasons = Object.fromEntries(run.data.skipped.map((entry: { taskId: string; reason: string }) => [entry.taskId, entry.reason]));
+        // The compared value was masked, so what it was compared with is withheld as well.
+        assert.equal(reasons.inVar, 'Condition not met: prefix-*** is "prefix-***", expected equals (hidden)');
+        assert.equal(reasons.inOperand, 'Condition not met: ${plain.value} is "public", expected equals (hidden)');
+    });
+
+    test('masks overlapping secrets as one and shows a progress line before the command prints again', async () => {
+        fs.writeFileSync(path.join(root, 'overlap.cjs'), [
+            "process.stdout.write('[' + process.argv[2] + 'ijkl]\\n');",
+            "process.stdout.write('10%\\r'); setTimeout(() => process.stdout.write('100%\\r\\n'), 1000);",
+        ].join('\n'));
+        fs.writeFileSync(config, JSON.stringify([action('overlap', [
+            { id: 'pw', type: 'inputBox', password: true },
+            { id: 'o', type: 'command', command: 'node', args: ['overlap.cjs', '${pw.value}'] },
+        ])]));
+        const child = spawn('node', [cli, 'run', 'overlap', '--trust', '--workspace', root, '--inputs-file', '-'],
+            { stdio: ['pipe', 'pipe', 'pipe'], env: { ...env, TASKHUB_TEST_TOKEN: 'efghijkl' } });
+        child.stdin.end(JSON.stringify({ pw: 'abcdefgh' }));
+        const arrivals: { at: number; text: string }[] = [];
+        child.stdout.setEncoding('utf8').on('data', text => arrivals.push({ at: Date.now(), text }));
+        const [code] = await once(child, 'close');
+        assert.equal(code, 0);
+        const stdout = arrivals.map(entry => entry.text).join('');
+        // `abcdefgh` and `efghijkl` overlap in `abcdefghijkl`; neither may leave a visible remainder.
+        assert.ok(stdout.startsWith('[o] [***]\n[o] 10%\r[o] 100%\r\n'), stdout);
+        const shown = (needle: string) => arrivals.find(entry => entry.text.includes(needle))!.at;
+        assert.ok(shown('100%') - shown('10%') > 500, 'the 10% line waited for the next output');
+    });
+
     test('masks stderr, multi-line and overlapping secrets in live output and keeps progress lines live', () => {
         fs.writeFileSync(path.join(root, 'noisy.cjs'), [
             "const [pw, key] = [process.argv[2], process.env.DEPLOY_PRIVATE_KEY];",

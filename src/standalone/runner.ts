@@ -4,7 +4,7 @@ import { unzipLocations } from '../archiveTaskPaths';
 import { createZipArchive, extractZipArchive } from '../archiveUtils';
 import { attachPipelineTaskIds, buildBuiltinVariableContext, redactSensitiveBuiltinVariables } from '../builtinVariables';
 import { applyDiagnosticMatchers } from '../diagnosticMatcher';
-import { applyOutputCapture, buildForEachValue, buildTaskGraph, expandArgTemplate, formatConditionNotMet, formatGraphIssue,
+import { applyOutputCapture, buildForEachValue, buildTaskGraph, expandArgTemplate, formatConditionNotMet, isCredentialEnvName, maskSecretText, secretRanges, formatGraphIssue,
     getCommandString, inferTaskDependencies, INTERACTIVE_TASK_TYPES, interpolateCommandPreservingTokens,
     interpolatePipelineVariables, interpolateToolValue, materializeSwitchBranchTask, PipelineBuiltinUnavailableError,
     quickPickUsesItemsFromCommand, resolveForEachItems, resolveTaskWorkingDirectory,
@@ -114,35 +114,41 @@ const CONSOLE_LINE_LIMIT = 64 * 1024;
 
 /**
  * Adapts a console listener to one process. Output is passed on at line ends (`\n` or `\r`, so progress
- * lines still update live) with known secrets masked, longest first so an overlapping shorter one cannot
- * leave part of a longer one visible. A secret printed over several lines is masked too: as many complete
- * lines as the longest secret spans are held back until the next output shows whether it continues.
- * Values derived from a secret (encoded, reversed) cannot be recognized.
+ * lines update live) with known secrets masked. Masking works on the raw text: every occurrence of every
+ * secret is found and overlapping ones are merged, so one secret cannot leave part of another visible.
+ * A secret printed over several lines is masked too: as many complete lines as the longest secret spans
+ * are held back until later output shows whether it continues, and text is never released in the middle
+ * of a match. Values derived from a secret (encoded, reversed) cannot be recognized.
  */
 function consoleOutput(exec: Execution, taskId: string): { listener: OutputListener; flush(): void } | undefined {
     const target = exec.onOutput;
     if (!target) { return undefined; }
+    /** Raw, unmasked text not yet released. */
     const pending = { stdout: '', stderr: '' };
     const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
-    const secrets = () => [...exec.secrets].map(secret => secret.trim())
-        .filter(value => value.length >= CONSOLE_MASK_MIN_LENGTH).sort((left, right) => right.length - left.length);
-    const mask = (text: string) => secrets().reduce((masked, value) => masked.split(value).join(SECRET_PLACEHOLDER), text);
-    /** Emits the masked text through its last safe line end (everything when `final`), keeping the rest pending. */
-    const release = (stream: 'stdout' | 'stderr', text: string, final: boolean) => {
+    const secrets = () => [...exec.secrets].map(secret => secret.trim()).filter(value => value.length >= CONSOLE_MASK_MIN_LENGTH);
+    const send = (stream: 'stdout' | 'stderr', raw: string, values: string[]) => {
+        if (raw) { target(maskSecretText(raw, values, SECRET_PLACEHOLDER, CONSOLE_MASK_MIN_LENGTH), stream, taskId); }
+    };
+    const release = (stream: 'stdout' | 'stderr', raw: string, final: boolean) => {
         const values = secrets();
-        const masked = mask(text);
-        if (final) { pending[stream] = ''; if (masked) { target(masked, stream, taskId); } return; }
-        // Line ends after which a secret could still continue: hold back as many lines as a secret spans.
+        if (final) { pending[stream] = ''; send(stream, raw, values); return; }
+        // A trailing `\r` is released at once so a progress line shows now; a `\n` that follows it
+        // later ends the same line, which the console handles.
         const spans = Math.max(0, ...values.map(value => value.split(/\r\n|\r|\n/).length - 1));
-        const ends = [...masked.matchAll(/\r\n|\r(?!$)|\n/g)].map(match => match.index! + match[0].length);
+        const ends = [...raw.matchAll(/\r\n|\r|\n/g)].map(match => match.index! + match[0].length);
         let cut = ends.length > spans ? ends[ends.length - 1 - spans] : 0;
-        if (!cut && masked.length > CONSOLE_LINE_LIMIT) {
+        if (!cut && raw.length > CONSOLE_LINE_LIMIT) {
             // No line end for a long time: release most of it, keeping enough to finish a secret.
-            const longest = values[0]?.length ?? 0;
-            cut = Math.max(0, masked.length - Math.max(0, longest - 1));
+            const longest = Math.max(0, ...values.map(value => value.length));
+            cut = Math.max(0, raw.length - Math.max(0, longest - 1));
         }
-        pending[stream] = masked.slice(cut);
-        if (cut) { target(masked.slice(0, cut), stream, taskId); }
+        // Never split a match: a secret that crosses the cut stays pending as a whole.
+        for (const [start, end] of secretRanges(raw, values, CONSOLE_MASK_MIN_LENGTH)) {
+            if (start < cut && end > cut) { cut = start; }
+        }
+        pending[stream] = raw.slice(cut);
+        send(stream, raw.slice(0, cut), values);
     };
     return {
         listener: (chunk, stream) => release(stream, pending[stream] + decoders[stream].write(chunk), false),
@@ -332,7 +338,7 @@ function unavailableBuiltinMessage(error: PipelineBuiltinUnavailableError): stri
 
 function addCredentialValues(secrets: Set<string>, environment: NodeJS.ProcessEnv) {
     for (const [key, value] of Object.entries(environment)) {
-        if (value && /(?:PASSWORD|PASSWD|TOKEN|SECRET|API_?KEY|PRIVATE_?KEY|CREDENTIAL)/i.test(key)) { secrets.add(value); }
+        if (value && isCredentialEnvName(key)) { secrets.add(value); }
     }
 }
 
@@ -342,12 +348,7 @@ function conditionDisplay(task: Task, gateContext: Result, sensitive: ReadonlySe
     for (const id of sensitive) {
         if (Object.hasOwn(context, id)) { context[id] = maskLeaves(context[id]); }
     }
-    let shown = interpolatePipelineVariables(task.when!.var, Object.assign(Object.create(null), context));
-    for (const secret of secrets) {
-        const value = secret.trim();
-        if (value) { shown = shown.split(value).join(SECRET_PLACEHOLDER); }
-    }
-    return shown;
+    return maskSecretText(interpolatePipelineVariables(task.when!.var, Object.assign(Object.create(null), context)), secrets, SECRET_PLACEHOLDER);
 }
 
 const SECRET_PLACEHOLDER = '***';
@@ -455,7 +456,8 @@ export async function runPipeline(item: Runnable, root: string, extensionPath: s
             skippedReferenceReason: () => t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.'),
             conditionNotMetReason: (task, gateContext) => {
                 const shown = conditionDisplay(task, gateContext, sensitive, secrets);
-                return formatConditionNotMet(task.when!, shown, shown !== interpolatePipelineVariables(task.when!.var, gateContext), t);
+                return formatConditionNotMet(task.when!, shown, shown !== interpolatePipelineVariables(task.when!.var, gateContext), t,
+                    text => maskSecretText(text, secrets, SECRET_PLACEHOLDER));
             },
             abortInFlight: async inFlight => {
                 stop.abort();
