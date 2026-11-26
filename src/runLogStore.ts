@@ -631,6 +631,11 @@ async function writeExclusive(filePath: string, content: string, mode: number): 
     }
 }
 
+function isVanished(error: unknown): boolean {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
 function isPermissionDenied(error: unknown): boolean {
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
     return code === 'EACCES' || code === 'EPERM';
@@ -649,6 +654,8 @@ async function collectLogFiles(logsRoot: string, onUnreadableDirectory?: () => v
         try {
             children = await fs.readdir(actionDir, { withFileTypes: true });
         } catch (error) {
+            // Rotation or a concurrent run can remove a folder after the listing above.
+            if (isVanished(error)) { continue; }
             if (!onUnreadableDirectory || !isPermissionDenied(error)) { throw error; }
             onUnreadableDirectory();
             continue;
@@ -656,7 +663,11 @@ async function collectLogFiles(logsRoot: string, onUnreadableDirectory?: () => v
         for (const child of children) {
             if (!child.isFile() || !child.name.endsWith('.log')) { continue; }
             const filePath = path.join(actionDir, child.name);
-            const stat = await fs.lstat(filePath);
+            let stat;
+            try { stat = await fs.lstat(filePath); } catch (error) {
+                if (isVanished(error)) { continue; }
+                throw error;
+            }
             if (!stat.isFile() || stat.isSymbolicLink()) { continue; }
             files.push({ path: filePath, size: stat.size, mtimeMs: stat.mtimeMs });
         }

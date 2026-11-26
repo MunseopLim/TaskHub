@@ -30,9 +30,21 @@ export interface ProcessStreams {
 }
 
 export class ProcessFailure extends Error {
-    constructor(readonly code: number | null, readonly signal: NodeJS.Signals | null, readonly streams: ProcessStreams) {
+    /** `captured` is false when the streams were not collected, so empty streams mean nothing. */
+    constructor(readonly code: number | null, readonly signal: NodeJS.Signals | null, readonly streams: ProcessStreams,
+        readonly captured: boolean) {
         super(signal ? t(`프로세스 종료 신호 ${signal}`, `Process terminated by ${signal}`)
             : t(`프로세스 종료 코드 ${code}`, `Process exited with code ${code}`));
+    }
+}
+
+/**
+ * A timeout or cancellation stopped the process. Like the extension, its partial output is not logged:
+ * collection stops at termination, so a credential could be cut mid-value and escape the secret scan.
+ */
+export class ProcessInterrupted extends Error {
+    constructor(readonly reason: unknown) {
+        super(t('프로세스 실행이 중단되었습니다.', 'Process execution was interrupted.'));
     }
 }
 
@@ -62,12 +74,15 @@ export async function runProcess(raw: boolean, command: string, args: string[], 
             child.once('error', reject);
             child.once('close', (code, stoppedBy) => resolve([code, stoppedBy]));
         });
-        signal.throwIfAborted();
+        const output = Buffer.concat(stdout).toString('utf8');
+        const errors = Buffer.concat(stderr).toString('utf8');
+        if (signal.aborted) { throw new ProcessInterrupted(signal.reason); }
         if (size > limit) { throw new Error(t('프로세스 출력이 8 MiB를 초과했습니다.', 'Process output exceeds 8 MiB.')); }
-        const streams = { output: Buffer.concat(stdout).toString('utf8').trim(), stderr: Buffer.concat(stderr).toString('utf8').trim() };
-        if (code !== 0) { throw new ProcessFailure(code, stoppedBy, streams); }
-        return streams;
+        // Like the extension, a failure keeps the streams as printed while a success trims them for reuse.
+        if (code !== 0) { throw new ProcessFailure(code, stoppedBy, { output, stderr: errors }, capture); }
+        return { output: output.trim(), stderr: errors.trim() };
     } catch (error) {
+        if (error instanceof ProcessInterrupted) { throw error; }
         signal.throwIfAborted();
         const code = (error as NodeJS.ErrnoException).code;
         if (code === 'ENOENT' || code === 'ENOTDIR') {

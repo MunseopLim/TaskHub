@@ -19,7 +19,8 @@ const tools = [
     tool('validate_action', t('액션의 설정과 실행 가능 여부를 확인합니다.', 'Validate an action and its standalone execution requirements.'), { actionId: id }, ['actionId']),
     tool('preview_action', t('액션을 미리 봅니다.', 'Preview an action without executing it.'), { actionId: id }, ['actionId']),
     tool('run_action', t('시작 시 신뢰한 워크스페이스에서 액션을 실행합니다.', 'Run a named action in the workspace trusted at launch.'), { actionId: id, inputs: input }, ['actionId']),
-    tool('list_run_history', t('저장된 실행 이력을 봅니다.', 'List retained workspace runs.')),
+    tool('list_run_history', t('저장된 실행 이력을 최신순으로 봅니다.', 'List retained workspace runs, newest first.'),
+        { limit: { type: 'integer', minimum: 1, maximum: 999999 } }),
     tool('get_run_log', t('실행 ID로 로그를 조회합니다.', 'Read the log for a run ID.'), { runId: id }, ['runId']),
 ];
 const ajv = new Ajv();
@@ -51,7 +52,7 @@ export async function serve(workspace: Workspace, signal: AbortSignal, version: 
                     data = await workspace.run(actionId, parseInputs(args.inputs ?? {}), extra.signal);
                     isError = data.exitCode !== 0;
                     break;
-                case 'list_run_history': data = await workspace.history(); break;
+                case 'list_run_history': data = await workspace.history(args.limit as number | undefined); break;
                 case 'get_run_log': data = await workspace.log(args.runId as string); break;
             }
         } catch (error) {
