@@ -1,8 +1,10 @@
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+
+assert.ok(process.env.npm_execpath, 'Run this through `npm run test:cli-package` so npm_execpath is set.');
 
 const root = path.resolve(__dirname, '../..');
 const { version } = require('../../package.json');
@@ -22,10 +24,22 @@ try {
     fs.writeFileSync(path.join(workspace, '.vscode', 'actions.json'), JSON.stringify([action]));
     const options = { cwd: workspace, env, encoding: 'utf8', timeout: 30_000 };
     // Exercise npm's generated launcher with the native shell and a workspace path containing spaces.
-    const stdout = windows
-        ? execFileSync(process.env.ComSpec, ['/d', '/c', '.\\install\\taskhub.cmd', 'list', '--json'], options)
-        : execFileSync(path.join(prefix, 'bin', 'taskhub'), ['list', '--json'], options);
+    const launcher = windows
+        ? { command: process.env.ComSpec, args: ['/d', '/c', '.\\install\\taskhub.cmd'] }
+        : { command: path.join(prefix, 'bin', 'taskhub'), args: [] };
+    const stdout = execFileSync(launcher.command, [...launcher.args, 'list', '--json'], options);
     assert.deepEqual(JSON.parse(stdout).actions.map(item => item.id), [action.id]);
+
+    // MCP clients start the server through the same launcher; stdout must carry only JSON-RPC frames.
+    const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'package-test', version: '1' } } };
+    const served = spawnSync(launcher.command, [...launcher.args, 'mcp'], { ...options, input: JSON.stringify(initialize) + '\n' });
+    assert.ifError(served.error);
+    assert.equal(served.status, 0, served.stderr);
+    const frames = served.stdout.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+    assert.equal(frames.length, 1, served.stdout);
+    assert.equal(frames[0].id, initialize.id);
+    assert.equal(frames[0].result.protocolVersion, initialize.params.protocolVersion);
 
     const installed = path.join(windows ? prefix : path.join(prefix, 'lib'), 'node_modules', 'taskhub-cli');
     const manifest = require(path.join(installed, 'package.json'));

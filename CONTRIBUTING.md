@@ -45,7 +45,7 @@ esbuild는 초기 확장·기능별 지연 로딩·공유 상태·사전 생성 
 | --- | --- | --- | --- | --- |
 | **CI** — [ci.yml](.github/workflows/ci.yml) | `main` 브랜치 push, `pull_request`, 수동 `workflow_dispatch` | `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`, Git 전체 이력 | 두 OS에서 고정 VS Code `1.145.2` 전체 테스트·최소 `1.75.0` 스모크 테스트, Linux에서 최신 stable 전체 테스트. 별도 잡에서 두 OS의 standalone 배포 패키지 검사. 버전 비교 기준은 PR의 base SHA 또는 push 직전 SHA | 없음 (`contents: read`) |
 | **Release** — [release.yml](.github/workflows/release.yml) | `v*.*.*` 패턴의 태그 push | 빌드: `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`, Git 전체 이력. 게시: 별도 `ubuntu-latest` 잡 | 두 OS에서 태그·패키지 버전 일치, 고정 버전 전체 테스트 및 standalone 배포 패키지 검사. 두 OS가 모두 통과하면 Linux에서 생성한 VSIX와 검사한 CLI tarball 게시 | 빌드·테스트는 `contents: read`, 게시 잡만 `contents: write`로 GitHub Release·릴리스 노트·VSIX·CLI tarball 게시 |
-| **Standalone CLI and stdio MCP** — [standalone.yml](.github/workflows/standalone.yml) | CI와 Release에서 `workflow_call` | `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci` | Linux에서 한 번 생성한 CLI tarball을 두 OS에서 오프라인 설치하고 VS Code 없이 검사. Release는 검사를 통과한 같은 파일을 게시 | 워크플로 아티팩트에 CLI tarball 보관 (`contents: read`) |
+| **Standalone CLI and stdio MCP** — [standalone.yml](.github/workflows/standalone.yml) | CI와 Release에서 `workflow_call` | `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci`. Linux 패키지 잡은 Git 전체 이력으로 `npm run package`의 버전 검사를 수행하며, 비교 기준은 CI가 전달한 `version-base`(Release는 직전 커밋) | Linux에서 한 번 생성한 CLI tarball을 두 OS에서 오프라인 설치하고 VS Code 없이 검사. Release는 검사를 통과한 같은 파일을 게시 | 워크플로 아티팩트에 CLI tarball 보관 (`contents: read`) |
 | **Dependency Audit** — [security-audit.yml](.github/workflows/security-audit.yml) | 매주 월요일 `03:23` UTC (`23 3 * * 1`), 수동 `workflow_dispatch` | `ubuntu-latest`, Node.js `22`, `npm ci` | `npm audit --omit=dev --audit-level=high`로 운영 의존성의 high 이상 취약점 검사 | 없음 (`contents: read`) |
 
 `npm test`는 `pretest`에서 버전 검사·타입 검사를 포함한 테스트 컴파일·린트·확장과 웹뷰 번들 빌드를 각각 한 번 수행한 뒤
@@ -56,7 +56,7 @@ VSIX 생성은 [VSIX 패키지 빌드 및 설치](#vsix-패키지-빌드-및-설
 자동으로 실행되지 않으므로, 의존성 변경의 검증을 CI 테스트 결과로 대신하지 않는다.
 
 Standalone 배포 패키지 검사는 빈 npm 캐시와 임시 설치 경로에서 tarball을 오프라인 설치한다.
-설치한 `taskhub` 명령(Windows는 `taskhub.cmd`)으로 액션 목록을 조회하고, 같은 설치본을 대상으로
+설치한 `taskhub` 명령(Windows는 `taskhub.cmd`)으로 액션 목록 조회와 MCP `initialize` 응답을 확인하고, 같은 설치본을 대상으로
 CLI와 Stdio MCP 통합 테스트를 Node.js에서 실행한다. 로컬에서는 `npm ci` 후 다음 순서로 재현한다.
 
 ```sh

@@ -142,16 +142,21 @@ suite('Standalone Core, CLI and stdio MCP', function () {
         } finally { await client.close(); }
     });
 
-    test('reads BOM input files and rejects unreadable, malformed and oversized files before execution', () => {
+    test('reads BOM and 8 MiB input files and rejects unreadable, malformed and oversized files before execution', () => {
         const file = path.join(root, '빌드 입력.json');
         const args = ['run', 'build', '--trust', '--non-interactive', '--inputs-file', file];
+        const limit = 8 * 1024 * 1024;
+        const valid = JSON.stringify({ slot: 'debug' });
         assert.equal(invoke(args).code, 2);
-        for (const content of ['{', JSON.stringify({ slot: 'x'.repeat(8 * 1024 * 1024) })]) {
+        // The oversized file is otherwise valid, so only the size limit can reject it.
+        for (const content of ['{', valid + ' '.repeat(limit + 1 - valid.length)]) {
             fs.writeFileSync(file, content);
             assert.equal(invoke(args).code, 2);
         }
         assert.equal(fs.existsSync(path.join(root, '.taskhub')), false);
-        fs.writeFileSync(file, '\uFEFF' + JSON.stringify({ slot: 'debug' }));
+        fs.writeFileSync(file, valid + ' '.repeat(limit - valid.length));
+        assert.equal(invoke(args).code, 0);
+        fs.writeFileSync(file, '\uFEFF' + valid);
         assert.equal(invoke(args).code, 0);
         assert.equal(fs.readFileSync(path.join(root, 'result'), 'utf8'), JSON.stringify(['--debug', arg]));
     });
