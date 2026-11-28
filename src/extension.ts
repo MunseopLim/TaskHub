@@ -13605,6 +13605,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         showHexConverter(context);
     }));
 
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openHexFromClipboard', async () => {
+        await (require('./hexViewer') as typeof import('./hexViewer')).openHexFromClipboard(context);
+    }));
+    // Hex 표 우클릭 메뉴 전용. 메뉴를 연 웹뷰에 복사를 요청한다.
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.hexViewer.copyDisplay', () => {
+        (require('./hexViewer') as typeof import('./hexViewer')).requestHexContextCopy('display');
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.hexViewer.copyRaw', () => {
+        (require('./hexViewer') as typeof import('./hexViewer')).requestHexContextCopy('raw');
+    }));
+
     context.subscriptions.push(vscode.window.registerCustomEditorProvider(
         'taskhub.hexEditor',
         createLazyHexEditorProvider(context, entry => recordHexViewerHistory(historyProvider, entry)),

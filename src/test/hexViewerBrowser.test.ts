@@ -527,25 +527,34 @@ async function checkBrowserFindKeys(): Promise<void> {
     }
 }
 
-async function checkBrowserInitialSelection(): Promise<void> {
-    const result = parseBinary(Buffer.from(Array.from({ length: 34 }, (_, index) => index)));
+async function checkBrowserInitialSelection(sparse = false): Promise<void> {
+    const result = sparse
+        ? parseIntelHex(':0400000001020304F2\n:020010001011CD\n:00000001FF')
+        : parseBinary(Buffer.from(Array.from({ length: 34 }, (_, index) => index)));
     const panel = vscode.window.createWebviewPanel(
         'taskhub.test.hexSelection', 'Hex selection regression', vscode.ViewColumn.One,
         { enableScripts: true, retainContextWhenHidden: true },
     );
     const deliveryId = 'browser-byte-selection';
-    const cases = [
-        { startOffset: 16, endOffset: 23, copied: '13121110 17161514', selected: ['16', '20'] },
-        { startOffset: 17, endOffset: 21, copied: '14131211 15', selected: ['16', '20'] },
-        { startOffset: 17, endOffset: 18, copied: '1211', selected: ['16'] },
-        { startOffset: 17, endOffset: 17, copied: '11', selected: ['16'] },
-        { startOffset: 32, endOffset: 33, copied: '2120', selected: ['32'] },
+    const roundTripSelection = {
+        startOffset: 17, endOffset: 21, copied: '14131211 15', hex: '1112131415', endian: 'little', selected: ['16', '20'],
+    };
+    const cases = sparse ? [
+        { startOffset: 3, endOffset: 16, copied: 'FFFFFF04 FFFFFFFF FFFFFFFF 10FF', hex: '', endian: 'little', selected: ['0', '4', '8', '12', '16'] },
+    ] : [
+        { startOffset: 0, endOffset: 3, copied: '00010203', hex: '00010203', endian: 'big', selected: ['0'] },
+        { startOffset: 16, endOffset: 23, copied: '13121110 17161514', hex: '1011121314151617', endian: 'little', selected: ['16', '20'] },
+        roundTripSelection,
+        { startOffset: 17, endOffset: 18, copied: '1211', hex: '1112', endian: 'little', selected: ['16'] },
+        { startOffset: 17, endOffset: 17, copied: '11', hex: '11', endian: 'little', selected: ['16'] },
+        { startOffset: 32, endOffset: 33, copied: '2120', hex: '2021', endian: 'little', selected: ['32'] },
     ];
+    const clipboardMessages: unknown[] = [];
     let phase = 0;
     let subscription: vscode.Disposable | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-        const html = buildHexViewerHtml('selection.bin', result, panel.webview, deliveryId, {
+        const html = buildHexViewerHtml(sparse ? 'selection.hex' : 'selection.bin', result, panel.webview, deliveryId, {
             unitSize: 4, endian: 'little', findMode: 'bytes',
         });
         const scriptTag = html.match(/<script nonce="[^"]+">/)?.[0];
@@ -559,16 +568,45 @@ async function checkBrowserInitialSelection(): Promise<void> {
             window.addEventListener('message', event => {
                 if (event.data?.command !== 'testInspectSelection') { return; }
                 requestAnimationFrame(() => requestAnimationFrame(() => {
-                    document.getElementById('hexContainer').focus();
+                    const container = document.getElementById('hexContainer');
+                    const endian = document.getElementById('endian');
+                    if (endian.value !== event.data.endian) {
+                        endian.value = event.data.endian;
+                        endian.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    container.focus();
                     const clipboard = new DataTransfer();
                     const copy = new ClipboardEvent('copy', { clipboardData: clipboard, bubbles: true, cancelable: true });
-                    document.dispatchEvent(copy);
-                    api.postMessage({
+                    container.dispatchEvent(copy);
+                    const state = {
                         command: 'testSelectionState', phase: event.data.phase,
                         selected: Array.from(document.querySelectorAll('#hexBody .hex-cell.selected')).map(cell => cell.dataset.offset),
                         status: document.getElementById('statusBar').textContent,
                         copied: clipboard.getData('text/plain'), prevented: copy.defaultPrevented,
-                    });
+                    };
+                    const requestCopy = mode => window.dispatchEvent(new MessageEvent('message', { data: { command: 'hexCopyRequest', mode } }));
+                    if (event.data.roundTrip) {
+                        // 우클릭 메뉴의 두 복사를 요청한다. 실제 메뉴는 VS Code가 그리므로 요청 메시지로 대신한다.
+                        container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+                        requestCopy('display');
+                        requestCopy('raw');
+                        // 드래그 선택: 누른 셀에서 끈 셀까지. 뒤따르는 click이 범위를 되돌리지 않아야 한다.
+                        const cellAt = offset => document.querySelector('#hexBody .hex-cell[data-offset="' + offset + '"]');
+                        const mouse = (type, offset, buttons) => cellAt(offset).dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons }));
+                        mouse('mousedown', 0, 1);
+                        mouse('mousemove', 4, 1);
+                        mouse('mousemove', 8, 1);
+                        window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        mouse('click', 8, 0);
+                        state.dragged = Array.from(document.querySelectorAll('#hexBody .hex-cell.selected')).map(cell => cell.dataset.offset);
+                        state.nativeSelection = window.getSelection().toString();
+                    }
+                    if (event.data.sparse) {
+                        state.copyStatus = document.getElementById('hexClipboardStatus').textContent;
+                        requestCopy('raw');
+                        state.rawCopyStatus = document.getElementById('hexClipboardStatus').textContent;
+                    }
+                    api.postMessage(state);
                 }));
             });
         })();
@@ -581,7 +619,13 @@ async function checkBrowserInitialSelection(): Promise<void> {
                     if (message.command === 'testError') { throw new Error(message.error); }
                     if (message.command === 'ready') { deliver(); }
                     if (message.command === 'dataReceived') {
-                        void panel.webview.postMessage({ command: 'testInspectSelection', phase });
+                        const current = cases[phase];
+                        void panel.webview.postMessage({
+                            command: 'testInspectSelection', phase, endian: current.endian, roundTrip: current === roundTripSelection, sparse,
+                        });
+                    }
+                    if (['copyHexBytes', 'copyDisplayText', 'rememberHexCopy', 'hexContextMenu'].includes(message.command)) {
+                        clipboardMessages.push(message);
                     }
                     if (message.command === 'testSelectionState') {
                         assert.strictEqual(message.phase, phase);
@@ -589,6 +633,31 @@ async function checkBrowserInitialSelection(): Promise<void> {
                         assert.deepStrictEqual(message.selected, expected.selected);
                         assert.strictEqual(message.copied, expected.copied, `phase ${phase}: selection copied extra bytes`);
                         assert.strictEqual(message.prevented, true);
+                        if (sparse) {
+                            const gapStatus = buildHexViewerStrings().hexClipboardGap;
+                            // 표시값은 화면의 채움값까지 복사하고, 원본 바이트로는 되살릴 수 없으니 기억하지 않는다.
+                            assert.strictEqual(message.copyStatus, '');
+                            assert.strictEqual(message.rawCopyStatus, gapStatus);
+                            assert.deepStrictEqual(clipboardMessages, [
+                                { command: 'rememberHexCopy', text: expected.copied, unitSize: 4, endian: 'little' },
+                            ]);
+                            resolve();
+                            return;
+                        }
+                        const copyInfo = { text: expected.copied, hex: expected.hex, unitSize: 4, endian: expected.endian };
+                        if (expected === roundTripSelection) {
+                            assert.deepStrictEqual(clipboardMessages, [
+                                { command: 'rememberHexCopy', ...copyInfo },
+                                { command: 'hexContextMenu' },
+                                { command: 'copyDisplayText', ...copyInfo },
+                                { command: 'copyHexBytes', hex: expected.hex, unitSize: 4, endian: expected.endian },
+                            ]);
+                            assert.deepStrictEqual(message.dragged, ['0', '4', '8']);
+                            assert.strictEqual(message.nativeSelection, '', '드래그가 브라우저 텍스트 선택을 만들지 않는다');
+                        } else {
+                            assert.deepStrictEqual(clipboardMessages, [{ command: 'rememberHexCopy', ...copyInfo }]);
+                        }
+                        clipboardMessages.length = 0;
                         const count = expected.endOffset - expected.startOffset + 1;
                         if (count > 1) {
                             assert.ok(message.status.includes(buildHexViewerStrings().statusSelected.replace('{n}', String(count))), message.status);
@@ -608,9 +677,14 @@ async function checkBrowserInitialSelection(): Promise<void> {
 }
 
 suite('Hex Viewer 실제 브라우저 초기화', () => {
-    test('초기 symbol byte 범위를 실제 웹뷰에서 정확하게 표시하고 unit 밖의 바이트를 복사하지 않는다', async function () {
+    test('실제 웹뷰에서 드래그로 범위를 고르고, 복사는 보이는 값과 원본 바이트를 나눠 전달한다', async function () {
         this.timeout(25000);
         await checkBrowserInitialSelection();
+    });
+
+    test('실제 웹뷰에서 데이터가 없는 주소가 포함된 선택은 보이는 값만 복사하고 원본 바이트 복사는 이유를 표시한다', async function () {
+        this.timeout(25000);
+        await checkBrowserInitialSelection(true);
     });
 
     test('찾기 Enter·Shift+Enter 순환 이동과 Escape 닫기가 이전 포커스를 복원한다', async function () {

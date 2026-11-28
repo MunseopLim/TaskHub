@@ -76,6 +76,7 @@ function runViewer(bytes: number[], options: {
         'hexContainer', 'hexHead', 'hexBody', 'statusBar', 'unitSize', 'endian', 'gotoInput',
         'gotoBtn', 'findBar', 'findMode', 'findHexInput', 'findInfo', 'findBtn', 'findClose',
         'findNext', 'findPrev', 'hexLoading', 'gotoError', 'hexAnnounce',
+        'hexClipboardStatus',
     ];
     const elements = Object.fromEntries(ids.map(id => [id,
         new FakeElement(['gotoInput', 'findHexInput'].includes(id) ? 'INPUT' : 'DIV')
@@ -165,6 +166,24 @@ function runViewer(bytes: number[], options: {
             return yields;
         },
         setSelectedText(text: string) { selectedText = text; },
+        async postToViewer(data: Record<string, unknown>) { await windowEvents.dispatch('message', { data }); },
+        /** 누른 셀에서 지나는 셀까지 끌고 놓는다. 브라우저처럼 mousedown·mousemove·mouseup·click 순서다. */
+        async drag(...offsets: number[]) {
+            const cellAt = (offset: number) => {
+                const cell = elements.hexBody.querySelector(`.hex-cell[data-offset="${offset}"]`);
+                assert.ok(cell, `offset ${offset} cell`);
+                return cell;
+            };
+            await elements.hexBody.dispatch('mousedown', { target: cellAt(offsets[0]), button: 0, preventDefault() {} });
+            for (const offset of offsets.slice(1)) {
+                await elements.hexBody.dispatch('mousemove', { target: cellAt(offset), buttons: 1 });
+            }
+            await windowEvents.dispatch('mouseup');
+            await elements.hexBody.dispatch('click', { target: cellAt(offsets[offsets.length - 1]) });
+        },
+        selectedCells() {
+            return elements.hexBody.querySelectorAll('.hex-cell.selected').map(cell => cell.dataset.offset);
+        },
         async load(initialSelection?: HexViewerSelection) {
             const payload = buildHexViewerPayload(result);
             const data = new Proxy(payload.data, {
@@ -191,7 +210,7 @@ function runViewer(bytes: number[], options: {
             let prevented = false;
             await documentEvents.dispatch('copy', {
                 target,
-                clipboardData: { setData: (_: string, value: string) => { copied = value; } },
+                clipboardData: { setData: (type: string, value: string) => { if (type === 'text/plain') { copied = value; } } },
                 preventDefault: () => { prevented = true; },
             });
             return { copied, prevented };
@@ -200,6 +219,53 @@ function runViewer(bytes: number[], options: {
 }
 
 suite('Hex Viewer 연속 조작', () => {
+    test('드래그로 앞뒤 범위를 선택하고 Cmd/Ctrl+C는 보이는 값을 복사하며 무엇을 복사했는지 알린다', async () => {
+        const viewer = runViewer(Array.from({ length: 32 }, (_, index) => index), {
+            preferences: { unitSize: 4, endian: 'little', findMode: 'bytes' },
+        });
+        await viewer.load();
+        await viewer.drag(8, 12, 16);
+        assert.deepStrictEqual(viewer.selectedCells(), ['8', '12', '16']);
+        viewer.elements.hexContainer.focus();
+        assert.deepStrictEqual(await viewer.copy(viewer.elements.hexContainer), {
+            copied: '0B0A0908 0F0E0D0C 13121110', prevented: true,
+        });
+        assert.deepStrictEqual(viewer.messages.filter(message => message.command === 'rememberHexCopy'), [{
+            command: 'rememberHexCopy', text: '0B0A0908 0F0E0D0C 13121110',
+            hex: '08090A0B0C0D0E0F10111213', unitSize: 4, endian: 'little',
+        }]);
+
+        // 뒤쪽 셀에서 앞쪽으로 끌어도 같은 범위 규칙을 따른다. 드래그 뒤의 click이 범위를 한 칸으로 되돌리지 않는다.
+        await viewer.drag(16, 4);
+        assert.deepStrictEqual(viewer.selectedCells(), ['4', '8', '12', '16']);
+    });
+
+    test('우클릭은 선택 밖의 바이트를 먼저 선택하고, 메뉴 복사 요청은 보이는 값과 원본 바이트를 나눠 보낸다', async () => {
+        const viewer = runViewer([0x08, 0x00, 0x00, 0x20, 0x01, 0x01, 0x00, 0x08], {
+            preferences: { unitSize: 4, endian: 'little', findMode: 'bytes' },
+        });
+        await viewer.load();
+        await viewer.clickByte(0);
+        const outside = viewer.elements.hexBody.querySelector('.hex-cell[data-offset="4"]')!;
+        await viewer.elements.hexContainer.dispatch('contextmenu', { target: outside });
+        assert.deepStrictEqual(viewer.selectedCells(), ['4']);
+        await viewer.clickByte(0);
+        await viewer.clickByte(4, true);
+        const inside = viewer.elements.hexBody.querySelector('.hex-cell[data-offset="0"]')!;
+        await viewer.elements.hexContainer.dispatch('contextmenu', { target: inside });
+        assert.deepStrictEqual(viewer.selectedCells(), ['0', '4']);
+        assert.ok(viewer.messages.some(message => message.command === 'hexContextMenu'));
+
+        await viewer.postToViewer({ command: 'hexCopyRequest', mode: 'display' });
+        await viewer.postToViewer({ command: 'hexCopyRequest', mode: 'raw' });
+        assert.deepStrictEqual(viewer.messages.filter(message => message.command === 'copyDisplayText' || message.command === 'copyHexBytes'), [
+            { command: 'copyDisplayText', text: '20000008 08000101', hex: '0800002001010008', unitSize: 4, endian: 'little' },
+            { command: 'copyHexBytes', hex: '0800002001010008', unitSize: 4, endian: 'little' },
+        ]);
+        await viewer.postToViewer({ command: 'hexClipboardCopied', mode: 'raw' });
+        assert.strictEqual(viewer.elements.hexClipboardStatus.textContent, buildHexViewerStrings().hexClipboardCopied);
+    });
+
     test('초기 byte 범위는 표시 단위와 무관하게 지정한 바이트만 세고 복사한다', async () => {
         for (const [unitSize, startOffset, endOffset, copied, selectedCells] of [
             [1, 16, 23, '10 11 12 13 14 15 16 17', ['16', '17', '18', '19', '20', '21', '22', '23']],

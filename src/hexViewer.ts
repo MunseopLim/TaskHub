@@ -8,7 +8,9 @@ import * as fs from 'fs';
 import { analyzeHexBuffer } from './fileAnalysis';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { toFlatArray, HexParseResult } from './hexParser';
+import { parseBinary, toFlatArray, HexParseResult } from './hexParser';
+import { formatHexConverterBytes } from './hexConverterUtils';
+import { HexClipboardFormat, parseHexClipboardText, toLittleEndianTokens, uniformTokenUnit } from './hexClipboardText';
 import { t } from './i18n';
 import { plainNotificationText } from './notificationText';
 import { HexByteStore } from './hexByteStore';
@@ -123,6 +125,208 @@ export const hexPanelRegistry = {
  * 고정한다. export 하는 이유도 그 테스트 때문이다.
  */
 export const HEX_VIEWER_MAX_FILE_SIZE = 50 * 1024 * 1024;
+export const HEX_CLIPBOARD_MAX_BYTES = 1024 * 1024;
+
+interface HexClipboardPreview {
+    bytes: Uint8Array;
+    preferences?: Partial<Pick<HexViewerPreferences, 'unitSize' | 'endian'>>;
+    /** 새 탭에 표시할 출처 설명 (형식·바이트 수·바이트 순서). */
+    note?: string;
+}
+
+function compactClipboardBytes(hex: unknown): Uint8Array | undefined {
+    if (typeof hex !== 'string' || hex.length === 0 || hex.length > HEX_CLIPBOARD_MAX_BYTES * 2
+        || hex.length % 2 !== 0 || /[^\da-f]/i.test(hex)) { return undefined; }
+    return Buffer.from(hex, 'hex');
+}
+
+function isUnitSize(value: unknown): value is 1 | 2 | 4 | 8 {
+    return value === 1 || value === 2 || value === 4 || value === 8;
+}
+
+/**
+ * TaskHub가 마지막으로 클립보드에 쓴 내용. 클립보드 텍스트가 이것과 같으면 텍스트를 다시
+ * 해석하지 않고 원본 바이트와 표시 단위·엔디안을 그대로 복원한다. 텍스트만으로는
+ * `20000008`이 적힌 순서인지 Little Endian 값인지 알 수 없기 때문이다. 웹뷰의 전용 클립보드
+ * 형식은 VS Code 웹뷰를 거치며 남는지 보장되지 않아 쓰지 않는다.
+ */
+let lastHexCopy: { text: string; bytes: Uint8Array; unitSize: 1 | 2 | 4 | 8; endian: 'little' | 'big' } | undefined;
+
+function normalizeClipboardText(text: string): string {
+    return text.replace(/\r\n?/g, '\n').trim();
+}
+
+function rememberHexCopy(text: string, bytes: Uint8Array, unitSize: unknown, endian: unknown): void {
+    lastHexCopy = isUnitSize(unitSize) && (endian === 'little' || endian === 'big')
+        ? { text: normalizeClipboardText(text), bytes, unitSize, endian }
+        : undefined;
+}
+
+/** 테스트 전용: 기억한 복사 내용을 지운다. */
+export function resetHexClipboardMemoryForTest(): void {
+    lastHexCopy = undefined;
+    hexContextTarget = undefined;
+}
+
+/** 우클릭 메뉴가 열린 Hex 웹뷰. 메뉴 명령은 어느 웹뷰에서 열렸는지 알려 주지 않는다. */
+let hexContextTarget: { webview: vscode.Webview; isCurrent: () => boolean } | undefined;
+
+/** 우클릭 메뉴의 복사 명령을 메뉴를 연 Hex 웹뷰에 전달한다. */
+export function requestHexContextCopy(mode: 'display' | 'raw'): void {
+    const target = hexContextTarget;
+    if (!target || !target.isCurrent()) { return; }
+    void target.webview.postMessage({ command: 'hexCopyRequest', mode });
+}
+
+function describeClipboardFormat(format: HexClipboardFormat): string {
+    switch (format) {
+        case 'xxd': return 'xxd';
+        case 'hexdump': return 'hexdump -C';
+        case 'memory': return t('메모리 창', 'Memory window');
+        case 'cArray': return t('C 배열', 'C array');
+        default: return t('Hex 텍스트', 'Hex text');
+    }
+}
+
+function describeClipboardError(result: { reason: string; line?: number; column?: number }): string {
+    const where = result.line !== undefined
+        ? t(` (${result.line}번째 줄 ${result.column}번째 글자)`, ` (line ${result.line}, column ${result.column})`)
+        : '';
+    switch (result.reason) {
+        case 'empty':
+            return t('클립보드에 바이트로 읽을 Hex 값이 없습니다.', 'The clipboard has no hex values to read as bytes.');
+        case 'too-large':
+            return t('클립보드에서는 한 번에 최대 1 MiB까지 열 수 있습니다.', 'You can open up to 1 MiB from the clipboard at a time.');
+        case 'odd-digits':
+            return t(`자릿수가 홀수인 Hex 값이 있습니다${where}. 바이트마다 두 자리로 적거나 0x를 붙이세요.`,
+                `A hex value has an odd number of digits${where}. Write two digits per byte or add 0x.`);
+        case 'missing-byte':
+            return t(`0x 뒤에 Hex 숫자가 없습니다${where}.`, `0x is not followed by hex digits${where}.`);
+        default:
+            return t(`Hex로 읽을 수 없는 글자가 있습니다${where}.`, `Found a character that is not hex${where}.`);
+    }
+}
+
+function previewBytes(bytes: Uint8Array): string {
+    const shown = Array.from(bytes.subarray(0, 8), b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    return bytes.length > 8 ? `${shown} …` : shown;
+}
+
+/**
+ * 클립보드 텍스트를 바이트로 읽어 새 Hex 탭에 연다. 여러 바이트로 묶인 값은 바이트 순서를
+ * 사용자에게 묻고, 새 탭은 붙여넣은 글자와 같은 모양으로 보이는 단위·엔디안으로 연다.
+ */
+export async function openHexFromClipboard(context: vscode.ExtensionContext): Promise<void> {
+    const text = await vscode.env.clipboard.readText();
+    const remembered = lastHexCopy && normalizeClipboardText(text) === lastHexCopy.text ? lastHexCopy : undefined;
+    if (remembered) {
+        openHexClipboardPreview(context, {
+            bytes: remembered.bytes,
+            preferences: { unitSize: remembered.unitSize, endian: remembered.endian },
+            note: t(
+                `TaskHub에서 복사한 바이트 · ${remembered.bytes.length}바이트`,
+                `Bytes copied from TaskHub · ${remembered.bytes.length} bytes`
+            ),
+        });
+        return;
+    }
+
+    const parsed = parseHexClipboardText(text, HEX_CLIPBOARD_MAX_BYTES);
+    if (!parsed.ok) {
+        void vscode.window.showErrorMessage(describeClipboardError(parsed));
+        return;
+    }
+    const formatLabel = describeClipboardFormat(parsed.format);
+    let order: 'written' | 'little' = 'written';
+    if (!parsed.orderFixed) {
+        const unit = uniformTokenUnit(parsed.tokenSizes);
+        const little = toLittleEndianTokens(parsed.bytes, parsed.tokenSizes);
+        const writtenLabel = t('적힌 순서 그대로', 'As written');
+        const littleLabel = unit > 1
+            ? t(`${unit}바이트 Little Endian 값`, `${unit}-byte little-endian values`)
+            : t('값마다 Little Endian', 'Little-endian per value');
+        const picked = await vscode.window.showQuickPick([
+            {
+                label: writtenLabel, order: 'written' as const,
+                description: previewBytes(parsed.bytes),
+                detail: t('파일에 적힌 순서대로 바이트를 둡니다 (Big Endian 값과 같습니다).',
+                    'Keeps bytes in the order they are written (same as big-endian values).'),
+            },
+            {
+                label: littleLabel, order: 'little' as const,
+                description: previewBytes(little),
+                detail: t('값마다 바이트 순서를 뒤집습니다. TaskHub나 디버거의 Little Endian 표시값을 복사했다면 이것을 고르세요.',
+                    'Reverses the bytes of each value. Choose this for little-endian values copied from TaskHub or a debugger.'),
+            },
+        ], {
+            placeHolder: t(
+                `${formatLabel} · ${parsed.bytes.length}바이트 · 여러 바이트로 묶인 값의 바이트 순서를 고르세요`,
+                `${formatLabel} · ${parsed.bytes.length} bytes · Choose the byte order of multi-byte values`
+            ),
+        });
+        if (!picked) { return; }
+        order = picked.order;
+    }
+
+    const unit = parsed.orderFixed ? 1 : uniformTokenUnit(parsed.tokenSizes);
+    const bytes = order === 'little' ? toLittleEndianTokens(parsed.bytes, parsed.tokenSizes) : parsed.bytes;
+    const orderLabel = parsed.orderFixed
+        ? t('적힌 순서', 'as written')
+        : order === 'little' ? t('Little Endian 값', 'little-endian values') : t('적힌 순서', 'as written');
+    openHexClipboardPreview(context, {
+        bytes,
+        // 화면이 붙여넣은 글자와 같은 모양이 되도록 연다. 적힌 순서의 4바이트 값은
+        // 4 Bytes Big Endian으로 보여야 `08000020`이 그대로 `08000020`으로 보인다.
+        preferences: { unitSize: unit, endian: order === 'little' ? 'little' : 'big' },
+        note: t(
+            `클립보드에서 연 바이트 · ${formatLabel} · ${bytes.length}바이트 · ${orderLabel}`,
+            `Opened from clipboard · ${formatLabel} · ${bytes.length} bytes · ${orderLabel}`
+        ),
+    });
+}
+
+function openHexClipboardPreview(context: vscode.ExtensionContext, preview: HexClipboardPreview): void {
+    const fileName = t('붙여넣은 바이트', 'Pasted Bytes');
+    const panel = vscode.window.createWebviewPanel(
+        'taskhub.hexViewer', `Hex: ${fileName}`, vscode.ViewColumn.Active,
+        { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] }
+    );
+    let disposed = false;
+    let handshake: HexWebviewHandshake | undefined;
+    panel.onDidDispose(() => {
+        disposed = true;
+        handshake?.dispose();
+    });
+    try {
+        const { buffer, byteOffset, byteLength } = preview.bytes;
+        const result = parseBinary(Buffer.from(buffer, byteOffset, byteLength));
+        handshake = renderWithReadyHandshake(context, panel.webview, fileName, result, () => !disposed,
+            undefined, undefined, preview);
+        if (disposed) { handshake.dispose(); }
+    } catch (error) {
+        panel.dispose();
+        throw error;
+    }
+}
+
+async function saveHexClipboardPreview(bytes: Uint8Array, isCurrent: () => boolean): Promise<void> {
+    try {
+        const uri = await vscode.window.showSaveDialog({
+            saveLabel: t('바이너리 저장', 'Save Binary'),
+            filters: { [t('바이너리 파일', 'Binary Files')]: ['bin'] },
+        });
+        if (!uri || !isCurrent()) { return; }
+        if (uri.scheme !== 'file') {
+            void vscode.window.showErrorMessage(t('바이너리를 저장할 로컬 파일을 선택하세요.', 'Select a local file to save the binary.'));
+            return;
+        }
+        // 기존 파일 덮어쓰기는 저장 대화상자가 이미 확인했으므로 다시 막지 않는다.
+        await fs.promises.writeFile(uri.fsPath, bytes);
+    } catch {
+        if (!isCurrent()) { return; }
+        void vscode.window.showErrorMessage(t('바이너리 파일을 저장하지 못했습니다.', 'Could not save the binary file.'));
+    }
+}
 
 export interface HexViewerOpenHistory {
     filePath: string;
@@ -542,7 +746,9 @@ export function buildHexViewerHtml(
     result: HexParseResult,
     webview?: vscode.Webview,
     expectedDeliveryId?: string,
-    preferences?: HexViewerPreferences
+    preferences?: HexViewerPreferences,
+    /** 클립보드에서 연 탭이면 출처 설명. 있으면 바이너리 저장 버튼을 보여 준다. */
+    clipboardNote?: string
 ): string {
     const totalSize = result.maxAddress - result.minAddress + 1;
     assertWithinHexViewerSpan(totalSize);
@@ -551,7 +757,7 @@ export function buildHexViewerHtml(
         fileName, result.format, result.minAddress, result.maxAddress,
         result.byteCount, result.entryPoint, !!result.rawBuffer, webview, expectedDeliveryId,
         result.invalidRecordCount ?? 0, result.unaddressedRecordCount ?? 0,
-        normalizeHexViewerPreferences(preferences)
+        normalizeHexViewerPreferences(preferences), clipboardNote
     );
 }
 
@@ -601,12 +807,28 @@ interface HexWebviewHandshake extends vscode.Disposable {
 function setupWebviewMessageHandler(
     context: vscode.ExtensionContext,
     webview: vscode.Webview,
+    isCurrent: () => boolean,
     onReady?: () => void | Promise<void>,
-    onDataReceived?: (deliveryId: string) => void
+    onDataReceived?: (deliveryId: string) => void,
+    clipboardPreview?: HexClipboardPreview
 ): HexWebviewHandshake {
     let readyReceived = false;
+    let savingClipboard = false;
+    const writeHexClipboard = async (
+        mode: 'display' | 'raw', text: string, bytes: Uint8Array | undefined, unitSize: unknown, endian: unknown
+    ) => {
+        try {
+            await vscode.env.clipboard.writeText(text);
+            if (bytes) { rememberHexCopy(text, bytes, unitSize, endian); } else { lastHexCopy = undefined; }
+            if (isCurrent()) { void webview.postMessage({ command: 'hexClipboardCopied', mode }); }
+        } catch {
+            if (isCurrent()) {
+                void vscode.window.showErrorMessage(t('바이트를 복사하지 못했습니다.', 'Could not copy the bytes.'));
+            }
+        }
+    };
     const subscription = webview.onDidReceiveMessage(async message => {
-        if (!message || typeof message !== 'object') { return; }
+        if (!isCurrent() || !message || typeof message !== 'object') { return; }
         if (message.command === 'updatePreferences') {
             if (
                 (message.unitSize !== 1 && message.unitSize !== 2 && message.unitSize !== 4 && message.unitSize !== 8)
@@ -631,14 +853,39 @@ function setupWebviewMessageHandler(
             }
             return;
         }
-        // `copySelection` 핸들러가 여기 있었다 (0.2.47~0.6.52). **보내는 쪽이
-        // 한 번도 없었다** — `git log --all -S "command: 'copySelection'"` 이
-        // 아무 커밋도 내놓지 않는다. 복사는 웹뷰 안에서 네이티브 `copy` 이벤트를
-        // 가로채 `clipboardData.setData` 로 처리하므로(아래 스크립트 참조)
-        // 호스트를 거치지 않는다. 죽은 채로 클립보드 쓰기 권한을 여는 분기라
-        // 지웠다. 같은 유형은 `webviewMessageContract.test.ts` 가 막는다.
-        // Go to 입력 오류는 웹뷰가 입력칸 옆에 직접 표시한다(aria-invalid). 알림 토스트는
-        // 입력칸과 떨어져 있어 무엇이 틀렸는지 보며 고치기 어려웠다.
+        if (message.command === 'copyHexBytes') {
+            // 원본 바이트 복사: 파일 순서 Hex 텍스트로 쓴다.
+            const bytes = compactClipboardBytes(message.hex);
+            if (!bytes) { return; }
+            await writeHexClipboard('raw', formatHexConverterBytes(bytes), bytes, message.unitSize, message.endian);
+            return;
+        }
+        if (message.command === 'copyDisplayText') {
+            // 우클릭 메뉴의 복사: 웹뷰가 만든 표시값 텍스트를 쓴다.
+            if (typeof message.text !== 'string' || message.text.length === 0) { return; }
+            await writeHexClipboard('display', message.text, compactClipboardBytes(message.hex), message.unitSize, message.endian);
+            return;
+        }
+        if (message.command === 'rememberHexCopy') {
+            // Cmd/Ctrl+C는 웹뷰가 클립보드에 직접 쓰고, 무엇을 썼는지만 알려 준다.
+            if (typeof message.text !== 'string') { return; }
+            const bytes = compactClipboardBytes(message.hex);
+            if (bytes) { rememberHexCopy(message.text, bytes, message.unitSize, message.endian); }
+            else { lastHexCopy = undefined; }
+            return;
+        }
+        if (message.command === 'hexContextMenu') {
+            hexContextTarget = { webview, isCurrent };
+            return;
+        }
+        if (message.command === 'saveClipboardBinary' && clipboardPreview && !savingClipboard) {
+            savingClipboard = true;
+            try {
+                await saveHexClipboardPreview(clipboardPreview.bytes, isCurrent);
+            } finally {
+                savingClipboard = false;
+            }
+        }
     });
     return {
         get readyReceived() { return readyReceived; },
@@ -666,7 +913,8 @@ function renderWithReadyHandshake(
     result: HexParseResult,
     isCurrent: () => boolean,
     initialSelection?: HexViewerSelection,
-    onReloadReady?: () => void | Promise<void>
+    onReloadReady?: () => void | Promise<void>,
+    clipboardPreview?: HexClipboardPreview
 ): HexWebviewHandshake {
     const deliveryId = generateHexNonce();
     // ready/fallback 콜백이 큰 HexParseResult를 패널 수명 내내 붙잡지 않게 한다.
@@ -683,6 +931,7 @@ function renderWithReadyHandshake(
     const handshake = setupWebviewMessageHandler(
         context,
         webview,
+        isCurrent,
         () => {
             readyObserved = true;
             if (pendingResult) {
@@ -705,13 +954,15 @@ function renderWithReadyHandshake(
                 pendingResult = undefined;
                 pendingSelection = undefined;
             }
-        }
+        },
+        clipboardPreview
     );
     // 핸들러를 **먼저** 걸었으므로, 이후 단계가 던지면 그 구독이 주인 없이
     // 남는다 (`buildHexViewerHtml` 은 span 한도로 throw 할 수 있다). 호출부의
     // catch 는 오류 HTML 만 세팅하고 이 disposable 은 받지 못한다.
     try {
-        const html = buildHexViewerHtml(fileName, result, webview, deliveryId, getPreferenceStore(context).value);
+        const preferences = { ...getPreferenceStore(context).value, ...clipboardPreview?.preferences };
+        const html = buildHexViewerHtml(fileName, result, webview, deliveryId, preferences, clipboardPreview?.note ?? (clipboardPreview ? '' : undefined));
         webview.html = html;
     } catch (e) {
         pendingResult = undefined;
@@ -909,10 +1160,15 @@ export function buildHexViewerStrings(): Record<string, string> {
             '16진수로 읽을 수 없습니다. 예: 바이트열 DE AD 또는 0xDE 0xAD, 값 0xDEADBEEF',
             'Not valid hex. Examples: bytes DE AD or 0xDE 0xAD, value 0xDEADBEEF'
         ),
+        saveClipboardBinary: t('바이너리로 저장…', 'Save as binary…'),
+        hexClipboardCopied: t('파일 순서의 바이트를 복사했습니다.', 'Copied bytes in file order.'),
+        hexClipboardDisplayCopied: t('화면에 보이는 값을 복사했습니다.', 'Copied the values as shown.'),
+        hexClipboardGap: t('선택 범위에 데이터가 없는 주소가 포함되어 있습니다.', 'The selection contains addresses with no data.'),
+        hexClipboardTooLarge: t('원본 바이트 복사는 한 번에 최대 1 MiB까지 지원합니다.', 'Raw-byte copy supports up to 1 MiB at a time.'),
         addressHeader: t('주소', 'Address'),
         statusHint: t(
-            '바이트를 클릭하거나 표에서 화살표 키로 이동하세요 · Shift+화살표 범위 선택 · Ctrl/Cmd+C 복사',
-            'Click a byte or use the arrow keys in the grid · Shift+arrows to select · Ctrl/Cmd+C to copy'
+            '바이트를 클릭·드래그하거나 화살표 키로 이동하세요 · Shift+화살표 범위 선택 · Ctrl/Cmd+C 복사 · 우클릭으로 원본 바이트 복사',
+            'Click or drag bytes, or use the arrow keys · Shift+arrows to select · Ctrl/Cmd+C to copy · Right-click to copy raw bytes'
         ),
         loading: t('불러오는 중…', 'Loading…'),
         loadFailed: t('데이터를 불러오지 못했습니다. 파일을 다시 열어 주세요.', 'Failed to load data. Please reopen the file.'),
@@ -949,7 +1205,8 @@ function getWebviewContent(
     expectedDeliveryId?: string,
     invalidRecordCount = 0,
     unaddressedRecordCount = 0,
-    preferences: HexViewerPreferences = normalizeHexViewerPreferences(undefined)
+    preferences: HexViewerPreferences = normalizeHexViewerPreferences(undefined),
+    clipboardNote?: string
 ): string {
     const formatLabel = format === 'intel' ? 'Intel HEX' : format === 'srec' ? 'Motorola SREC' : 'Binary';
     const entryStr = entryPoint !== undefined ? `0x${entryPoint.toString(16).toUpperCase().padStart(8, '0')}` : 'N/A';
@@ -1036,6 +1293,9 @@ function getWebviewContent(
     }
     .toolbar button:hover { opacity: 0.85; }
     .toolbar .sep { width: 1px; height: 18px; background: var(--border); }
+    .clipboard-note { color: var(--addr-color); font-size: 0.85em; padding: 4px 12px; }
+    .clipboard-status { color: var(--fg); font-size: 0.85em; padding: 4px 12px; }
+    .clipboard-status:empty { padding: 0; }
 
     /* Find bar */
     .find-bar {
@@ -1075,6 +1335,9 @@ function getWebviewContent(
         color: var(--addr-color); text-align: right;
         padding: 1px 12px 1px 8px; user-select: none; white-space: nowrap;
     }
+    /* 표 안의 드래그는 바이트 범위 선택이다. 브라우저 텍스트 선택이 끼면 Hex·ASCII 열이
+       섞인 텍스트가 복사된다. */
+    .hex-table { user-select: none; }
     .hex-cell {
         text-align: center; padding: 1px 2px;
         cursor: pointer; white-space: nowrap;
@@ -1146,9 +1409,12 @@ function getWebviewContent(
         <button id="gotoBtn">${esc(S.gotoButton)}</button>
         <div class="sep"></div>
         <button id="findBtn" aria-expanded="false" aria-controls="findBar">${esc(S.findButton)}</button>
+        ${clipboardNote !== undefined ? `<button id="saveClipboardBinary" type="button">${esc(S.saveClipboardBinary)}</button>` : ''}
         <!-- 툴바 끝에 둬 오류 문구가 나타나도 찾기 버튼을 밀어내지 않는다. -->
         <span id="gotoError" class="goto-error" role="alert"></span>
     </div>
+    ${clipboardNote ? `<div class="clipboard-note">${esc(clipboardNote)}</div>` : ''}
+    <div class="clipboard-status" id="hexClipboardStatus" role="status" aria-live="polite"></div>
     <div class="find-bar" id="findBar">
         <select id="findMode" aria-label="${esc(S.findModeLabel)}">
             <option value="bytes">${esc(S.findModeBytes)}</option>
@@ -1174,6 +1440,7 @@ function getWebviewContent(
          커서로 가 버린다. 직접 키를 처리하는 영역이므로 application으로 두어 포커스
          모드로 바뀌게 하고, 선택 결과는 아래 hexAnnounce가 짧게 읽어 준다. -->
     <div class="hex-container" id="hexContainer" tabindex="0" role="application"
+         data-vscode-context='{"webviewSection":"hexGrid","preventDefaultContextMenuItems":true}'
          aria-roledescription="${esc(S.gridRoleDescription)}" aria-label="${esc(S.gridLabel)}">
         <table class="hex-table" id="hexTable">
             <thead id="hexHead"></thead>
@@ -1199,6 +1466,7 @@ function getWebviewContent(
     const BASE_ADDR = ${minAddress};
     const TOTAL_SIZE = ${maxAddress - minAddress + 1};
     const IS_BINARY = ${isBinaryFormat};
+    const CLIPBOARD_MAX_BYTES = ${HEX_CLIPBOARD_MAX_BYTES};
     const EXPECTED_DELIVERY_ID = ${expectedDeliveryLiteral};
     const INITIAL_PREFERENCES = ${JSON.stringify(preferences)};
     const restored = vscode.getState();
@@ -1218,7 +1486,7 @@ function getWebviewContent(
     }
 
     function hasDataRange(offset, size) {
-        if (offset < 0 || offset + size > TOTAL_SIZE) { return false; }
+        if (offset < 0 || offset + size > DATA.length) { return false; }
         if (IS_BINARY) { return true; }
         for (let i = 0; i < size; i++) {
             if (!hasData(offset + i)) { return false; }
@@ -1260,6 +1528,7 @@ function getWebviewContent(
     const findHexInput = document.getElementById('findHexInput');
     const findInfo = document.getElementById('findInfo');
     const findModeSelect = document.getElementById('findMode');
+    const hexClipboardStatus = document.getElementById('hexClipboardStatus');
 
     unitSelect.value = String(unitSize);
     endianSelect.value = endian;
@@ -1544,6 +1813,7 @@ function getWebviewContent(
 
     function updateSelection() {
         document.querySelectorAll('.hex-cell.selected, .ascii-cell.selected').forEach(el => el.classList.remove('selected'));
+        hexClipboardStatus.textContent = '';
         if (selectedOffset < 0) {
             statusBar.textContent = S.statusHint;
             hexAnnounce.textContent = '';
@@ -1614,8 +1884,51 @@ function getWebviewContent(
         }
     }
 
-    // Click handler on hex cells
+    // 마우스 드래그로 범위를 선택한다. 누른 셀이 기준점이고, 끄는 동안 지나는 셀까지 넓힌다.
+    // 누를 때 이미 선택을 처리하므로 뒤따르는 click은 건너뛴다(드래그 범위를 한 칸으로 되돌리지 않게).
+    let dragSelecting = false;
+    let skipNextClick = false;
+    let dragLastOffset = -1;
+    hexBody.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) { return; }
+        const cell = e.target.closest('.hex-cell[data-offset]');
+        if (!cell) { return; }
+        e.preventDefault();
+        const off = parseInt(cell.dataset.offset, 10);
+        hexContainer.focus({ preventScroll: true });
+        selectUnit(off, e.shiftKey);
+        updateSelection();
+        dragSelecting = true;
+        skipNextClick = true;
+        dragLastOffset = off;
+    });
+    hexBody.addEventListener('mousemove', (e) => {
+        if (!dragSelecting) { return; }
+        if ((e.buttons & 1) === 0) {
+            dragSelecting = false;
+            return;
+        }
+        const cell = e.target.closest('.hex-cell[data-offset]');
+        if (!cell) { return; }
+        const off = parseInt(cell.dataset.offset, 10);
+        if (off === dragLastOffset) { return; }
+        dragLastOffset = off;
+        selectUnit(off, true);
+        updateSelection();
+    });
+    window.addEventListener('mouseup', () => {
+        dragSelecting = false;
+        // 표 밖에서 버튼을 놓으면 click이 오지 않는다. 뒤따르는 click은 mouseup 직후 같은
+        // 작업 안에 오므로, 그다음 차례에 건너뛰기 표시를 지운다.
+        setTimeout(() => { skipNextClick = false; }, 0);
+    });
+
+    // Click handler on hex cells (마우스 없이 click만 오는 보조 기술 경로)
     hexBody.addEventListener('click', (e) => {
+        if (skipNextClick) {
+            skipNextClick = false;
+            return;
+        }
         const cell = e.target.closest('.hex-cell[data-offset]');
         if (!cell) { return; }
         const off = parseInt(cell.dataset.offset, 10);
@@ -2109,23 +2422,98 @@ function getWebviewContent(
         return parts.join(' ');
     }
 
-    // Intercept copy to format properly
+    function getSelectionRange() {
+        if (selectedOffset < 0) { return undefined; }
+        const endOff = selectedEndOffset >= 0 ? selectedEndOffset : selectedOffset;
+        const start = Math.min(selectedOffset, endOff);
+        const end = Math.max(selectedOffset, endOff) + 1;
+        return end > DATA.length ? undefined : { start, end };
+    }
+
+    /** 원본 바이트로 옮길 범위. 빈 주소는 바이트로 표현할 수 없으므로 거부한다. */
+    function getCopyRange() {
+        const range = getSelectionRange();
+        if (!range) { return undefined; }
+        const { start, end } = range;
+        if (!hasDataRange(start, end - start)) {
+            hexClipboardStatus.textContent = S.hexClipboardGap;
+            return undefined;
+        }
+        return { start, end };
+    }
+
+    function buildRawHex(start, end) {
+        const parts = new Array(end - start);
+        for (let off = start; off < end; off++) {
+            parts[off - start] = DATA[off].toString(16).padStart(2, '0');
+        }
+        return parts.join('').toUpperCase();
+    }
+
+    const isEditable = element => element instanceof Element
+        && (element.matches('input, textarea') || element.isContentEditable);
+    const gridHasFocus = () => document.activeElement === hexContainer || hexContainer.contains(document.activeElement);
+
+    /** 화면에 보이는 Unit/Endian 값 텍스트와, 원본 바이트로 되살릴 수 있으면 그 Hex. */
+    function buildDisplayCopy(range) {
+        const { start, end } = range;
+        const canRestore = end - start <= CLIPBOARD_MAX_BYTES && hasDataRange(start, end - start);
+        return { text: buildCopyText(start, end), hex: canRestore ? buildRawHex(start, end) : undefined };
+    }
+
+    // Ctrl/Cmd+C는 화면에 보이는 값 그대로 복사한다. 빈 주소도 화면처럼 채움값으로 들어간다.
+    // 확장에는 무엇을 복사했는지 알려, 이 텍스트로 "클립보드에서 Hex 열기"를 하면 원본
+    // 바이트와 표시 단위·엔디안을 그대로 되살린다.
     document.addEventListener('copy', (e) => {
-        const target = e.target;
-        const active = document.activeElement;
-        const isEditable = element => element instanceof Element
-            && (element.matches('input, textarea') || element.isContentEditable);
-        if (isEditable(target) || isEditable(active)) { return; }
+        if (!e.clipboardData || isEditable(e.target) || isEditable(document.activeElement)) { return; }
         const sel = window.getSelection();
         if (sel && sel.toString().length > 0) { return; }
-        if (selectedOffset >= 0 && (active === hexContainer || hexContainer.contains(active))) {
-            const endOff = selectedEndOffset >= 0 ? selectedEndOffset : selectedOffset;
-            const minOff = Math.min(selectedOffset, endOff);
-            const maxOff = Math.max(selectedOffset, endOff) + 1;
-            e.clipboardData.setData('text/plain', buildCopyText(minOff, maxOff));
-            e.preventDefault();
+        if (!gridHasFocus()) { return; }
+        const range = getSelectionRange();
+        if (!range) { return; }
+        const copied = buildDisplayCopy(range);
+        e.clipboardData.setData('text/plain', copied.text);
+        e.preventDefault();
+        vscode.postMessage({ command: 'rememberHexCopy', text: copied.text, hex: copied.hex, unitSize, endian });
+    });
+
+    function copyDisplaySelection() {
+        const range = getSelectionRange();
+        if (!range) { return; }
+        const copied = buildDisplayCopy(range);
+        vscode.postMessage({ command: 'copyDisplayText', text: copied.text, hex: copied.hex, unitSize, endian });
+    }
+
+    function copyRawSelection() {
+        const range = getCopyRange();
+        if (!range) { return; }
+        const { start, end } = range;
+        if (end - start > CLIPBOARD_MAX_BYTES) {
+            hexClipboardStatus.textContent = S.hexClipboardTooLarge;
             return;
         }
+        vscode.postMessage({ command: 'copyHexBytes', hex: buildRawHex(start, end), unitSize, endian });
+    }
+
+    // 우클릭 메뉴는 VS Code가 그린다(webview/context). 메뉴 명령은 어느 웹뷰에서 열렸는지
+    // 알려 주지 않으므로 메뉴가 열리기 전에 확장에 알린다. 선택 밖의 바이트를 우클릭하면
+    // 일반 편집기처럼 그 바이트를 먼저 선택한다.
+    hexContainer.addEventListener('contextmenu', (e) => {
+        const cell = e.target instanceof Element ? e.target.closest('.hex-cell[data-offset]') : null;
+        if (cell) {
+            const off = parseInt(cell.dataset.offset, 10);
+            const range = getSelectionRange();
+            if (!range || off < range.start || off >= range.end) {
+                hexContainer.focus({ preventScroll: true });
+                selectUnit(off, false);
+                updateSelection();
+            }
+        }
+        vscode.postMessage({ command: 'hexContextMenu' });
+    });
+
+    document.getElementById('saveClipboardBinary')?.addEventListener('click', () => {
+        vscode.postMessage({ command: 'saveClipboardBinary' });
     });
 
     // Ctrl+F
@@ -2150,6 +2538,14 @@ function getWebviewContent(
 
     window.addEventListener('message', (event) => {
         const msg = event.data;
+        if (msg?.command === 'hexClipboardCopied') {
+            hexClipboardStatus.textContent = msg.mode === 'raw' ? S.hexClipboardCopied : S.hexClipboardDisplayCopied;
+            return;
+        }
+        if (msg?.command === 'hexCopyRequest') {
+            if (msg.mode === 'raw') { copyRawSelection(); } else { copyDisplaySelection(); }
+            return;
+        }
         if (
             !msg || msg.command !== 'hexData'
             || (EXPECTED_DELIVERY_ID !== null && msg.deliveryId !== EXPECTED_DELIVERY_ID)
@@ -2294,9 +2690,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         // cross-talk 이 생긴다.
         let handshake: HexWebviewHandshake;
         try {
-            // 이 웹뷰는 이 문서 전용이라 "아직 그것인가" 를 볼 필요가 없다.
-            // dispose 되면 VS Code 가 postMessage 를 조용히 무시한다.
-            handshake = renderWithReadyHandshake(this.context, webviewPanel.webview, fileName, result, () => true);
+            handshake = renderWithReadyHandshake(this.context, webviewPanel.webview, fileName, result, isCurrent);
         } catch (e: any) {
             const msg = t(
                 `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,

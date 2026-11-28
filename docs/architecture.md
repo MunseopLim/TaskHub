@@ -68,6 +68,7 @@ TaskHub/
 │   ├── hexParser.ts                   # Intel HEX / SREC / Binary 파서
 │   ├── hexConverter.ts                # Text ↔ Hex 실시간 변환 WebView와 패널 수명주기
 │   ├── hexConverterUtils.ts           # Text/Hex 변환·숫자 해석 순수 로직
+│   ├── hexClipboardText.ts            # 클립보드 Hex 텍스트(xxd·hexdump·메모리 창·C 배열) 해석 순수 로직
 │   ├── developerCalculator.ts         # 주소·크기 정수 수식·정렬 순수 계산기
 │   ├── hexBitwiseUtils.ts             # 고정 폭 정수 비트 수식 파서·계산 순수 로직
 │   ├── featureLauncher.ts             # Status Bar 기능 런처·그룹형 Quick Pick·최근 사용

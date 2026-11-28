@@ -3,7 +3,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { HEX_READY_FALLBACK_MS, HexEditorProvider, hexPanelRegistry, openHexViewerFile, validateHexViewerSelection } from '../hexViewer';
+import {
+    HEX_READY_FALLBACK_MS, HexEditorProvider, hexPanelRegistry, openHexFromClipboard, openHexViewerFile,
+    requestHexContextCopy, resetHexClipboardMemoryForTest, validateHexViewerSelection,
+} from '../hexViewer';
 
 /**
  * Hex Viewer의 **실제 진입점**을 실행하는 테스트 (0.6.47).
@@ -208,6 +211,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
     setup(() => {
         tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-hex-open-'));
         hexPanelRegistry.clear();
+        resetHexClipboardMemoryForTest();
         originalCreateWebviewPanel = vscode.window.createWebviewPanel;
         originalShowError = vscode.window.showErrorMessage;
         shownErrors.length = 0;
@@ -225,6 +229,138 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
             (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
             (vscode.window as any).showErrorMessage = originalShowError;
             try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
+    });
+
+    function stubQuickPick(choose: () => 'written' | 'little' | undefined) {
+        const original = vscode.window.showQuickPick;
+        const picks: Array<{ items: any[]; options: any }> = [];
+        (vscode.window as any).showQuickPick = async (items: any[], options: any) => {
+            picks.push({ items, options });
+            const order = choose();
+            return items.find(item => item.order === order);
+        };
+        return { picks, restore: () => { (vscode.window as any).showQuickPick = original; } };
+    }
+
+    test('클립보드의 표시값·dump 텍스트를 형식에 맞게 새 탭에 열고, 여러 바이트 값은 바이트 순서를 고르게 한다', async () => {
+        const created = installFakePanelFactory();
+        let choice: 'written' | 'little' | undefined = 'little';
+        const quickPick = stubQuickPick(() => choice);
+        const context = createContext();
+        try {
+            // TaskHub 밖에서 온 4바이트 Little Endian 표시값: 두 해석을 미리보기와 함께 묻는다.
+            await vscode.env.clipboard.writeText('20000008 08000101');
+            await openHexFromClipboard(context);
+            assert.strictEqual(quickPick.picks.length, 1);
+            assert.deepStrictEqual(quickPick.picks[0].items.map(item => item.description),
+                ['20 00 00 08 08 00 01 01', '08 00 00 20 01 01 00 08']);
+            assert.strictEqual(created.length, 1);
+            // 붙여넣은 글자와 같은 모양으로 보이게 4 Bytes Little Endian으로 연다.
+            assert.match(created[0].panel.webview.html, /const INITIAL_PREFERENCES = \{"unitSize":4,"endian":"little",/);
+            assert.match(created[0].panel.webview.html, /class="clipboard-note"/);
+            created[0].sendReady();
+            assert.deepStrictEqual(Array.from(created[0].posted[0].data), [0x08, 0, 0, 0x20, 1, 1, 0, 0x08]);
+
+            // 적힌 순서를 고르면 4 Bytes Big Endian으로 열어 역시 같은 글자로 보인다.
+            choice = 'written';
+            await openHexFromClipboard(context);
+            assert.match(created[1].panel.webview.html, /const INITIAL_PREFERENCES = \{"unitSize":4,"endian":"big",/);
+            created[1].sendReady();
+            assert.deepStrictEqual(Array.from(created[1].posted[0].data), [0x20, 0, 0, 0x08, 0x08, 0, 1, 1]);
+
+            choice = undefined;
+            await openHexFromClipboard(context);
+            assert.strictEqual(created.length, 2, '순서 선택을 취소하면 열지 않는다');
+
+            // xxd는 형식이 바이트 순서를 정하므로 묻지 않고, ASCII 열은 읽지 않는다.
+            await vscode.env.clipboard.writeText('00000000: 0800 0020 cafe  ... ....');
+            await openHexFromClipboard(context);
+            assert.strictEqual(quickPick.picks.length, 3);
+            assert.match(created[2].panel.webview.html, /const INITIAL_PREFERENCES = \{"unitSize":1,/);
+            created[2].sendReady();
+            assert.deepStrictEqual(Array.from(created[2].posted[0].data), [0x08, 0, 0, 0x20, 0xCA, 0xFE]);
+
+            await vscode.env.clipboard.writeText('08 00 G0');
+            await openHexFromClipboard(context);
+            assert.strictEqual(created.length, 3);
+            assert.strictEqual(shownErrors.length, 1);
+            assert.match(shownErrors[0], /7/, '오류 위치(글자)를 알려 준다');
+        } finally {
+            quickPick.restore();
+            created.forEach(fake => fake.dispose());
+        }
+    });
+
+    test('TaskHub에서 복사한 텍스트는 원본 바이트와 표시 형식을 되살리고, 새 탭은 바이너리로 저장한다', async () => {
+        const created = installFakePanelFactory();
+        const quickPick = stubQuickPick(() => 'written');
+        const sourcePath = path.join(tempDir, 'source.bin');
+        const outputPath = path.join(tempDir, 'pasted.bin');
+        await fs.promises.writeFile(sourcePath, Buffer.from([0x08, 0, 0, 0x20]));
+        await fs.promises.writeFile(outputPath, Buffer.from('previous'));
+        const originalShowSaveDialog = vscode.window.showSaveDialog;
+        let saveUri = vscode.Uri.from({ scheme: 'untitled', path: outputPath });
+        let saveDialogs = 0;
+        (vscode.window as any).showSaveDialog = async () => {
+            saveDialogs++;
+            return saveUri;
+        };
+        const context = createContext();
+        try {
+            assert.strictEqual(await openHexViewerFile(context, sourcePath), true);
+            const source = created[0];
+
+            // Cmd/Ctrl+C: 웹뷰가 클립보드에 쓴 텍스트와 원본 바이트를 알려 준다.
+            await vscode.env.clipboard.writeText('20000008');
+            await source.sendMessageAsync({ command: 'rememberHexCopy', text: '20000008', hex: '08000020', unitSize: 4, endian: 'little' });
+            await openHexFromClipboard(context);
+            assert.strictEqual(quickPick.picks.length, 0, 'TaskHub에서 복사한 값은 순서를 다시 묻지 않는다');
+            assert.match(created[1].panel.webview.html, /const INITIAL_PREFERENCES = \{"unitSize":4,"endian":"little",/);
+            created[1].sendReady();
+            assert.deepStrictEqual(Array.from(created[1].posted[0].data), [0x08, 0, 0, 0x20]);
+
+            // 우클릭 메뉴의 원본 바이트 복사: 메뉴를 연 웹뷰에 요청하고, 파일 순서 텍스트를 쓴다.
+            await source.sendMessageAsync({ command: 'hexContextMenu' });
+            requestHexContextCopy('raw');
+            assert.deepStrictEqual(source.posted.at(-1), { command: 'hexCopyRequest', mode: 'raw' });
+            await source.sendMessageAsync({ command: 'copyHexBytes', hex: '08000020', unitSize: 4, endian: 'big' });
+            assert.strictEqual(await vscode.env.clipboard.readText(), '08 00 00 20');
+            assert.deepStrictEqual(source.posted.at(-1), { command: 'hexClipboardCopied', mode: 'raw' });
+            await openHexFromClipboard(context);
+            assert.match(created[2].panel.webview.html, /const INITIAL_PREFERENCES = \{"unitSize":4,"endian":"big",/);
+
+            // 빈 주소가 섞여 원본 바이트로 되살릴 수 없는 표시값은 기억하지 않고 텍스트로 해석한다.
+            await source.sendMessageAsync({ command: 'copyDisplayText', text: '20000008', unitSize: 4, endian: 'little' });
+            assert.strictEqual(await vscode.env.clipboard.readText(), '20000008');
+            await openHexFromClipboard(context);
+            assert.strictEqual(quickPick.picks.length, 1);
+
+            // 다른 곳에서 클립보드를 바꾸면 기억한 내용을 쓰지 않는다.
+            await source.sendMessageAsync({ command: 'rememberHexCopy', text: '20000008', hex: '08000020', unitSize: 4, endian: 'little' });
+            await vscode.env.clipboard.writeText('20000008 ');
+            await openHexFromClipboard(context);
+            assert.strictEqual(quickPick.picks.length, 1, '앞뒤 공백만 다른 같은 텍스트는 같은 복사로 본다');
+            await vscode.env.clipboard.writeText('20000009');
+            await openHexFromClipboard(context);
+            assert.strictEqual(quickPick.picks.length, 2);
+
+            // 원본 파일 탭에는 저장 기능이 없다.
+            await source.sendMessageAsync({ command: 'saveClipboardBinary' });
+            assert.strictEqual(saveDialogs, 0);
+            const preview = created[1];
+            await preview.sendMessageAsync({ command: 'saveClipboardBinary' });
+            assert.deepStrictEqual(await fs.promises.readFile(outputPath), Buffer.from('previous'), '로컬 파일이 아니면 저장하지 않는다');
+            assert.strictEqual(shownErrors.length, 1);
+            // 저장 대화상자가 덮어쓰기를 확인했으므로 기존 파일을 바꾼다.
+            saveUri = vscode.Uri.file(outputPath);
+            await preview.sendMessageAsync({ command: 'saveClipboardBinary' });
+            assert.deepStrictEqual(await fs.promises.readFile(outputPath), Buffer.from([0x08, 0, 0, 0x20]));
+            assert.strictEqual(shownErrors.length, 1);
+        } finally {
+            (vscode.window as any).showSaveDialog = originalShowSaveDialog;
+            quickPick.restore();
+            created.forEach(fake => fake.dispose());
         }
     });
 

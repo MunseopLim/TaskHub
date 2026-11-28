@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -794,6 +794,21 @@
         "category": "TaskHub"
       },
       {
+        "command": "taskhub.openHexFromClipboard",
+        "title": "%cmd.openHexFromClipboard%",
+        "category": "TaskHub"
+      },
+      {
+        "command": "taskhub.hexViewer.copyDisplay",
+        "title": "%cmd.hexViewer.copyDisplay%",
+        "category": "TaskHub"
+      },
+      {
+        "command": "taskhub.hexViewer.copyRaw",
+        "title": "%cmd.hexViewer.copyRaw%",
+        "category": "TaskHub"
+      },
+      {
         "command": "taskhub.showDeveloperCalculator",
         "title": "%cmd.showDeveloperCalculator%",
         "category": "TaskHub"
@@ -889,6 +904,14 @@
     ],
     "menus": {
       "commandPalette": [
+        {
+          "command": "taskhub.hexViewer.copyDisplay",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.hexViewer.copyRaw",
+          "when": "false"
+        },
         {
           "command": "taskhub.openActionDefinition",
           "when": "false"
@@ -1052,6 +1075,23 @@
         {
           "command": "taskhub.aiScheduler.reset",
           "when": "taskhub.aiScheduler.enabled"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "taskhub.hexViewer.copyDisplay",
+          "when": "(webviewId == 'taskhub.hexViewer' || webviewId == 'taskhub.hexEditor') && webviewSection == 'hexGrid'",
+          "group": "9_cutcopypaste@1"
+        },
+        {
+          "command": "taskhub.hexViewer.copyRaw",
+          "when": "(webviewId == 'taskhub.hexViewer' || webviewId == 'taskhub.hexEditor') && webviewSection == 'hexGrid'",
+          "group": "9_cutcopypaste@2"
+        },
+        {
+          "command": "taskhub.openHexFromClipboard",
+          "when": "(webviewId == 'taskhub.hexViewer' || webviewId == 'taskhub.hexEditor') && webviewSection == 'hexGrid'",
+          "group": "9_cutcopypaste@3"
         }
       ],
       "view/title": [
